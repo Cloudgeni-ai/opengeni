@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { TranscriptionServiceError } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
@@ -266,6 +266,80 @@ describe("Codex realtime on the shared core", () => {
     return coreLease();
   }
   const rtcRequest = { sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n", version: "v3" as const };
+
+  test("an expired configuration is used while it refreshes; a refusal retries once with the new one", async () => {
+    const { released } = realtimeFixture();
+    const statsig = (model: string) =>
+      Response.json({
+        statsigPayload: JSON.stringify({
+          dynamic_configs: { "3566525122": { value: { model, architecture: "voice" } } },
+        }),
+      });
+    let remoteModel = "live-1";
+    let acceptedModel = "live-1";
+    const events: string[] = [];
+    const timings: string[] = [];
+    const configRead = deferred<void>();
+    let hold: Promise<void> | null = null;
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes("statsig")) {
+        events.push(`config:${remoteModel}`);
+        const model = remoteModel;
+        if (hold) await hold;
+        return statsig(model);
+      }
+      const model = JSON.parse(String(init?.body)).session.model as string;
+      events.push(`call:${model}`);
+      if (model !== acceptedModel) return Response.json({ detail: "bad model" }, { status: 400 });
+      return new Response(RTC_ANSWER, {
+        status: 201,
+        headers: { location: "/realtime/calls/rtc_fake" },
+      });
+    };
+    const broker = buildSessionCodexRealtimeBroker(
+      db,
+      settings,
+      { accountId: ACCOUNT, workspaceId: WS, sessionId: SESSION },
+      fetchImpl as never,
+      { onTiming: (phase) => timings.push(phase) },
+    );
+    try {
+      setSystemTime(new Date("2026-01-01T00:00:00Z"));
+      await broker({ request: rtcRequest });
+      expect(events).toEqual(["config:live-1", "call:live-1"]);
+
+      // Past the freshness window and unchanged: no wait for configuration.
+      setSystemTime(new Date("2026-01-01T00:10:00Z"));
+      events.length = 0;
+      hold = configRead.promise;
+      const second = broker({ request: rtcRequest });
+      await Bun.sleep(5);
+      expect(events).toEqual(["config:live-1", "call:live-1"]);
+      expect(released.mock.calls).toHaveLength(1);
+      hold = null;
+      configRead.resolve();
+      expect(await second).toMatchObject({ sdp: RTC_ANSWER });
+      expect(released.mock.calls).toHaveLength(2);
+      expect(timings).toContain("config_refresh");
+
+      // The provider rotated: the stale call is refused, the refreshed one is placed.
+      setSystemTime(new Date("2026-01-01T00:20:00Z"));
+      remoteModel = "live-2";
+      acceptedModel = "live-2";
+      events.length = 0;
+      expect(await broker({ request: rtcRequest })).toMatchObject({ sdp: RTC_ANSWER });
+      expect(events.toSorted()).toEqual(["call:live-1", "call:live-2", "config:live-2"]);
+      expect(events.at(-1)).toBe("call:live-2");
+      expect(released.mock.calls).toHaveLength(3);
+
+      // The rotated configuration is now cached and fresh.
+      events.length = 0;
+      await broker({ request: rtcRequest });
+      expect(events).toEqual(["call:live-2"]);
+    } finally {
+      setSystemTime();
+    }
+  });
 
   test("configuration and call creation reserve separately and hold the final SDP body", async () => {
     const { reserved, settled, released } = realtimeFixture();

@@ -34,7 +34,7 @@ describe("realtime provider configuration cache", () => {
         throw Error("unauthorized");
       }),
     ).rejects.toThrow("unauthorized");
-    expect(await cache.get("a", async () => config)).toEqual(config);
+    expect((await cache.get("a", async () => config)).value).toEqual(config);
   });
 
   test("keeps a positively observed protocol fallback and bounds memory", async () => {
@@ -42,9 +42,11 @@ describe("realtime provider configuration cache", () => {
     const fallback = { ...config, source: "fallback" as const, advertisedVersion: "v4" };
     await cache.get("a", async () => fallback);
     expect(
-      await cache.get("a", async () => {
-        throw Error("cache miss");
-      }),
+      (
+        await cache.get("a", async () => {
+          throw Error("cache miss");
+        })
+      ).value,
     ).toEqual(fallback);
     await cache.get("b", async () => config);
     await expect(
@@ -64,13 +66,42 @@ describe("realtime provider configuration cache", () => {
           rejectFirst = reject;
         }),
     );
-    expect(await cache.get("a", async () => config)).toEqual(config);
+    expect((await cache.get("a", async () => config)).value).toEqual(config);
     rejectFirst(Error("cancelled"));
     await expect(first).rejects.toThrow("cancelled");
     expect(
-      await cache.get("a", async () => {
-        throw Error("cache miss");
-      }),
+      (
+        await cache.get("a", async () => {
+          throw Error("cache miss");
+        })
+      ).value,
     ).toEqual(config);
+  });
+
+  test("serves an expired entry while the caller's own read refreshes it, within a bound", async () => {
+    let now = 0;
+    const cache = createRealtimeProviderConfigCache({ now: () => now, ttlMs: 100, staleMs: 1_000 });
+    const rotated = { ...config, model: "live-2" };
+    await cache.get("a", async () => config);
+    now = 150;
+    const read = await cache.get("a", async () => rotated);
+    expect(read.value).toEqual(config);
+    expect(await read.refresh).toEqual(rotated);
+    expect(await cache.get("a", async () => config)).toEqual({ value: rotated });
+
+    // A failed or fallback-only refresh keeps the last good configuration.
+    now = 300;
+    const failed = await cache.get("a", async () => {
+      throw Error("network");
+    });
+    expect(failed.value).toEqual(rotated);
+    expect(await failed.refresh).toBeNull();
+    const fallback = await cache.get("a", async () => ({ ...config, source: "fallback" }));
+    expect(await fallback.refresh).toBeNull();
+    expect((await cache.get("a", async () => rotated)).value).toEqual(rotated);
+
+    // Past the stale bound the read waits for a fresh configuration again.
+    now = 1_500;
+    expect(await cache.get("a", async () => config)).toEqual({ value: config });
   });
 });
