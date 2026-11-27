@@ -27,6 +27,7 @@ import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
   INTERACTION_ACTION_DEADLINE_MAX_MS,
+  INTERACTION_REQUEST_TIMEOUT_MS,
   browserActionDeadlineMs,
   computerActionDeadlineMs,
   BrowserActionCommand,
@@ -837,7 +838,7 @@ export class BrowserControlClient {
     this.session = session;
     this.adminToken = requireToken(options.adminToken, "browser controller admin token");
     this.port = boundedPort(options.port ?? BROWSER_CONTROL_PORT);
-    this.timeoutMs = boundedTimeout(options.timeoutMs ?? 60_000);
+    this.timeoutMs = boundedTimeout(options.timeoutMs ?? INTERACTION_REQUEST_TIMEOUT_MS);
     this.nativeAuthority = options.nativeAuthority;
   }
 

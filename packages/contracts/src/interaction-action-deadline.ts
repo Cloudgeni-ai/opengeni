@@ -31,9 +31,13 @@ export const BROWSER_ANIMATION_SETTLE_MS = 750;
 /** A named (non-ref) computer locator waits this long to appear and enable. */
 export const COMPUTER_LOCATOR_WAIT_MS = 10_000;
 
-/** No action request gets less than the transport's historical default, so a
- * single action keeps exactly the budget it always had. */
-export const INTERACTION_ACTION_DEADLINE_FLOOR_MS = 60_000;
+/** How long the API waits for a controller request that has no deadline of
+ * its own, such as a page read (an observation, a tab's state, a DOM read).
+ * The controller keeps such a read within this time itself. */
+export const INTERACTION_REQUEST_TIMEOUT_MS = 60_000;
+/** No action request gets less than the transport's default, so a single
+ * action keeps exactly the budget it always had. */
+export const INTERACTION_ACTION_DEADLINE_FLOOR_MS = INTERACTION_REQUEST_TIMEOUT_MS;
 /** Fixed allowance per request for reading the target before the actions and
  * observing it for the receipt, which run once per request whatever its length. */
 export const INTERACTION_ACTION_DEADLINE_MARGIN_MS = 30_000;
