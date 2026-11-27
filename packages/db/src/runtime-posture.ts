@@ -78,7 +78,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the inbox notice sync for a blocked automation with no chat (1562), and
  * the admins' inbox notice when a member asks for a connection (1599), and
  * the deployment-wide checks for connections sharing one provider OAuth
- * grant (1611).
+ * grant (1611, granted with the Google family pinned by 1680).
  * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -184,9 +184,6 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * is granted, a Slack callback keeps 1538's per-workspace probe.
  * 1599 withholds the admins' notice for a member's connection request; until
  * it is granted, "Ask an admin" copies a link to the step instead.
- * 1611 withholds the shared OAuth grant checks; until they are granted, a
- * disconnect never revokes at the provider and a refused refresh checks no
- * other connection.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -204,8 +201,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "account_deletion_user_v1(text, jsonb)",
   "account_deletion_work_v1(text, jsonb)",
   "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
-  "oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])",
-  "oauth_grant_reauth_siblings_v1(uuid, text, text[], text[], text, text[], text[])",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**

@@ -4408,8 +4408,6 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "account_deletion_user_v1(text, jsonb)",
       "account_deletion_work_v1(text, jsonb)",
       "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
-      "oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])",
-      "oauth_grant_reauth_siblings_v1(uuid, text, text[], text[], text, text[], text[])",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
