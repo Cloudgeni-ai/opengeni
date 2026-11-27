@@ -10028,6 +10028,11 @@ export const CodexRealtimeWebrtcRequest = /* @__PURE__ */ defineSchema(() =>
     browserActivation: z.literal("required").optional(),
     sdp: primitives.nonEmptyString.max(1024 * 1024),
     version: CodexRealtimeWebrtcVersion,
+    /**
+     * @deprecated Accepted from clients of earlier releases and ignored: the
+     * voice gets the session agent's own identity and instructions from the
+     * server, on every provider path.
+     */
     instructions: z.string().max(32_768).optional(),
     voice: CodexRealtimeVoice.optional(),
   }).strict(),

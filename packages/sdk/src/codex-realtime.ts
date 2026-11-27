@@ -50,6 +50,11 @@ export type StartCodexRealtimeWebrtcOptions = {
   expectedConnectionEpoch: number;
   rotate: boolean;
   signal?: AbortSignal | undefined;
+  /**
+   * @deprecated Ignored and no longer sent. The voice gets the session
+   * agent's own identity and instructions from the server; put voice guidance
+   * in the session or agent instructions instead.
+   */
   instructions?: string | undefined;
   voice?: CodexRealtimeVoice | undefined;
   /** Injectable browser seams make complete SDP negotiation deterministic in tests. */
@@ -292,7 +297,6 @@ export async function startCodexRealtimeWebrtc(
         browserActivation: "required",
         sdp: localSdp,
         version: "v3",
-        ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
         ...(options.voice === undefined ? {} : { voice: options.voice }),
       },
       { signal: options.signal },

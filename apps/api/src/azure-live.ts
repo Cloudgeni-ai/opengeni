@@ -16,7 +16,7 @@ export function azureLiveConfigured(settings: Settings): boolean {
 /** Server-authenticated SDP exchange. Never returns provider credentials. */
 export async function brokerAzureLive(input: {
   settings: Settings;
-  request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "instructions" | "voice">;
+  request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "voice">;
   context: SessionRealtimeContext;
   signal?: AbortSignal | undefined;
   fetch?: typeof fetch;
@@ -33,10 +33,7 @@ export async function brokerAzureLive(input: {
       "Hosted voice is selected by deployment configuration",
     );
   const instructions = realtimeInstructionsWithPriorConversation(
-    openGeniRealtimeInstructions({
-      agent: input.context.agent,
-      additional: input.request.instructions,
-    }),
+    openGeniRealtimeInstructions({ agent: input.context.agent }),
     input.context.initialItems,
   );
   const signal = AbortSignal.any([
@@ -91,7 +88,7 @@ export function buildSessionAzureLiveBroker(
   fetchImpl?: typeof fetch,
 ) {
   return async (input: {
-    request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "instructions" | "voice">;
+    request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "voice">;
     signal?: AbortSignal | undefined;
   }) => {
     return brokerAzureLive({

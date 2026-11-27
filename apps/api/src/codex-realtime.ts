@@ -107,7 +107,7 @@ export type CodexRealtimeProviderAnswer = Pick<
 
 export type CodexRealtimeBrokerInput = {
   sessionId: string;
-  request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "version" | "instructions" | "voice">;
+  request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "version" | "voice">;
   signal?: AbortSignal | undefined;
 };
 
@@ -211,8 +211,6 @@ Avoid repetitive confirmation, filler, re-acknowledgement, and obvious play-by-p
  * backend. About 4,000 tokens, re-read (cached) by every voice response.
  */
 export const REALTIME_AGENT_DEFINITION_MAX_BYTES = 16_384;
-/** All of the voice's instructions, before any prior conversation is appended. */
-const REALTIME_INSTRUCTIONS_MAX_BYTES = 32_768;
 const REALTIME_AGENT_DEFINITION_TRUNCATED = "\n…[rest omitted]";
 
 const REALTIME_AGENT_DEFINITION_HEADING = `## The agent you speak for
@@ -222,25 +220,16 @@ You are the voice of the agent defined below; the backend is the same agent doin
 /**
  * The voice's instructions: Opengeni's realtime rules, then the text that
  * defines the session's agent (the same identity and instructions its text
- * agent gets), then any host guidance. Each part is constant for a session's
- * call, so a provider never sees earlier text change.
+ * agent gets). Both come from the server, on every provider path; a client
+ * never adds to them. Each part is constant for a call, so a provider never
+ * sees earlier text change.
  */
 export function openGeniRealtimeInstructions(
-  input: { agent?: RealtimeAgentDefinition | undefined; additional?: string | undefined } = {},
+  input: { agent?: RealtimeAgentDefinition | undefined } = {},
 ): string {
-  let instructions = OPENGENI_REALTIME_BASE_INSTRUCTIONS;
   const agent = realtimeAgentDefinitionText(input.agent);
-  if (agent) {
-    instructions += `\n\n${REALTIME_AGENT_DEFINITION_HEADING}\n\n<agent_definition>\n${agent}\n</agent_definition>`;
-  }
-  const additional = input.additional?.trim();
-  if (additional) {
-    instructions +=
-      "\n\n## Additional realtime guidance\nFollow the guidance below for this conversation unless it conflicts with the operating, delegation, safety, permission, or context-handling rules above.\n";
-    const remaining = REALTIME_INSTRUCTIONS_MAX_BYTES - Buffer.byteLength(instructions, "utf8");
-    instructions += takeUtf8Head(additional, Math.max(0, remaining));
-  }
-  return instructions;
+  if (!agent) return OPENGENI_REALTIME_BASE_INSTRUCTIONS;
+  return `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\n${REALTIME_AGENT_DEFINITION_HEADING}\n\n<agent_definition>\n${agent}\n</agent_definition>`;
 }
 
 function realtimeAgentDefinitionText(agent: RealtimeAgentDefinition | undefined): string {
@@ -332,7 +321,7 @@ export async function brokerSessionCodexRealtime(
     ...input.request,
     sessionId: input.sessionId,
     initialItems,
-    instructions: openGeniRealtimeInstructions({ agent, additional: input.request.instructions }),
+    instructions: openGeniRealtimeInstructions({ agent }),
   };
   try {
     if (prepared.authenticationError) throw prepared.authenticationError;

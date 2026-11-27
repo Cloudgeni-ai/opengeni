@@ -2118,6 +2118,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         expectedConnectionEpoch,
         rotate,
         browserActivation,
+        // Deprecated: the voice's instructions come from the session, never the client.
+        instructions: _clientInstructions,
         ...providerRequest
       } = parsed;
       const claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>

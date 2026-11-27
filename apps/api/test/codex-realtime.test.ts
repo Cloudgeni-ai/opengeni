@@ -222,7 +222,7 @@ describe("session Codex realtime broker", () => {
       ...request,
       sessionId: "session-one",
       initialItems: [],
-      instructions: openGeniRealtimeInstructions({ additional: "Current session context" }),
+      instructions: openGeniRealtimeInstructions(),
     });
     expect(result).toEqual(response);
     expect(JSON.stringify(result)).not.toContain("credential-pin");
@@ -311,13 +311,13 @@ describe("session Codex realtime broker", () => {
         ...request,
         sessionId: "session-one",
         initialItems: history,
-        instructions: openGeniRealtimeInstructions({ additional: "Current session context" }),
+        instructions: openGeniRealtimeInstructions(),
       },
       {
         ...request,
         sessionId: "session-one",
         initialItems: history,
-        instructions: openGeniRealtimeInstructions({ additional: "Current session context" }),
+        instructions: openGeniRealtimeInstructions(),
       },
     ]);
   });
@@ -394,15 +394,23 @@ describe("session Codex realtime broker", () => {
     expect(captured?.instructions).not.toContain("Steer with");
   });
 
-  test("bounds additional realtime guidance and keeps server rules authoritative", () => {
-    const instructions = openGeniRealtimeInstructions({ additional: "🙂".repeat(20_000) });
-    expect(Buffer.byteLength(instructions, "utf8")).toBeLessThanOrEqual(32_768);
-    expect(instructions).toStartWith(OPENGENI_REALTIME_BASE_INSTRUCTIONS);
-    expect(instructions).toContain("unless it conflicts with the operating, delegation, safety");
-    expect(instructions).not.toContain("�");
+  test("never takes instructions from the client", async () => {
+    let captured: CodexRealtimeCallInput | null = null;
+    await brokerSessionCodexRealtime(
+      dependencies({
+        createCall: async (_auth, input) => {
+          captured = input;
+          return response;
+        },
+      }),
+      // A client from an earlier release still sends its own instructions.
+      { sessionId: "session-one", request },
+    );
+    expect(captured!.instructions).toBe(OPENGENI_REALTIME_BASE_INSTRUCTIONS);
+    expect(captured!.instructions).not.toContain("Current session context");
   });
 
-  test("speaks for the session's own agent, after the shared rules and before host guidance", async () => {
+  test("speaks for the session's own agent, after the shared rules", async () => {
     let captured: CodexRealtimeCallInput | null = null;
     await brokerSessionCodexRealtime(
       dependencies({
@@ -429,10 +437,8 @@ describe("session Codex realtime broker", () => {
     expect(instructions).toContain(
       "<agent_definition>\nYou are Ada, the support agent for Example Tours.\n\nHelp travellers with their bookings.\n\nAnswer in French.\n</agent_definition>",
     );
-    expect(instructions.indexOf("</agent_definition>")).toBeLessThan(
-      instructions.indexOf("## Additional realtime guidance"),
-    );
-    expect(instructions).toEndWith("Current session context");
+    expect(instructions).toEndWith("\n</agent_definition>");
+    expect(instructions).not.toContain("Current session context");
   });
 
   test("without an agent definition the voice gets the shared rules alone", () => {
@@ -441,10 +447,9 @@ describe("session Codex realtime broker", () => {
     );
   });
 
-  test("keeps the head of a long agent definition and bounds all instructions", () => {
+  test("keeps the head of a long agent definition", () => {
     const instructions = openGeniRealtimeInstructions({
       agent: { identity: "You are Ada.", sessionInstructions: "ø".repeat(30_000) },
-      additional: "Host guidance",
     });
     const definition = instructions.slice(
       instructions.indexOf("<agent_definition>\n") + "<agent_definition>\n".length,
@@ -457,7 +462,6 @@ describe("session Codex realtime broker", () => {
     );
     expect(definition).not.toContain("�");
     expect(Buffer.byteLength(instructions, "utf8")).toBeLessThanOrEqual(32_768);
-    expect(instructions).toEndWith("Host guidance");
   });
 
   test("never presents as the provider's product and delegates clearly heard requests", () => {
