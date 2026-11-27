@@ -53,7 +53,6 @@ beforeAll(async () => {
   const fixture = await acquireRestrictedRuntimeTestDatabase("account-deletion-api");
   if (!fixture) throw new Error("Account deletion integration requires PostgreSQL");
   shared = fixture;
-  await shared.admin`GRANT EXECUTE ON FUNCTION opengeni_private.account_deletion_user_v1(text,jsonb), opengeni_private.account_deletion_work_v1(text,jsonb) TO opengeni_app`;
   client = createDb(shared.appUrl, { rlsStrategy: "force", searchPath: shared.schema });
 }, 180_000);
 
