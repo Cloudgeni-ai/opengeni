@@ -2219,7 +2219,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
       const broker =
         claim.mode.model === AZURE_LIVE_MODEL_ID
-          ? buildSessionAzureLiveBroker(db, settings, workspaceId, sessionId, deps.codexFetch)
+          ? buildSessionAzureLiveBroker(
+              db,
+              settings,
+              { accountId: grant.accountId, workspaceId, sessionId },
+              deps.codexFetch,
+            )
           : buildSessionCodexRealtimeBroker(
               db,
               settings,

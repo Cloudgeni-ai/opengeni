@@ -1,14 +1,11 @@
 import type { Settings } from "@opengeni/config";
 import type { CodexRealtimeWebrtcRequest } from "@opengeni/contracts";
-import {
-  getActiveSessionHistoryItems,
-  getSessionRealtimeContinuityEntries,
-  type Database,
-} from "@opengeni/db";
+import type { Database } from "@opengeni/db";
 import { CodexRealtimeBrokerError, openGeniRealtimeInstructions } from "./codex-realtime";
 import {
-  projectSessionRealtimeInitialItems,
+  loadSessionRealtimeContext,
   realtimeInstructionsWithPriorConversation,
+  type SessionRealtimeContext,
 } from "./session-realtime-context";
 
 export const AZURE_LIVE_MODEL_ID = "opengeni-azure/gpt-live-1" as const;
@@ -20,7 +17,7 @@ export function azureLiveConfigured(settings: Settings): boolean {
 export async function brokerAzureLive(input: {
   settings: Settings;
   request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "instructions" | "voice">;
-  initialItems: Array<{ role: string; text: string }>;
+  context: SessionRealtimeContext;
   signal?: AbortSignal | undefined;
   fetch?: typeof fetch;
 }) {
@@ -36,8 +33,11 @@ export async function brokerAzureLive(input: {
       "Hosted voice is selected by deployment configuration",
     );
   const instructions = realtimeInstructionsWithPriorConversation(
-    openGeniRealtimeInstructions(input.request.instructions),
-    input.initialItems,
+    openGeniRealtimeInstructions({
+      agent: input.context.agent,
+      additional: input.request.instructions,
+    }),
+    input.context.initialItems,
   );
   const signal = AbortSignal.any([
     AbortSignal.timeout(20_000),
@@ -87,22 +87,17 @@ export async function brokerAzureLive(input: {
 export function buildSessionAzureLiveBroker(
   db: Database,
   settings: Settings,
-  workspaceId: string,
-  sessionId: string,
+  scope: { accountId: string; workspaceId: string; sessionId: string },
   fetchImpl?: typeof fetch,
 ) {
   return async (input: {
     request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "instructions" | "voice">;
     signal?: AbortSignal | undefined;
   }) => {
-    const [history, continuity] = await Promise.all([
-      getActiveSessionHistoryItems(db, workspaceId, sessionId),
-      getSessionRealtimeContinuityEntries(db, workspaceId, sessionId),
-    ]);
     return brokerAzureLive({
       settings,
       ...input,
-      initialItems: projectSessionRealtimeInitialItems(history, continuity),
+      context: await loadSessionRealtimeContext(db, scope),
       ...(fetchImpl ? { fetch: fetchImpl } : {}),
     });
   };

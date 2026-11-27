@@ -791,6 +791,13 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
 
   test("mints one single-use Gateway token behind the same owner and activation fences", async () => {
     const value = await fixture();
+    // The voice speaks for the session's own agent.
+    await withWorkspaceRls(client.db, value.workspaceId, (scopedDb) =>
+      scopedDb
+        .update(schema.sessions)
+        .set({ instructions: "You are Ada, the travel desk assistant for Example Tours." })
+        .where(eq(schema.sessions.id, value.sessionId)),
+    );
     const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
     const proof = {
       operationId: crypto.randomUUID(),
@@ -849,6 +856,12 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     );
     expect(connected.initialItems).toBeArray();
     expect(connected.instructions).toContain("realtime conversational interface");
+    expect(connected.instructions).toContain(
+      "## The agent you speak for\n\nYou are the voice of the agent defined below;",
+    );
+    expect(connected.instructions).toContain(
+      "<agent_definition>\nYou are Ada, the travel desk assistant for Example Tours.\n</agent_definition>",
+    );
     // The server now builds the session update; it must stay byte-identical to
     // the event clients sent before, so the provider sees the same prefix.
     expect(JSON.stringify(connected.sessionUpdate)).toBe(

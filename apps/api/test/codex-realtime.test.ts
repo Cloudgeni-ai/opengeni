@@ -8,6 +8,7 @@ import {
 import {
   CodexRealtimeBrokerError,
   OPENGENI_REALTIME_BASE_INSTRUCTIONS,
+  REALTIME_AGENT_DEFINITION_MAX_BYTES,
   brokerSessionCodexRealtime,
   codexRealtimeFailureLogAttributes,
   openGeniRealtimeInstructions,
@@ -52,7 +53,7 @@ function dependencies(
       activeCredentialId: "credential-active",
       connectedCredentialIds: new Set(["credential-pin", "credential-active"]),
     }),
-    loadInitialItems: async () => [],
+    loadSessionContext: async () => ({ initialItems: [], agent: {} }),
     tokenResolver: () => ({
       getToken: async () => tokenSnapshot(),
       refresh: async () => tokenSnapshot(),
@@ -68,7 +69,7 @@ describe("session Codex realtime broker", () => {
     let complete = false;
     const pending = brokerSessionCodexRealtime(
       dependencies({
-        loadInitialItems: async () => {
+        loadSessionContext: async () => {
           throw Error("history failed");
         },
         loadProviderConfig: async () => {
@@ -132,9 +133,9 @@ describe("session Codex realtime broker", () => {
     const providerConfig = { model: "live", architecture: "voice", version: "v3" } as const;
     const call = brokerSessionCodexRealtime(
       dependencies({
-        loadInitialItems: () => {
+        loadSessionContext: async () => {
           order.push("history");
-          return history;
+          return { initialItems: await history, agent: {} };
         },
         tokenResolver: () => ({
           getToken: async () => {
@@ -221,7 +222,7 @@ describe("session Codex realtime broker", () => {
       ...request,
       sessionId: "session-one",
       initialItems: [],
-      instructions: openGeniRealtimeInstructions("Current session context"),
+      instructions: openGeniRealtimeInstructions({ additional: "Current session context" }),
     });
     expect(result).toEqual(response);
     expect(JSON.stringify(result)).not.toContain("credential-pin");
@@ -286,9 +287,9 @@ describe("session Codex realtime broker", () => {
     const calls: CodexRealtimeCallInput[] = [];
     await brokerSessionCodexRealtime(
       dependencies({
-        loadInitialItems: async () => {
+        loadSessionContext: async () => {
           historyReads += 1;
-          return history;
+          return { initialItems: history, agent: {} };
         },
         tokenResolver: () => ({
           getToken: async () => tokenSnapshot(BEARER_STALE),
@@ -310,13 +311,13 @@ describe("session Codex realtime broker", () => {
         ...request,
         sessionId: "session-one",
         initialItems: history,
-        instructions: openGeniRealtimeInstructions("Current session context"),
+        instructions: openGeniRealtimeInstructions({ additional: "Current session context" }),
       },
       {
         ...request,
         sessionId: "session-one",
         initialItems: history,
-        instructions: openGeniRealtimeInstructions("Current session context"),
+        instructions: openGeniRealtimeInstructions({ additional: "Current session context" }),
       },
     ]);
   });
@@ -394,11 +395,82 @@ describe("session Codex realtime broker", () => {
   });
 
   test("bounds additional realtime guidance and keeps server rules authoritative", () => {
-    const instructions = openGeniRealtimeInstructions("🙂".repeat(20_000));
+    const instructions = openGeniRealtimeInstructions({ additional: "🙂".repeat(20_000) });
     expect(Buffer.byteLength(instructions, "utf8")).toBeLessThanOrEqual(32_768);
     expect(instructions).toStartWith(OPENGENI_REALTIME_BASE_INSTRUCTIONS);
     expect(instructions).toContain("unless it conflicts with the operating, delegation, safety");
     expect(instructions).not.toContain("�");
+  });
+
+  test("speaks for the session's own agent, after the shared rules and before host guidance", async () => {
+    let captured: CodexRealtimeCallInput | null = null;
+    await brokerSessionCodexRealtime(
+      dependencies({
+        loadSessionContext: async () => ({
+          initialItems: [],
+          agent: {
+            identity: "You are Ada, the support agent for Example Tours.",
+            agentInstructions: "Help travellers with their bookings.",
+            sessionInstructions: "Answer in French.",
+          },
+        }),
+        createCall: async (_auth, input) => {
+          captured = input;
+          return response;
+        },
+      }),
+      { sessionId: "session-one", request },
+    );
+    const instructions = captured!.instructions!;
+    // The shared rules stay an identical prefix for every session.
+    expect(instructions).toStartWith(
+      `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\n## The agent you speak for\n\n`,
+    );
+    expect(instructions).toContain(
+      "<agent_definition>\nYou are Ada, the support agent for Example Tours.\n\nHelp travellers with their bookings.\n\nAnswer in French.\n</agent_definition>",
+    );
+    expect(instructions.indexOf("</agent_definition>")).toBeLessThan(
+      instructions.indexOf("## Additional realtime guidance"),
+    );
+    expect(instructions).toEndWith("Current session context");
+  });
+
+  test("without an agent definition the voice gets the shared rules alone", () => {
+    expect(openGeniRealtimeInstructions({ agent: { sessionInstructions: "  " } })).toBe(
+      OPENGENI_REALTIME_BASE_INSTRUCTIONS,
+    );
+  });
+
+  test("keeps the head of a long agent definition and bounds all instructions", () => {
+    const instructions = openGeniRealtimeInstructions({
+      agent: { identity: "You are Ada.", sessionInstructions: "ø".repeat(30_000) },
+      additional: "Host guidance",
+    });
+    const definition = instructions.slice(
+      instructions.indexOf("<agent_definition>\n") + "<agent_definition>\n".length,
+      instructions.indexOf("\n</agent_definition>"),
+    );
+    expect(definition).toStartWith("You are Ada.\n\nøø");
+    expect(definition).toEndWith("\n…[rest omitted]");
+    expect(Buffer.byteLength(definition, "utf8")).toBeLessThanOrEqual(
+      REALTIME_AGENT_DEFINITION_MAX_BYTES,
+    );
+    expect(definition).not.toContain("�");
+    expect(Buffer.byteLength(instructions, "utf8")).toBeLessThanOrEqual(32_768);
+    expect(instructions).toEndWith("Host guidance");
+  });
+
+  test("never presents as the provider's product and delegates clearly heard requests", () => {
+    expect(OPENGENI_REALTIME_BASE_INSTRUCTIONS).toContain(
+      "Never introduce yourself as the underlying model or its provider's product, such as ChatGPT.",
+    );
+    expect(OPENGENI_REALTIME_BASE_INSTRUCTIONS).toContain(
+      'A request about the user\'s own work, records, files, accounts, or data always goes to the backend, even when it is short or leaves details open, such as "find my open tasks".',
+    );
+    // Asking again is for audio it did not catch, not for meaning.
+    expect(OPENGENI_REALTIME_BASE_INSTRUCTIONS).toContain("This is about hearing, not meaning");
+    expect(OPENGENI_REALTIME_BASE_INSTRUCTIONS).not.toContain("ambiguous");
+    expect(OPENGENI_REALTIME_BASE_INSTRUCTIONS).not.toContain("cannot reasonably be inferred");
   });
 
   test("forces one refresh after a provider 401, then retries exactly once", async () => {

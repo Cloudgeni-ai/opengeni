@@ -4,6 +4,13 @@ import {
   type CodexRealtimeInitialItem,
 } from "@opengeni/codex";
 import { MODEL_CONTEXT_LABEL, SESSION_GOAL_CONTEXT_LABEL } from "@opengeni/contracts";
+import {
+  getActiveSessionHistoryItems,
+  getSessionRealtimeAgentText,
+  getSessionRealtimeContinuityEntries,
+  readSessionAgentPrompt,
+  type Database,
+} from "@opengeni/db";
 
 export type SessionRealtimeHistoryRow = {
   position: number;
@@ -14,6 +21,47 @@ export type SessionRealtimeContinuityEntry = {
   role: "user" | "assistant";
   text: string;
 };
+
+/** The text that defines a session's agent, as its text agent gets it. */
+export type RealtimeAgentDefinition = {
+  /** The agent identity frozen in the session's agent configuration. */
+  identity?: string | null | undefined;
+  /** The instructions of the agent the session runs, when it runs one. */
+  agentInstructions?: string | null | undefined;
+  /** The session's own instructions. */
+  sessionInstructions?: string | null | undefined;
+};
+
+/** What a realtime call starts from: the conversation so far and the agent it speaks for. */
+export type SessionRealtimeContext = {
+  initialItems: CodexRealtimeInitialItem[];
+  agent: RealtimeAgentDefinition;
+};
+
+/** One parallel read for every realtime provider path. */
+export async function loadSessionRealtimeContext(
+  db: Database,
+  scope: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<SessionRealtimeContext> {
+  const [history, continuity, session, agentPrompt] = await Promise.all([
+    getActiveSessionHistoryItems(db, scope.workspaceId, scope.sessionId),
+    getSessionRealtimeContinuityEntries(db, scope.workspaceId, scope.sessionId),
+    getSessionRealtimeAgentText(db, scope.workspaceId, scope.sessionId),
+    readSessionAgentPrompt(db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+    }),
+  ]);
+  return {
+    initialItems: projectSessionRealtimeInitialItems(history, continuity),
+    agent: {
+      identity: session?.identity,
+      agentInstructions: agentPrompt?.instructions,
+      sessionInstructions: session?.instructions,
+    },
+  };
+}
 
 const BYTES_PER_ESTIMATED_TOKEN = 4;
 const HISTORY_TRUNCATION_MARKER = "…[earlier content truncated]\n";

@@ -263,6 +263,8 @@ describe("Codex realtime on the shared core", () => {
     ]);
     mock("getActiveSessionHistoryItems", async () => []);
     mock("getSessionRealtimeContinuityEntries", async () => []);
+    mock("getSessionRealtimeAgentText", async () => null);
+    mock("readSessionAgentPrompt", async () => null);
     return coreLease();
   }
   const rtcRequest = { sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n", version: "v3" as const };
@@ -336,6 +338,8 @@ describe("Codex realtime on the shared core", () => {
     mock("renewSubscriptionCoreCodexOperationLease", async () => null);
     mock("getActiveSessionHistoryItems", async () => []);
     mock("getSessionRealtimeContinuityEntries", async () => []);
+    mock("getSessionRealtimeAgentText", async () => null);
+    mock("readSessionAgentPrompt", async () => null);
     const broker = buildSessionCodexRealtimeBroker(
       db,
       settings,
@@ -372,6 +376,8 @@ describe("Codex realtime on the shared core", () => {
     const { acquired, released } = coreLease();
     mock("getActiveSessionHistoryItems", async () => []);
     mock("getSessionRealtimeContinuityEntries", async () => []);
+    mock("getSessionRealtimeAgentText", async () => null);
+    mock("readSessionAgentPrompt", async () => null);
     let callCreations = 0;
     const refusals: CodexRealtimeBrokerError[] = [];
     const broker = buildSessionCodexRealtimeBroker(
@@ -418,6 +424,8 @@ describe("Codex realtime on the shared core", () => {
     const { acquired } = coreLease();
     mock("getActiveSessionHistoryItems", async () => []);
     mock("getSessionRealtimeContinuityEntries", async () => []);
+    mock("getSessionRealtimeAgentText", async () => null);
+    mock("readSessionAgentPrompt", async () => null);
     const statuses = [404, 403];
     const refusedEverywhere = buildSessionCodexRealtimeBroker(
       db,

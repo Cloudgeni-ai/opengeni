@@ -48012,6 +48012,34 @@ export async function getSessionRealtimeContinuityEntries(
 }
 
 /**
+ * The session's own agent text a realtime voice speaks for: the agent
+ * identity frozen in its agent configuration and the session instructions.
+ * Null when the session does not exist.
+ */
+export async function getSessionRealtimeAgentText(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ identity: string | null; instructions: string | null } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [session] = await scopedDb
+      .select({
+        instructions: schema.sessions.instructions,
+        agentConfig: schema.sessions.agentConfig,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!session) return null;
+    const identity = (session.agentConfig as { identity?: unknown } | null)?.identity;
+    return {
+      identity: typeof identity === "string" ? identity : null,
+      instructions: session.instructions ?? null,
+    };
+  });
+}
+
+/**
  * Count of ACTIVE (live, model-facing) history rows for a session. This is the
  * length of the history the next turn is seeded from — the dual-write slice
  * index — which after a compaction is far smaller than the total persisted-row
