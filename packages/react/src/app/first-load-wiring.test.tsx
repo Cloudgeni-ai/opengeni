@@ -216,4 +216,26 @@ describe("first load wiring", () => {
       await view.unmount();
     }
   });
+
+  test("a chat opened directly reads its accounts once its catalog arrives", async () => {
+    const { host, reads } = countingHost();
+    const props = { host, ready: false, catalog: [] as (typeof mail)[], chat: true };
+    const view = await renderComponent(<Console {...props} />);
+    try {
+      const ready = () => current !== null;
+      for (let i = 0; i < 20 && !ready(); i++) await flush(10);
+      await actRun(() => current!.prepareWorkspaceTransition(WORKSPACE_ID));
+      // The chat, its composer and its account list mount together; the
+      // chat's catalog is still loading, so its account list sends no read.
+      await view.rerender(<Console {...props} ready />);
+      await flush(50);
+      // The catalog arrives: the account list takes the composer's read.
+      await view.rerender(<Console {...props} ready catalog={[mail]} />);
+      await flush(50);
+      expect(accounts?.accountGroups[0]?.accounts.map((account) => account.id)).toEqual(["one"]);
+      expect(reads.accounts).toBe(1);
+    } finally {
+      await view.unmount();
+    }
+  });
 });
