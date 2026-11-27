@@ -117,8 +117,10 @@ internal object SystemCalls {
 
   /**
    * Report a call the person started in the app, and wait until the system
-   * has it, it is active and its audio is on the loudspeaker (or a connected
-   * headset), so voice starts on the route it keeps.
+   * has it and it is active. Voice setup starts then, while the call's audio
+   * settles on the loudspeaker (or a connected headset): voice audio flows only
+   * once the provider connection is negotiated, over a second later, so it
+   * still starts on the route it keeps.
    */
   suspend fun startOutgoing(context: Context, id: String, title: String) {
     val ready = CompletableDeferred<Unit>()
@@ -130,10 +132,10 @@ internal object SystemCalls {
         try {
           addCall(context, current, CallAttributesCompat.DIRECTION_OUTGOING) {
             setActive()
-            routeAtStart(current)
-            reportStartRoute(current)
             OpenGeniCallService.show(context, current.title, current.subtitle, null)
             ready.complete(Unit)
+            routeAtStart(current)
+            reportStartRoute(current)
           }
         } catch (error: Throwable) {
           if (!ready.isCompleted) ready.completeExceptionally(error)
@@ -340,8 +342,8 @@ internal object SystemCalls {
 
   /**
    * A call starts on the loudspeaker, or on a headset when one is connected
-   * (Telecom picks it), before voice starts, so the route never changes under
-   * a live call. Bounded: a slow route change does not hold the call up.
+   * (Telecom picks it), before voice audio flows, so the route never changes
+   * under a live call. Bounded: a slow route change does not hold the call up.
    */
   private suspend fun routeAtStart(current: Session) {
     val control = current.control ?: return
