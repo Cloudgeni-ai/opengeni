@@ -182,8 +182,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * or resolves a notice, and the person dismisses one left after a reconnect.
  * 1552 withholds the shared Slack bot's one-statement source lookup; until it
  * is granted, a Slack callback keeps 1538's per-workspace probe.
- * 1599 withholds the admins' notice for a member's connection request; until
- * it is granted, "Ask an admin" copies a link to the step instead.
+ * 1599 withheld the admins' notice for a member's connection request and 1679
+ * granted it.
  * 1611 withholds the shared OAuth grant checks; until they are granted, a
  * disconnect never revokes at the provider and a refused refresh checks no
  * other connection.
@@ -201,7 +201,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "sync_subscription_relogin_notice_v1(uuid)",
   "deliver_app_notification_v1(uuid)",
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
-  "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
   "oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])",
   "oauth_grant_reauth_siblings_v1(uuid, text, text[], text[], text, text[], text[])",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
