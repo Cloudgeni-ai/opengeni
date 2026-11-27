@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 
 /**
- * Apps installed or upgraded from a package (migration 1591,
+ * Apps installed or upgraded from a package (migration 1669,
  * docs/app-packages.md#updates-and-going-back): the package's version label,
  * the app version the package wrote, the Skills and automations that came
  * with it, and the app's saved states before each upgrade. Callers have
