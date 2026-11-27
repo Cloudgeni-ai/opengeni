@@ -805,3 +805,107 @@ test("a config change that turns the challenge off mid-click brings the buttons 
     delete window.turnstile;
   }
 });
+
+test("email sign-in shows the visible challenge and sends its token, like sign-up", async () => {
+  const turnstile = fakeTurnstile();
+  const submits: Array<[string, Record<string, unknown>]> = [];
+  let refuse = true;
+  const panel = await mountSocialPanel({
+    signInChallengeRequired: true,
+    onSubmit: async (mode, input) => {
+      submits.push([mode, input]);
+      if (refuse) {
+        throw new AuthApiError(401, "INVALID_EMAIL_OR_PASSWORD", null, "Invalid email or password");
+      }
+    },
+  });
+  const setField = async (selector: string, value: string) => {
+    const input = panel.host.querySelector<HTMLInputElement>(selector)!;
+    const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+    await act(async () => {
+      (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[propsKey]!.onChange({
+        target: { value },
+      });
+    });
+  };
+  const submit = () =>
+    act(async () =>
+      panel.host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+  try {
+    expect(turnstile.widgets[0]).toMatchObject({ action: "signup", sitekey: "test-key" });
+    expect(turnstile.widgets[0]!.execution).toBeUndefined();
+    await setField("#managed-auth-email", "person@example.test");
+    await setField('input[type="password"]', "any-password");
+    // Unsolved: nothing is sent and the form says what to do.
+    await submit();
+    expect(submits).toEqual([]);
+    expect(panel.host.textContent).toContain("Complete the verification to sign in.");
+    await turnstile.call(0, "callback", "signin-token");
+    await submit();
+    expect(submits).toEqual([
+      [
+        "signin",
+        {
+          name: "person@example.test",
+          email: "person@example.test",
+          password: "any-password",
+          signupChallengeToken: "signin-token",
+        },
+      ],
+    ]);
+    expect(panel.host.textContent).toContain("Email or password is incorrect.");
+    // A token is single use: the widget renders afresh for the next attempt.
+    expect(turnstile.widgets).toHaveLength(2);
+    refuse = false;
+    await submit();
+    expect(submits).toHaveLength(1);
+    await turnstile.call(1, "callback", "second-token");
+    await submit();
+    expect(submits.at(-1)![1].signupChallengeToken).toBe("second-token");
+  } finally {
+    await panel.unmount();
+  }
+});
+
+for (const [label, props] of [
+  ["without the sign-in setting", {}],
+  ["without a site key", { signupChallengeSiteKey: undefined, signInChallengeRequired: true }],
+] as const)
+  test(`${label} email sign-in shows no challenge and sends no token`, async () => {
+    const turnstile = fakeTurnstile();
+    const submits: Array<Record<string, unknown>> = [];
+    const panel = await mountSocialPanel({
+      ...props,
+      onSubmit: async (_mode, input) => {
+        submits.push(input);
+      },
+    });
+    const setField = async (selector: string, value: string) => {
+      const input = panel.host.querySelector<HTMLInputElement>(selector)!;
+      const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+      await act(async () => {
+        (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[
+          propsKey
+        ]!.onChange({
+          target: { value },
+        });
+      });
+    };
+    try {
+      await setField("#managed-auth-email", "person@example.test");
+      await setField('input[type="password"]', "any-password");
+      await act(async () =>
+        panel.host
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      expect(turnstile.widgets).toHaveLength(0);
+      expect(submits).toHaveLength(1);
+      expect("signupChallengeToken" in submits[0]!).toBe(false);
+    } finally {
+      await panel.unmount();
+    }
+  });

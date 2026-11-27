@@ -33,6 +33,7 @@ import {
   timelineTurnsWithUnloadedSteps,
   activityHasUnloadedSteps,
   turnGroupHasUnloadedSteps,
+  noticeApprovalAnswered,
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
@@ -104,6 +105,7 @@ import {
   type PreparingProps,
 } from "./turn";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { resolveAgentSignals, type AgentSignals } from "@opengeni/react/session-agents-model";
 import { TurnStepsLoader } from "./turn-steps";
 import { useNativeTimelineMessages } from "./messages";
@@ -250,13 +252,14 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const turnDetail = resolveAgentSignals(props.agentSignals).turnDetail;
   const items = useMemo(() => {
-    const built = props.items ?? buildTimeline(t, props.events ?? []);
+    const built = props.items ?? buildTimeline(t, props.events ?? [], { showPurchasePrompts });
     // A person who never sees the agent's work reads an automation run as
     // its line and its answer only.
     return turnDetail ? built : automationRunOutcomesOnly(built);
-  }, [t, props.items, props.events, turnDetail]);
+  }, [t, props.items, props.events, turnDetail, showPurchasePrompts]);
   const pauses = useTimelinePauses(props.events, props.pause);
   const groups = useMemo(
     () => groupTimeline(t, items, { readableTurns: true, pauses }),
@@ -1285,6 +1288,7 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
     );
   }
   const tone = noticeTone(item);
+  const answered = noticeApprovalAnswered(item);
   const accent =
     tone === "failed"
       ? c["status-failed"]
@@ -1306,8 +1310,14 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
         backgroundColor: tone === "neutral" ? c["surface-1"] : withAlpha(accent, 0.1),
       }}
     >
-      <View style={{ marginTop: 2, opacity: item.tone === "cancelled" ? 0.6 : 1 }}>
-        {noticeIsResolvedApproval(item) ? (
+      <View
+        style={{
+          marginTop: 2,
+          opacity:
+            item.tone === "cancelled" || (noticeIsResolvedApproval(item) && !answered) ? 0.6 : 1,
+        }}
+      >
+        {answered ? (
           <Icon name="check" size={16} color={accent} />
         ) : (
           <Icon name="triangle-alert" size={16} color={accent} />

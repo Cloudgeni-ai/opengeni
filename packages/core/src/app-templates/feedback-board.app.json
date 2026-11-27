@@ -3,6 +3,14 @@
   "name": "Feedback board",
   "description": "Collect feature requests and let the team vote on them.",
   "team": "Product",
+  "setup": {
+    "connections": [],
+    "repository": null,
+    "worksWellWith": null,
+    "wontDoWithoutAsking": [],
+    "firstMessage": null,
+    "firstJob": "Add the feature request you hear most."
+  },
   "package": {
     "format": "opengeni.app-package",
     "version": 1,

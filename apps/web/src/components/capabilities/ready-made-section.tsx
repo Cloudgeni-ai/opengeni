@@ -71,6 +71,12 @@ export function readyMadeGroups(
     .map(([team, grouped]) => ({ key: team ?? "", team: team ?? NO_TEAM, entries: grouped }));
 }
 
+/** A ready-made agent row's preview ("agent:<template key>"); Add there leads to Enable. */
+function readyMadePreviewHref(workspaceId: string, entry: ReadyMadeEntry): string {
+  const templateKey = entry.key.slice("agent:".length);
+  return `/workspaces/${encodeURIComponent(workspaceId)}/agents/ready-made/${encodeURIComponent(templateKey)}`;
+}
+
 function metadataString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -375,7 +381,14 @@ export function ReadyMadeSection({
                     : { description: `${KIND_LABEL[entry.kind]} · ${entry.description}` })}
                   disabled={busy !== null || (!entry.added && Boolean(entry.unavailable))}
                   title={entry.description}
-                  onOpen={() => void (entry.added ? open(entry) : add(entry))}
+                  onOpen={() =>
+                    void (entry.added
+                      ? open(entry)
+                      : entry.kind === "agent"
+                        ? // Like Agents: its preview first, then Add, then Enable.
+                          navigate({ href: readyMadePreviewHref(workspaceId, entry) })
+                        : add(entry))
+                  }
                 />
               );
             })}

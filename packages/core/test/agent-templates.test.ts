@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import {
+  AGENT_BUILT_IN_GITHUB_CONNECTOR,
+  GITHUB_REST_TOOL_NAMES,
+  ReadyMadeSetup,
+} from "@opengeni/contracts";
 import { agentTemplateByKey, agentTemplates } from "../src/index";
 
 describe("ready-made agents", () => {
@@ -71,21 +76,55 @@ describe("ready-made agents", () => {
     expect(reviewer?.suggestedTriggers[0]?.oneClick).toBeUndefined();
   });
 
-  test("PR reviewer labels findings Critical, Bug or Nit and posts only Critical and Bug", () => {
+  test("PR reviewer labels findings Critical, Bug or Nit", () => {
     const instructions = agentTemplateByKey("pr-reviewer")?.instructions ?? "";
     expect(instructions).toContain(
       "- Critical: security, data loss, outage, or a broken migration or public API.",
     );
     expect(instructions).toContain("- Bug: wrong behaviour in a realistic case.");
     expect(instructions).toContain("- Nit: style or an optional improvement.");
-    expect(instructions).toContain("its category, the concrete case that triggers it");
-    expect(instructions).toContain("Post only Critical and Bug findings; leave nits out.");
     expect(instructions).toContain(
       "Comment on conventions only where the repo has written rules (AGENTS.md, lint config).",
     );
     // The rubric replaces the old labels and review levels.
     expect(instructions).not.toContain("Blocker:");
     expect(instructions).not.toContain("Review level");
+  });
+
+  test("PR reviewer posts one scannable review: verdict, inline findings with fixes, folded nits", () => {
+    const instructions = agentTemplateByKey("pr-reviewer")?.instructions ?? "";
+    const step = (n: number) => {
+      const start = instructions.indexOf(`\n${n}. `);
+      const next = instructions.indexOf(`\n${n + 1}. `, start + 1);
+      const end = next === -1 ? instructions.indexOf("\n\n", start + 1) : next;
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      return instructions.slice(start, end);
+    };
+    const post = step(6);
+    // One review, verdict first, with a short summary.
+    expect(post).toContain("Post one review");
+    expect(post).toContain("starts with a one-line verdict");
+    expect(post).toContain("at most three lines");
+    expect(post).toContain("No praise");
+    // Critical and Bug findings sit on the exact line, labelled, with a concrete fix.
+    expect(post).toContain("inline comment on the exact lines");
+    expect(post).toContain("**Bug: retries never stop**");
+    // A suggestion replaces the lines its comment covers, so it must match them.
+    expect(post).toContain("```suggestion block that replaces exactly the commented lines");
+    // Nits never get inline comments: left out or folded away.
+    expect(post).toContain("<details><summary>Nits</summary>");
+    expect(post).toContain("Give each finding once.");
+    // A re-review builds on the earlier one instead of duplicating it.
+    const rereview = step(7);
+    expect(rereview).toContain("On a re-review");
+    expect(rereview).toContain("post only new findings");
+    // Earlier open findings still count, so a re-review never reads cleaner than the PR is.
+    expect(rereview).toContain("Base the verdict and counts on every finding still open.");
+    // A question gets an answer in its thread, not another review.
+    expect(instructions).toContain(
+      "in the same thread for an inline comment, instead of posting a new review",
+    );
   });
 
   test("they stay general: no Opengeni-internal skills or names", () => {
@@ -143,6 +182,106 @@ describe("ready-made agents", () => {
   test("lookup by key", () => {
     expect(agentTemplateByKey("bug-fixer")?.name).toBe("Bug fixer");
     expect(agentTemplateByKey("missing")).toBeUndefined();
+  });
+
+  test("keep setup simple: no template requires another agent or setup", () => {
+    const keys = agentTemplates().map((template) => template.key);
+    const names = agentTemplates().map((template) => template.name);
+    for (const file of agentTemplates()) {
+      // A strict schema: a template can't declare a required hand-off under another field.
+      expect(ReadyMadeSetup.safeParse({ ...file.setup, requires: ["pr-reviewer"] }).success).toBe(
+        false,
+      );
+      const setup = file.setup;
+      // Required steps are only its own connections, never another agent.
+      for (const connection of setup?.connections ?? []) {
+        expect(keys).not.toContain(connection.provider);
+        expect(names).not.toContain(connection.name);
+      }
+      // At most one other agent, display only, and a real one.
+      if (setup?.worksWellWith) {
+        expect(keys).toContain(setup.worksWellWith);
+        expect(setup.worksWellWith).not.toBe(file.key);
+      }
+      // Every hand-off works without the other agent: it says what to do if it isn't there.
+      for (const line of file.instructions.split("\n")) {
+        if (!/"[^"]+" agent/u.test(line)) continue;
+        expect(line).toMatch(/(If there is|and there is|when one exists)/u);
+        expect(line).toMatch(/(If there isn't|Otherwise)/u);
+      }
+      // Descriptions and trigger messages don't promise a hand-off.
+      for (const other of names.filter((name) => name !== file.name)) {
+        expect(file.description).not.toContain(other);
+        for (const suggestion of file.suggestedTriggers) {
+          expect(suggestion.instructions).not.toContain(other);
+        }
+      }
+    }
+  });
+
+  test("each declares what it needs and a first job", () => {
+    for (const template of agentTemplates()) {
+      expect(template.setup).not.toBeNull();
+      expect(template.setup?.firstMessage).toBeTruthy();
+      expect(template.setup?.firstJob).toBeTruthy();
+    }
+    // A hard requirement only where it truly can't work without one.
+    const required = Object.fromEntries(
+      agentTemplates().map((template) => [
+        template.key,
+        (template.setup?.connections ?? [])
+          .filter((connection) => connection.required)
+          .map((connection) => connection.provider),
+      ]),
+    );
+    expect(required).toEqual({
+      triage: [],
+      "bug-fixer": ["github.com"],
+      "pr-reviewer": ["github.com"],
+      "cve-scanner": ["github.com"],
+      "incident-responder": [],
+      "dependency-updater": ["github.com"],
+      "product-analyst": ["posthog.com"],
+    });
+  });
+
+  test("every line of what it won't do without asking is one of its own Can use rules", () => {
+    for (const template of agentTemplates()) {
+      for (const line of template.setup?.wontDoWithoutAsking ?? []) {
+        for (const tool of line.tools) {
+          const rule = template.toolPermissions.find(
+            (entry) => entry.connector === line.connector && entry.tool === tool,
+          );
+          expect({ template: template.key, line: line.text, tool, rule: rule?.permission }).toEqual(
+            { template: template.key, line: line.text, tool, rule: line.permission },
+          );
+        }
+      }
+    }
+    // The GitHub ones say it can't merge.
+    expect(
+      agentTemplateByKey("bug-fixer")?.setup?.wontDoWithoutAsking.map((line) => line.text),
+    ).toContain("Merge a pull request");
+  });
+
+  test("every line of what it won't do names a tool the agent really has", () => {
+    // A rule on a tool the agent never gets (for example a GitHub MCP tool
+    // with no built-in twin, or a git push from the sandbox) promises nothing.
+    const builtIn = new Set<string>(GITHUB_REST_TOOL_NAMES);
+    for (const template of agentTemplates()) {
+      for (const line of template.setup?.wontDoWithoutAsking ?? []) {
+        expect({ template: template.key, line: line.text, connector: line.connector }).toEqual({
+          template: template.key,
+          line: line.text,
+          connector: AGENT_BUILT_IN_GITHUB_CONNECTOR,
+        });
+        expect({
+          template: template.key,
+          line: line.text,
+          builtIn: line.tools.some((tool) => builtIn.has(tool)),
+        }).toEqual({ template: template.key, line: line.text, builtIn: true });
+      }
+    }
   });
 
   test("Triage listens where reports arrive and hands bugs to Bug fixer by name", () => {

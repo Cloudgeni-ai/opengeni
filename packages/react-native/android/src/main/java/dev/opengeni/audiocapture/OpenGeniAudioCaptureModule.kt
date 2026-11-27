@@ -3,19 +3,6 @@ package dev.opengeni.audiocapture
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import expo.modules.kotlin.records.Field
-import expo.modules.kotlin.records.Record
-
-/** Options JavaScript passes to `start` (see `NativeAudioCapture` in src/recordings). */
-class AudioCaptureStartOptions : Record {
-  @Field var recordingId: String = ""
-  @Field var directory: String = ""
-  @Field var trackNumber: Int = 0
-  @Field var chunkMilliseconds: Int = 5_000
-  @Field var bitRate: Int = 64_000
-  @Field var notificationTitle: String = ""
-  @Field var notificationText: String = ""
-}
 
 class AudioCaptureException(message: String) : CodedException(message)
 
@@ -36,11 +23,11 @@ class OpenGeniAudioCaptureModule : Module() {
 
     OnDestroy { AudioCapture.emit = null }
 
-    AsyncFunction("start") { options: AudioCaptureStartOptions ->
+    AsyncFunction("start") { options: Map<String, Any?> ->
       val context =
         appContext.reactContext?.applicationContext
           ?: throw AudioCaptureException("The app is not ready to record.")
-      AudioCapture.start(context, options)
+      AudioCapture.start(context, AudioCaptureStartOptions.from(options))
     }
 
     Function("pause") { AudioCapture.pause() }

@@ -1,7 +1,27 @@
 import { describe, expect, test } from "bun:test";
-import { failureOrigin, isCustomerManagedMetricProvider } from "../src/failure-attribution";
+import {
+  failureOrigin,
+  isCustomerEndpointMetricProvider,
+  isCustomerManagedMetricProvider,
+} from "../src/failure-attribution";
 
 describe("failure ownership", () => {
+  test("the organization's plan refusing a sandbox is customer_plan whoever pays for the model", () => {
+    for (const code of ["sandbox_compute_unavailable", "sandbox_card_required"]) {
+      for (const customerManaged of [false, true]) {
+        expect(failureOrigin({ customerManaged, outcome: "failed", code })).toBe("customer_plan");
+        expect(failureOrigin({ customerManaged, outcome: "completed", code })).toBe("none");
+      }
+    }
+    // Shared unpaid capacity is the platform's fleet, not the organization's plan.
+    expect(
+      failureOrigin({
+        customerManaged: false,
+        outcome: "failed",
+        code: "sandbox_capacity_unpaid_busy",
+      }),
+    ).toBe("platform");
+  });
   test("closed provider-account refusals count only on customer-managed providers", () => {
     for (const providerAccountRefusal of [
       "byok_capacity_restricted",
@@ -86,6 +106,58 @@ describe("failure ownership", () => {
           ...(httpStatus ? { httpStatus } : {}),
         }),
       ).toBe("platform");
+    }
+  });
+  test("a customer's own endpoint that cannot be reached or refuses the request is customer-provider", () => {
+    // Production page: an organization's OpenAI-compatible endpoint failed
+    // every call without an HTTP status and each failure counted as platform.
+    expect(
+      failureOrigin({
+        customerManaged: true,
+        customerEndpoint: true,
+        outcome: "failed",
+        transportFailure: true,
+      }),
+    ).toBe("customer_provider");
+    for (const httpStatus of [408, 409, 410, 415, 451]) {
+      expect(
+        failureOrigin({
+          customerManaged: true,
+          customerEndpoint: true,
+          outcome: "failed",
+          httpStatus,
+        }),
+      ).toBe("customer_provider");
+    }
+    // Request-shape refusals can be our own serialization bug, and an
+    // unexplained failure stays ours.
+    // Request-shape, path/method and size refusals can be our own request.
+    for (const httpStatus of [undefined, 400, 404, 405, 413, 422]) {
+      expect(
+        failureOrigin({
+          customerManaged: true,
+          customerEndpoint: true,
+          outcome: "failed",
+          ...(httpStatus ? { httpStatus } : {}),
+        }),
+      ).toBe("platform");
+    }
+    // A managed provider's unreachable endpoint is ours to fix.
+    expect(
+      failureOrigin({ customerManaged: true, outcome: "failed", transportFailure: true }),
+    ).toBe("platform");
+    expect(
+      failureOrigin({ customerManaged: false, outcome: "failed", transportFailure: true }),
+    ).toBe("platform");
+    expect(isCustomerEndpointMetricProvider("organization-compatible-6e55ba3e")).toBe(true);
+    expect(isCustomerEndpointMetricProvider("workspace-compatible-abc")).toBe(true);
+    for (const provider of [
+      "organization-compatible-",
+      "organization-openrouter",
+      "workspace-openai-abc",
+      "azure-sol",
+    ]) {
+      expect(isCustomerEndpointMetricProvider(provider)).toBe(false);
     }
   });
   test("internal lease and authority failures do not become customer quota errors", () => {

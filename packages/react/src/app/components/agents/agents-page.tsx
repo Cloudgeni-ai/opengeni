@@ -1,7 +1,9 @@
 /**
  * Agents: every agent the reader can chat with in this workspace, theirs or
- * shared. Bot templates and Slack agents became agents, so their old pages
- * land here, with a one-time note saying so.
+ * shared, each with one status (Ready, 1 step left, Needs PostHog, On call),
+ * what starts it and when it last ran; then one Ready-made list, each opening
+ * a preview before it is added. Bot templates and Slack agents became agents,
+ * so their old pages land here, with a one-time note saying so.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -14,17 +16,15 @@ import {
 } from "lucide-react";
 import {
   agentInitialsAvatar,
-  type Agent,
   type AgentListFilter,
   type AgentSummary,
   type AgentTemplate,
 } from "@opengeni/contracts";
+import type { EventSource, ScheduledTask } from "@opengeni/sdk";
 
-import { CapabilityCatalogRow } from "../../../capability-catalog-row";
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
 import { DetailPage, DetailPageHeader } from "../../../ui/detail-page";
-import { DetailSection } from "../../../ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -35,19 +35,34 @@ import {
 } from "../../../ui/dropdown-menu";
 import { EmptyState } from "../../../ui/empty-state";
 import { ErrorMessage } from "../../../ui/error-message";
-import { ListRow, ListRowSkeleton, RowList } from "../../../ui/list-row";
+import { ListRow, ListRowSkeleton, RowList, type ListRowProps } from "../../../ui/list-row";
 import { LogoTile } from "../../../ui/logo-tile";
 import { MetaChip } from "../../../ui/meta-chip";
 import { Notice } from "../../../ui/notice";
+import { RelativeTime } from "../../../ui/relative-time";
+import { Section } from "../../../ui/section";
 import { SegmentedControl } from "../../../ui/segmented-control";
+import { StatusBadge } from "../../../ui/status-badge";
 import { useAppContext } from "../../app-context";
 import { agentAvatar } from "../../lib/agent-avatar";
 import { duplicateAgentNames, parseAgentFile, useAgents } from "../../lib/agents";
 import { useNavigate } from "../../lib/navigation";
 import { hasWorkspacePermission } from "../../lib/permissions";
+import { t } from "../../lib/console-text";
 import { toast } from "../../lib/toast";
 import { SessionAvatar } from "../session/session-avatar";
 import { useDismissedNotice } from "./agent-notices";
+import { agentTriggers } from "./agent-setup-sections";
+import { agentStartsWords, agentStatus, type AgentReadinessSummary } from "./agent-status";
+import { agentTriggerSentence, agentTriggerShapeOfTask } from "./agent-trigger-words";
+import { readyMadeAgentSetup } from "./ready-made-agent-setup";
+import {
+  agentReadinessSummary,
+  useAgentsActivity,
+  useAgentsReadiness,
+  type AgentActivity,
+} from "./agent-readiness";
+import { inAppClick } from "../../../ui/in-app-click";
 import "../../../../styles/connect.css";
 
 const FILTER_OPTIONS = [
@@ -55,7 +70,7 @@ const FILTER_OPTIONS = [
   { value: "yours", label: "Yours" },
 ] as const satisfies readonly { value: AgentListFilter; label: string }[];
 
-export const AGENTS_SUBTITLE = "Named agents you can chat with here and in Slack.";
+export const AGENTS_SUBTITLE = "Agents that work for your team, on their own or when asked.";
 
 export const BOT_TEMPLATES_MOVED =
   "Bot templates are now agents. Each kept its name, icon and who can use it. Its setup text is now its Instructions.";
@@ -79,12 +94,15 @@ export function AgentsPage({
   workspaceId,
   after,
   onCreateWithChat,
+  readinessOf,
 }: {
   workspaceId: string;
   /** More sections under the workspace's own agents (the app's "Managed in Console" list). */
   after?: ReactNode | undefined;
   /** Opens "Create with chat": describe the agent, and a chat drafts and saves it. */
   onCreateWithChat?: (() => void) | undefined;
+  /** The server's readiness check per agent, once read; absent when unknown. */
+  readinessOf?: ((agentId: string) => AgentReadinessSummary | null | undefined) | undefined;
 }) {
   const { client, accessContext } = useAppContext();
   const navigate = useNavigate();
@@ -102,10 +120,20 @@ export function AgentsPage({
     });
   const create = () =>
     void navigate({ to: "/workspaces/$workspaceId/agents/new", params: { workspaceId } });
-  const readyMade = useReadyMadeAgents(workspaceId, agents, filter === "all", (agent) => {
-    state.replace((current) => [agent, ...current]);
-    open(agent);
-  });
+  const preview = (template: Pick<AgentTemplate, "key">) =>
+    void navigate({
+      to: "/workspaces/$workspaceId/agents/ready-made/$templateKey",
+      params: { workspaceId, templateKey: template.key },
+    });
+  const readyMade = useReadyMadeAgents(workspaceId, agents, filter === "all");
+  const facts = useAgentListFacts(workspaceId, agents);
+  const checked = useAgentsReadiness(workspaceId, agents);
+  const readinessFor = (agentId: string) => {
+    const given = readinessOf?.(agentId);
+    if (given !== undefined) return given;
+    const read = checked.get(agentId);
+    return read ? agentReadinessSummary(read) : null;
+  };
   const canAdd = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
   // Ready-made agents show in one place: their own section when it's there,
   // otherwise the Add agent menu.
@@ -163,6 +191,7 @@ export function AgentsPage({
       <AddAgentMenu
         workspaceId={workspaceId}
         readyMade={readyMade}
+        onPreview={preview}
         showReadyMade={!readyMadeSection}
         onChat={canAdd ? onCreateWithChat : undefined}
         onBlank={create}
@@ -204,8 +233,10 @@ export function AgentsPage({
       {!state.supported ? (
         <Notice className="mt-6">This server doesn't have agents yet.</Notice>
       ) : (
-        <DetailSection
-          title={filter === "yours" ? "Yours" : "In this workspace"}
+        <Section
+          title={filter === "yours" ? "Yours" : "Your agents"}
+          variant="group"
+          data-agents-list=""
           action={
             <SegmentedControl
               size="sm"
@@ -256,36 +287,76 @@ export function AgentsPage({
               />
             )
           ) : (
-            <RowList label="Agents" variant="catalog">
-              {agents.map((agent) => (
-                <ListRow
-                  key={agent.id}
-                  leading={
-                    <SessionAvatar
-                      avatar={agentAvatar(agent)}
-                      name={agent.name}
-                      workspaceId={workspaceId}
-                      seed={agent.id}
-                      size="md"
-                    />
-                  }
-                  title={agent.name}
-                  // Every shared agent is in Slack, so only Only me (app only) is marked.
-                  titleAddon={
-                    agent.visibility === "private" ? (
-                      <MetaChip variant="soft">Only me</MetaChip>
-                    ) : undefined
-                  }
-                  description={agent.description || undefined}
-                  onOpen={() => open(agent)}
-                />
-              ))}
+            <RowList label="Agents" variant="resource">
+              {agents.map((agent) => {
+                const row = agentRowFacts(agent, facts, readinessFor(agent.id));
+                return (
+                  <ListRow
+                    key={agent.id}
+                    leading={
+                      <SessionAvatar
+                        avatar={agentAvatar(agent)}
+                        name={agent.name}
+                        workspaceId={workspaceId}
+                        seed={agent.id}
+                        size="md"
+                      />
+                    }
+                    title={agent.name}
+                    // Every shared agent is in Slack, so only Only me (app only) is marked.
+                    titleAddon={
+                      agent.visibility === "private" ? (
+                        <MetaChip variant="soft">Only me</MetaChip>
+                      ) : undefined
+                    }
+                    status={
+                      row.status ? (
+                        <span data-agent-row-status={row.status.key} className="inline-flex">
+                          <StatusBadge variant="dot" tone={row.status.tone}>
+                            {row.status.label}
+                          </StatusBadge>
+                        </span>
+                      ) : undefined
+                    }
+                    meta={[
+                      <span key="starts" data-agent-row-starts="">
+                        {row.starts}
+                      </span>,
+                      ...(row.lastRun
+                        ? [<RelativeTime key="last" date={row.lastRun} prefix="Last ran" />]
+                        : []),
+                    ]}
+                    indicator="open"
+                    onOpen={() => open(agent)}
+                  />
+                );
+              })}
             </RowList>
           )}
-        </DetailSection>
+        </Section>
       )}
       {readyMadeSection ? (
-        <ReadyMadeAgents workspaceId={workspaceId} readyMade={readyMade} />
+        <ReadyMadeAgents workspaceId={workspaceId} readyMade={readyMade} onPreview={preview} />
+      ) : null}
+      {state.supported && facts.withoutAgent > 0 ? (
+        <p className="mt-2 mb-0 text-sm text-fg-muted" data-agents-automations-without="">
+          {facts.withoutAgent === 1
+            ? "1 automation runs without an agent. "
+            : `${facts.withoutAgent} automations run without an agent. `}
+          <a
+            href={`/workspaces/${encodeURIComponent(workspaceId)}/automations`}
+            className="og-link"
+            onClick={(event) => {
+              event.preventDefault();
+              void navigate({
+                to: "/workspaces/$workspaceId/automations",
+                params: { workspaceId },
+              });
+            }}
+          >
+            See automations
+          </a>
+        </p>
       ) : null}
       {after}
     </DetailPage>
@@ -295,27 +366,23 @@ export function AgentsPage({
 type ReadyMadeAgentsState = {
   /** Ready-made agents not added here yet, in gallery order. */
   offered: AgentTemplate[];
-  adding: string | null;
-  add: (template: AgentTemplate) => Promise<void>;
 };
 
 /**
- * Ready-made agents nobody here has added yet (whatever the list's filter),
- * and the one way to add one: the add-from-template route, then its page.
+ * Ready-made agents nobody here has added yet (whatever the list's filter).
+ * Opening one shows its preview; only its Add agent adds it.
  */
 function useReadyMadeAgents(
   workspaceId: string,
   agents: readonly AgentSummary[] | undefined,
   /** Whether `agents` is every agent here (the All filter), not only some. */
   listedIsAll: boolean,
-  onAdded: (agent: Agent) => void,
 ): ReadyMadeAgentsState {
   const { client } = useAppContext();
   const [templates, setTemplates] = useState<AgentTemplate[] | null>(null);
   // Ready-made agents anyone here already added, whatever the list's filter.
   // null when that can't be read: then only the All list can tell.
   const [addedHere, setAddedHere] = useState<ReadonlySet<string> | null>(new Set());
-  const [adding, setAdding] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
     Promise.all([
@@ -346,23 +413,86 @@ function useReadyMadeAgents(
       : (templates ?? []).filter(
           (template) => !listed.has(template.key) && !addedHere?.has(template.key),
         );
-  const add = async (template: AgentTemplate) => {
-    if (adding !== null) return;
-    setAdding(template.key);
-    try {
-      const agent = await client.createAgentFromTemplate(workspaceId, template.key, {
-        editAccess: "everyone",
-      });
-      setAddedHere((current) => (current ? new Set(current).add(template.key) : current));
-      toast.success(`Added ${agent.name}`);
-      onAdded(agent);
-    } catch (error) {
-      toast.error(`Couldn't add ${template.name}`, { description: userErrorText(error) });
-    } finally {
-      setAdding(null);
-    }
+  return { offered };
+}
+
+/** What the list says about each agent: its triggers, their sources and its last chat. */
+interface AgentListFacts {
+  /** Triggers by agent id; null while they load. */
+  triggers: ReadonlyMap<string, ScheduledTask[]> | null;
+  sources: readonly Pick<EventSource, "id" | "name" | "kind">[];
+  /** Last run and whether it works now, by agent id. */
+  activity: ReadonlyMap<string, AgentActivity>;
+  /** Automations here that run without an agent. */
+  withoutAgent: number;
+}
+
+function useAgentListFacts(
+  workspaceId: string,
+  agents: readonly AgentSummary[] | undefined,
+): AgentListFacts {
+  const { client } = useAppContext();
+  const [tasks, setTasks] = useState<ScheduledTask[] | null>(null);
+  const [sources, setSources] = useState<EventSource[]>([]);
+  useEffect(() => {
+    let live = true;
+    client.listScheduledTasks(workspaceId, { limit: 200 }).then(
+      (list) => live && setTasks(list),
+      () => live && setTasks([]),
+    );
+    client.listEventSources(workspaceId).then(
+      (list) => live && setSources(list),
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [client, workspaceId]);
+  const activity = useAgentsActivity(
+    workspaceId,
+    (agents ?? []).map((agent) => agent.id),
+  );
+  const triggers =
+    tasks === null
+      ? null
+      : new Map((agents ?? []).map((agent) => [agent.id, agentTriggers(tasks, agent.id)] as const));
+  const withoutAgent = (tasks ?? []).filter(
+    (task) => !task.agentConfig.agentId && (task.action?.kind ?? "agent_turn") === "agent_turn",
+  ).length;
+  return { triggers, sources, activity, withoutAgent };
+}
+
+/** One agent's row: its status, what starts it and when it last ran. */
+function agentRowFacts(
+  agent: AgentSummary,
+  facts: AgentListFacts,
+  readiness: AgentReadinessSummary | null | undefined,
+) {
+  const triggers = facts.triggers?.get(agent.id) ?? null;
+  const inSlack = agent.visibility !== "private" && agent.slack.length > 0;
+  const now = new Date();
+  const sentences = (triggers ?? []).map((task) =>
+    agentTriggerSentence(t, agentTriggerShapeOfTask(task, facts.sources), {
+      agentName: agent.name,
+      now,
+    }),
+  );
+  return {
+    status: agentStatus({
+      triggers,
+      inSlack,
+      readiness,
+      working: facts.activity.get(agent.id)?.working,
+    }),
+    starts:
+      triggers === null
+        ? ""
+        : agentStartsWords(sentences, { inSlack }) +
+          (triggers.length > 0 && !triggers.some((task) => task.status === "active")
+            ? " · Off"
+            : ""),
+    lastRun: facts.activity.get(agent.id)?.lastRun ?? null,
   };
-  return { offered, adding, add };
 }
 
 function readyMadeAvatar(workspaceId: string, template: AgentTemplate, size: "sm" | "md") {
@@ -377,33 +507,54 @@ function readyMadeAvatar(workspaceId: string, template: AgentTemplate, size: "sm
   );
 }
 
-/** Under the workspace's agents: ready-made ones not added yet, each one click to add. */
+/** Under the workspace's agents: ready-made ones not added yet, each opening its preview. */
 function ReadyMadeAgents({
   workspaceId,
   readyMade,
+  onPreview,
 }: {
   workspaceId: string;
   readyMade: ReadyMadeAgentsState;
+  onPreview: (template: AgentTemplate) => void;
 }) {
   return (
-    <DetailSection title="Ready-made">
-      <div className="og-connection-catalog" data-columns="2">
-        {readyMade.offered.map((template) => (
-          <CapabilityCatalogRow
-            key={template.key}
-            data-ready-made-agent={template.key}
-            name={template.name}
-            description={template.description}
-            title={template.description}
-            icon={readyMadeAvatar(workspaceId, template, "md")}
-            status={readyMade.adding === template.key ? "loading" : "available"}
-            statusLabel={`Add ${template.name}`}
-            disabled={readyMade.adding !== null}
-            onOpen={() => void readyMade.add(template)}
-          />
-        ))}
-      </div>
-    </DetailSection>
+    <Section
+      title="Ready-made"
+      description="Open one to see what it does and what it needs before you add it."
+      variant="group"
+      data-ready-made-agents=""
+    >
+      <RowList label="Ready-made agents" variant="resource">
+        {readyMade.offered.map((template) => {
+          const needs = readyMadeAgentSetup(template).needs.filter((need) => need.required);
+          return (
+            <ListRow
+              key={template.key}
+              leading={readyMadeAvatar(workspaceId, template, "md")}
+              title={template.name}
+              description={template.description || undefined}
+              meta={
+                needs.length > 0
+                  ? [
+                      `Needs ${needs
+                        .map((need) => (need.key === "repository" ? "a repository" : need.label))
+                        .join(" and ")}`,
+                    ]
+                  : undefined
+              }
+              indicator="open"
+              href={`/workspaces/${encodeURIComponent(workspaceId)}/agents/ready-made/${encodeURIComponent(template.key)}`}
+              linkProps={
+                {
+                  "data-ready-made-agent": template.key,
+                  onClick: inAppClick(() => onPreview(template)),
+                } as ListRowProps["linkProps"]
+              }
+            />
+          );
+        })}
+      </RowList>
+    </Section>
   );
 }
 
@@ -416,6 +567,7 @@ function ReadyMadeAgents({
 function AddAgentMenu({
   workspaceId,
   readyMade,
+  onPreview,
   showReadyMade,
   onChat,
   onBlank,
@@ -423,23 +575,19 @@ function AddAgentMenu({
 }: {
   workspaceId: string;
   readyMade: ReadyMadeAgentsState;
+  /** Opens a ready-made agent's preview; nothing is added from the menu. */
+  onPreview: (template: AgentTemplate) => void;
   /** False while the page's own Ready-made section lists them. */
   showReadyMade: boolean;
   onChat?: (() => void) | undefined;
   onBlank: () => void;
   onImport: () => void;
 }) {
-  const { offered, adding, add } = readyMade;
+  const { offered } = readyMade;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          size="sm"
-          className="pointer-coarse:h-11"
-          disabled={adding !== null}
-          data-add-agent=""
-        >
+        <Button type="button" size="sm" className="pointer-coarse:h-11" data-add-agent="">
           <PlusIcon />
           Add agent
           <ChevronDownIcon className="opacity-70" />
@@ -462,8 +610,7 @@ function AddAgentMenu({
               <DropdownMenuItem
                 key={template.key}
                 data-agent-template={template.key}
-                disabled={adding !== null}
-                onSelect={() => void add(template)}
+                onSelect={() => onPreview(template)}
                 className="items-start"
               >
                 {readyMadeAvatar(workspaceId, template, "sm")}

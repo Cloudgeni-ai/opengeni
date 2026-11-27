@@ -207,6 +207,7 @@ import {
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { sessionStatusItemDisplayStatus } from "../session-status-model";
 import {
+  noticeApprovalAnswered,
   noticeDisplayText,
   noticeIsResolvedApproval,
   noticeTone,
@@ -227,6 +228,7 @@ import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import { isChunkLoadError } from "../lib/chunk-load-error";
 import { LazyPart } from "./lazy-part";
 import { MessageAttachments } from "./message-attachments";
@@ -746,10 +748,11 @@ export function MessageTimeline({
   className,
 }: MessageTimelineProps) {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const formatError = useErrorMessage();
   const agentSignals = resolveAgentSignals(agentSignalsProp).turnDetail;
   const resolvedItems = useMemo(() => {
-    const builtItems = items ?? buildTimeline(t, events ?? []);
+    const builtItems = items ?? buildTimeline(t, events ?? [], { showPurchasePrompts });
     // A person who never sees the agent's work reads an automation run as
     // its line and its answer only.
     const projectedItems = agentSignals ? builtItems : automationRunOutcomesOnly(builtItems);
@@ -759,7 +762,7 @@ export function MessageTimeline({
     return projectedItems.filter(
       (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
     );
-  }, [items, events, shouldRenderAuthNeeded, agentSignals, t]);
+  }, [items, events, shouldRenderAuthNeeded, agentSignals, showPurchasePrompts, t]);
   const searchItem = searchTarget
     ? resolvedItems.find((item) => isTimelineSearchTarget(item, searchTarget))
     : undefined;
@@ -5442,6 +5445,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
   }
   const presentedTone = noticeTone(item);
   const resolvedApproval = noticeIsResolvedApproval(item);
+  const answeredApproval = noticeApprovalAnswered(item);
   const tone =
     presentedTone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
@@ -5457,11 +5461,15 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       )}
       role="status"
     >
-      {resolvedApproval ? (
+      {answeredApproval ? (
         <CheckIcon className="mt-0.5 size-4 shrink-0 opacity-70" aria-hidden="true" />
       ) : (
         <TriangleAlertIcon
-          className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
+          className={cn(
+            "mt-0.5 size-4 shrink-0",
+            (item.tone === "cancelled" || resolvedApproval) && "opacity-60",
+          )}
+          aria-hidden="true"
         />
       )}
       <div className="min-w-0 flex-1">

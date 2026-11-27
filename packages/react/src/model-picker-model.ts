@@ -9,6 +9,7 @@ import {
   effortOptionsForModel,
   findPickerRow,
   groupPickerRowsByBillingClass,
+  modelFundingHint,
   payerSummaryForModel,
   projectClientModelRows,
   runnableLatencyModesForModel,
@@ -100,6 +101,8 @@ export type ModelPickerGroupPresentation<TIcon = unknown> = Partial<
 
 /** The renderer-neutral inputs every picker surface shares. */
 export type ModelPickerInput<TIcon = unknown> = {
+  /** Hide purchase-directed hints while keeping availability and selection unchanged. */
+  showPurchasePrompts?: boolean | undefined;
   groupPresentation?: ModelPickerGroupPresentation<TIcon> | undefined;
   models?: ClientModel[] | undefined;
   rows?: PickerModelRow[] | undefined;
@@ -209,7 +212,14 @@ export function effectiveRows<TIcon>(
       : available;
   return scopedRows.map((row) => {
     const label = groupPresentationFor(props, row.billingClass)?.label;
-    return label === undefined ? row : { ...row, billingClassLabel: label };
+    if (label === undefined && props.showPurchasePrompts !== false) return row;
+    return {
+      ...row,
+      ...(label === undefined ? {} : { billingClassLabel: label }),
+      ...(props.showPurchasePrompts === false
+        ? { fundingHint: modelFundingHint(t, row.catalog, { showPurchasePrompts: false }) }
+        : {}),
+    };
   });
 }
 
@@ -295,11 +305,13 @@ export function modelPickerMenuView<TIcon>(
         label: presentation?.label ?? group.label,
         rows: group.rows.filter((row) => matchingIds.has(row.id)),
         description:
-          override === undefined
-            ? group.billingClass === "opengeni_credits"
-              ? null
-              : defaultHint
-            : override,
+          props.showPurchasePrompts === false
+            ? null
+            : override === undefined
+              ? group.billingClass === "opengeni_credits"
+                ? null
+                : defaultHint
+              : override,
       };
     })
     .filter((group) => group.rows.length > 0);

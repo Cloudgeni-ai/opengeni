@@ -1,4 +1,5 @@
 export { knowledgeIndexingWorkflow } from "./workflows/knowledge-indexing";
+export { accountDeletionWorkflow } from "./workflows/account-deletion";
 export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workflows/document-index";
 export {
   transientObjectDeletionWorkflow,

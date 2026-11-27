@@ -547,6 +547,7 @@ import {
   validatedScheduledTaskUpdate,
   withScheduledTaskEvents,
   withScheduledTaskRunEventOccurrences,
+  scheduledTaskViewerSubjectForGrant,
 } from "@opengeni/core";
 import {
   acceptSessionUserMessageWithOutcome,
@@ -3036,7 +3037,7 @@ export function buildOpenGeniMcpServer(
         // Admins resume what they may pause; editing and running stay with the owner.
         const viewer = await scheduledTaskViewerForGrant(deps.db, grant, deps.settings);
         if (scheduledTaskTogglesAsAdmin(viewer, existing)) {
-          const task = await resumeScheduledTaskAsAdmin(deps.db, grant, existing);
+          const task = await resumeScheduledTaskAsAdmin(deps.db, grant, existing, deps.settings);
           await syncUpdatedScheduledTask({
             db: deps.db,
             workflowClient: deps.workflowClient,
@@ -3226,24 +3227,28 @@ export function buildOpenGeniMcpServer(
         },
       },
       async ({ taskId, limit }) => {
-        await requireVisibleTask(taskId);
+        const task = await requireVisibleTask(taskId);
         const runs = await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100);
         return json({
-          runs: (eventsRun ? await withScheduledTaskRunEventOccurrences(deps.db, runs) : runs).map(
-            (run) => {
-              const visible = scheduledTaskRunForGrant(run, grant);
-              // Counts only: events_get with the run id reads its events.
-              return visible.eventOccurrence
-                ? {
-                    ...visible,
-                    eventOccurrence: {
-                      triggerIds: visible.eventOccurrence.triggerIds,
-                      eventCount: visible.eventOccurrence.eventCount,
-                    },
-                  }
-                : visible;
-            },
-          ),
+          runs: (eventsRun
+            ? await withScheduledTaskRunEventOccurrences(deps.db, runs, {
+                ownerSubjectId: task.ownerSubjectId,
+                readerSubjectId: await scheduledTaskViewerSubjectForGrant(deps.db, grant),
+              })
+            : runs
+          ).map((run) => {
+            const visible = scheduledTaskRunForGrant(run, grant);
+            // Counts only: events_get with the run id reads its events.
+            return visible.eventOccurrence
+              ? {
+                  ...visible,
+                  eventOccurrence: {
+                    triggerIds: visible.eventOccurrence.triggerIds,
+                    eventCount: visible.eventOccurrence.eventCount,
+                  },
+                }
+              : visible;
+          }),
         });
       },
     );

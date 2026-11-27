@@ -42,6 +42,9 @@ const violations: Record<OnlineSafetyRule, string> = {
   "unbatched-data": rolling("UPDATE t SET x=1;"),
   "unannotated-contract": rolling("ALTER TABLE t DROP COLUMN old;"),
   "explicit-lock": rolling("LOCK TABLE t IN ACCESS EXCLUSIVE MODE;"),
+  "multi-table-policy": rolling(
+    "ALTER POLICY p ON t USING (true);\nCREATE POLICY q ON u USING (true);",
+  ),
   "maintenance-concurrent-index": maintenance("CREATE INDEX CONCURRENTLY idx ON t(id);"),
   "maintenance-batched-backfill": maintenance(boundedBatch, batch),
   "maintenance-unbatched-data": maintenance("DELETE FROM t;"),
@@ -132,6 +135,75 @@ describe("online-safety SQL recognition", () => {
     expect(rules(rolling("CREATE TABLE t(id int); CREATE INDEX idx ON other.t(id);"))).toEqual([
       "nonconcurrent-index",
     ]);
+  });
+  test("dynamic policy changes must target one constant table", () => {
+    // The body of the first owner-guard migration, which rewrote the policies
+    // of every matching table in one transaction.
+    const everyTable = `DO $migration$
+DECLARE
+  replacement constant text := '(((CURRENT_USER)::text = \\2) AND \\1((CURRENT_USER)::text, \\2, \\3))';
+  policy record;
+BEGIN
+  FOR policy IN
+    SELECT DISTINCT pol.polname, pol.polrelid::regclass::text AS relation,
+      pg_get_expr(pol.polqual, pol.polrelid) AS qual
+    FROM pg_policy pol
+    ORDER BY relation, pol.polname
+  LOOP
+    EXECUTE format('ALTER POLICY %I ON %s %s', policy.polname, policy.relation,
+      format('USING (%s)', regexp_replace(policy.qual, 'x', replacement, 'g')));
+  END LOOP;
+END
+$migration$;`;
+    expect(rules(rolling(everyTable))).toEqual(["multi-table-policy"]);
+    const oneTable = everyTable
+      .replace("DECLARE", "DECLARE\n  target constant regclass := 'public.t'::regclass;")
+      .replace("FROM pg_policy pol", "FROM pg_policy pol WHERE pol.polrelid = target");
+    expect(rules(rolling(oneTable))).toEqual([]);
+    expect(
+      rules(
+        rolling(
+          "DO $$ BEGIN EXECUTE 'ALTER POLICY p ON t USING (true)'; EXECUTE 'DROP POLICY q ON u'; END $$;",
+        ),
+      ),
+    ).toEqual(["multi-table-policy"]);
+    expect(
+      rules(
+        rolling(
+          "DO $$ BEGIN EXECUTE 'ALTER POLICY p ON t USING (true)'; EXECUTE 'DROP POLICY q ON t'; END $$;",
+        ),
+      ),
+    ).toEqual([]);
+    expect(rules(maintenance(everyTable))).toEqual([]);
+    expect(analyzeMigrationOnlineSafety("1609_test.sql", rolling(everyTable))).toEqual([]);
+  });
+  test("policy changes may span several policies of one existing table or new tables", () => {
+    expect(
+      rules(
+        rolling(
+          'ALTER POLICY p ON t USING (true); DROP POLICY IF EXISTS q ON public.t; CREATE POLICY "r" ON "t" USING (true);',
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      rules(
+        rolling(
+          "CREATE TABLE n(id int); CREATE POLICY p ON n USING (true); ALTER POLICY q ON t USING (true);",
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      rules(rolling("DO $$ BEGIN ALTER POLICY p ON t USING (true); DROP POLICY q ON u; END $$;")),
+    ).toEqual(["multi-table-policy"]);
+    expect(
+      rules(maintenance("ALTER POLICY p ON t USING (true); ALTER POLICY p ON u USING (true);")),
+    ).toEqual([]);
+    expect(
+      analyzeMigrationOnlineSafety(
+        "1609_test.sql",
+        rolling("ALTER POLICY p ON t USING (true); ALTER POLICY p ON u USING (true);"),
+      ).map((f) => f.rule),
+    ).toEqual([]);
   });
   test("foreign keys and CHECK require NOT VALID on their own action", () => {
     expect(rules(rolling("ALTER TABLE t ADD CHECK (NOT valid);"))).toEqual([

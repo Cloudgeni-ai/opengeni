@@ -580,6 +580,7 @@ const SCENARIOS: Record<string, () => Draft[]> = {
     );
     add("session.requiresAction", {}, "turn-1");
     add("session.status.changed", { status: "requires_action" }, null);
+    add("user.approvalDecision", { approvalId: "same", decision: "approve" }, "turn-1");
     add("session.status.changed", { status: "running" }, null);
     add("agent.toolCall.output", { id: "same", output: "Approved query: 312 signups." }, "turn-1");
     add(

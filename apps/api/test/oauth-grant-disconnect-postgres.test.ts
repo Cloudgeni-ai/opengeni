@@ -6,18 +6,24 @@ import {
   createManagedOrganization,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
+  GOOGLE_OAUTH_GRANT_FAMILY,
+  OAUTH_GRANT_REAUTH_SIBLINGS_ROUTINE,
+  OAUTH_GRANT_SHARED_ROUTINE,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
-import { GOOGLE_OAUTH_REVOKE_URL } from "../src/integrations/google-oauth-revocation";
+import { GOOGLE_OAUTH_REVOKE_URL } from "../src/integrations/oauth-grant-revocation";
+import { GOOGLE_SUBJECT_KEY } from "../src/integrations/oauth-profiles";
 
 /* Disconnecting a Google OAuth connection ends the grant at Google and leaves
    no Google tokens in the revoked row, even when Google is unreachable. The
-   grant stays at Google while another live connection may share it. Other
-   providers keep status-only revocation. Through the real app and PostgreSQL. */
+   grant stays at Google while another live connection anywhere in the
+   deployment (any workspace, any organization) may share it, and while that
+   deployment-wide check (migration 1611) is not granted. Other providers keep
+   status-only revocation. Through the real app and PostgreSQL. */
 
 const origin = "http://opengeni.test";
 const encryptionKey = randomBytes(32);
@@ -29,7 +35,7 @@ let revokeRequests: Array<{ url: string; body: string; method: string }> = [];
 let revokeReply: () => Promise<Response> = async () => new Response("{}", { status: 200 });
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("google-oauth-disconnect");
+  const acquired = await acquireSharedTestDatabase("oauth-grant-disconnect");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 8 });
@@ -59,9 +65,22 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-beforeEach(() => {
+async function grantDeploymentWideCheck(granted: boolean): Promise<void> {
+  const appRole = decodeURIComponent(new URL(shared.appUrl).username);
+  for (const routine of [OAUTH_GRANT_SHARED_ROUTINE, OAUTH_GRANT_REAUTH_SIBLINGS_ROUTINE]) {
+    await shared.admin.unsafe(
+      `${granted ? "grant" : "revoke"} execute on function ${routine} ${granted ? "to" : "from"} "${appRole}"`,
+    );
+  }
+}
+
+beforeEach(async () => {
   revokeRequests = [];
   revokeReply = async () => new Response("{}", { status: 200 });
+  // As the follow-up grant of migration 1611 will. The check reads the whole
+  // deployment, so each test starts from no live connections.
+  await grantDeploymentWideCheck(true);
+  await shared.admin`update connections set status = 'revoked' where status <> 'revoked'`;
 });
 
 function browser(cookie: string): Record<string, string> {
@@ -124,13 +143,18 @@ async function googleConnection(
   person: Person,
   personal: boolean,
   tokenEndpoint: string,
-  options: { metadata?: Record<string, unknown>; refreshToken?: string } = {},
+  options: {
+    metadata?: Record<string, unknown>;
+    refreshToken?: string;
+    workspaceId?: string;
+    providerDomain?: string;
+  } = {},
 ) {
   return await createConnection(client.db, {
     accountId: person.accountId,
-    workspaceId: person.workspaceId,
+    workspaceId: options.workspaceId ?? person.workspaceId,
     subjectId: personal ? person.subjectId : null,
-    providerDomain: "gmailmcp.googleapis.com",
+    providerDomain: options.providerDomain ?? "gmailmcp.googleapis.com",
     kind: "oauth2",
     credentialEncrypted: encryptEnvironmentValue(
       encryptionKey,
@@ -143,7 +167,12 @@ async function googleConnection(
         client_secret: "google-client-secret",
       }),
     ),
-    ...(options.metadata ? { metadata: options.metadata } : {}),
+    // As OAuth completion saves them.
+    metadata: {
+      tokenEndpoint,
+      clientId: "opengeni-client.apps.googleusercontent.com",
+      ...(options.metadata ?? {}),
+    },
     createdBySubjectId: person.subjectId,
   });
 }
@@ -276,5 +305,71 @@ describe("Google OAuth disconnect", () => {
     expect(revokedAtGoogle()).toEqual([]);
     await disconnect(person, unidentified.id);
     expect(revokedAtGoogle()).toEqual(["unidentified-refresh-secret"]);
+  });
+
+  test("keeps the grant for a connection of the account in another workspace or organization", async () => {
+    const ada = await signedInPerson();
+    const bob = await signedInPerson();
+    const identity = { [GOOGLE_SUBJECT_KEY]: "google-sub-ada", gmailEmail: "ada@example.test" };
+    // The incident: Gmail disconnected in one workspace while Calendar and
+    // Drive of the same Google account and client live elsewhere.
+    const [otherWorkspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${ada.accountId}, 'Team') returning id`;
+    await shared.admin`insert into workspace_inference_controls (workspace_id, account_id)
+      values (${otherWorkspace!.id}, ${ada.accountId})`;
+    const calendar = await googleConnection(ada, false, GOOGLE_TOKEN_ENDPOINT, {
+      workspaceId: otherWorkspace!.id,
+      providerDomain: "calendarmcp.googleapis.com",
+      metadata: { [GOOGLE_SUBJECT_KEY]: "google-sub-ada" },
+      refreshToken: "calendar-refresh-secret",
+    });
+    // Someone in another organization connected the same Google account.
+    const drive = await googleConnection(bob, true, GOOGLE_TOKEN_ENDPOINT, {
+      providerDomain: "drivemcp.googleapis.com",
+      metadata: { googleDriveEmail: "ADA@example.test" },
+      refreshToken: "drive-refresh-secret",
+    });
+    // A provably different account elsewhere never holds this grant.
+    await googleConnection(bob, true, GOOGLE_TOKEN_ENDPOINT, {
+      metadata: { [GOOGLE_SUBJECT_KEY]: "google-sub-bob", gmailEmail: "ada@example.test" },
+      refreshToken: "bob-refresh-secret",
+    });
+
+    const gmail = async (refreshToken: string) =>
+      await googleConnection(ada, true, GOOGLE_TOKEN_ENDPOINT, {
+        metadata: identity,
+        refreshToken,
+      });
+    await disconnect(ada, (await gmail("gmail-1-refresh-secret")).id);
+    expect(revokedAtGoogle()).toEqual([]);
+    expect((await storedCredential(calendar.id)).status).toBe("active");
+    expect((await storedCredential(drive.id)).status).toBe("active");
+
+    await shared.admin`update connections set status = 'revoked' where id = ${calendar.id}`;
+    await disconnect(ada, (await gmail("gmail-2-refresh-secret")).id);
+    expect(revokedAtGoogle()).toEqual([]);
+
+    // The last live connection of the grant anywhere: end it at Google.
+    await shared.admin`update connections set status = 'revoked' where id = ${drive.id}`;
+    await disconnect(ada, (await gmail("gmail-3-refresh-secret")).id);
+    expect(revokedAtGoogle()).toEqual(["gmail-3-refresh-secret"]);
+  });
+
+  test("only destroys the stored tokens while the deployment-wide check is not granted", async () => {
+    await grantDeploymentWideCheck(false);
+    const person = await signedInPerson();
+    const lone = await googleConnection(person, true, GOOGLE_TOKEN_ENDPOINT, {
+      metadata: { [GOOGLE_SUBJECT_KEY]: "google-sub-lone" },
+      refreshToken: "lone-refresh-secret",
+    });
+    await disconnect(person, lone.id);
+    expect(revokedAtGoogle()).toEqual([]);
+  });
+
+  test("matches Google accounts by the keys OAuth completion saves", () => {
+    expect(GOOGLE_OAUTH_GRANT_FAMILY.subjectMetadataKeys).toContain(GOOGLE_SUBJECT_KEY);
+    expect(GOOGLE_OAUTH_GRANT_FAMILY.tokenEndpointOrigins).toContain(
+      new URL(GOOGLE_TOKEN_ENDPOINT).origin,
+    );
   });
 });

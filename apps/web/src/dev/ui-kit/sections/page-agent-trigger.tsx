@@ -2,7 +2,10 @@ import { useMemo, useState, type ReactNode } from "react";
 import { OpenGeniApiError, type Agent, type AgentTemplate } from "@opengeni/sdk";
 import { OpenGeniProvider } from "@opengeni/react";
 import { AppContext } from "@opengeni/react/app/app-context";
-import { AgentStartsWhen } from "@opengeni/react/app/components/agents/agent-setup-sections";
+import {
+  AgentWhenItWorks,
+  useAgentTriggerTasks,
+} from "@opengeni/react/app/components/agents/agent-setup-sections";
 import { Button } from "@opengeni/react/ui/button";
 import { EventSourceNewPage } from "../../../components/schedules/event-source-new-page";
 import { ScheduleFormPage } from "../../../components/schedules/schedule-form-page";
@@ -123,6 +126,13 @@ const AGENT_CHATS = [
   { id: "55555555-5555-4555-8555-555555555555", title: "Review queue", agentId: AGENT.id },
   { id: "66666666-6666-4666-8666-666666666666", title: "Release review", agentId: AGENT.id },
 ];
+
+function WhenItWorks() {
+  const { tasks, setTasks } = useAgentTriggerTasks(WORKSPACE_ID, AGENT.id);
+  return (
+    <AgentWhenItWorks agent={AGENT} workspaceId={WORKSPACE_ID} tasks={tasks} setTasks={setTasks} />
+  );
+}
 
 function fixtureClient(state: State) {
   const tasks: unknown[] = [];
@@ -280,7 +290,7 @@ export default function AgentTriggerSection() {
                 mode={{ kind: "create", agentId: AGENT.id }}
               />
             ) : (
-              <AgentStartsWhen agent={AGENT} workspaceId={WORKSPACE_ID} />
+              <WhenItWorks />
             )}
             {state === "no-source" ? (
               // The Add a source page at GitHub, as Add trigger's Add a source opens it.

@@ -17,7 +17,7 @@ import {
  */
 export const AUTH_FUNNEL_EVENTS = ["sign_up", "email_verified", "sign_in"] as const;
 export type AuthFunnelEvent = (typeof AUTH_FUNNEL_EVENTS)[number];
-export const AUTH_FUNNEL_METHODS = ["email", "google", "github", "other"] as const;
+export const AUTH_FUNNEL_METHODS = ["email", "google", "github", "apple", "other"] as const;
 export type AuthFunnelMethod = (typeof AUTH_FUNNEL_METHODS)[number];
 export const ORGANIZATION_SETUP_OUTCOMES = ["created", "failed", "rate_limited"] as const;
 export type OrganizationSetupOutcome = (typeof ORGANIZATION_SETUP_OUTCOMES)[number];
@@ -57,7 +57,8 @@ export type SignupFunnelMetrics = {
 
 export function authFunnelMethod(providerId: string | null | undefined): AuthFunnelMethod {
   if (providerId === "credential") return "email";
-  if (providerId === "google" || providerId === "github") return providerId;
+  if (providerId === "google" || providerId === "github" || providerId === "apple")
+    return providerId;
   return "other";
 }
 

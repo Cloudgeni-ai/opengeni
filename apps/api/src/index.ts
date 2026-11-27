@@ -1,3 +1,6 @@
+import { accountDeletionWork } from "@opengeni/db";
+import { z } from "zod";
+import { startAccountDeletionDispatch } from "./account-deletion";
 import { createHash } from "node:crypto";
 import {
   dbSearchPath,
@@ -57,6 +60,7 @@ import {
   ScheduleNotFoundError,
   ScheduleOverlapPolicy,
   WorkflowExecutionAlreadyStartedError,
+  WorkflowNotFoundError,
 } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import {
@@ -439,6 +443,26 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    startAccountDeletion: async (requestId) => {
+      const workflowId = `account-deletion-${requestId}`;
+      try {
+        const execution = await temporal.workflow.getHandle(workflowId).describe();
+        if (execution.status.name === "RUNNING") return;
+      } catch (error) {
+        if (!(error instanceof WorkflowNotFoundError)) throw error;
+      }
+      const ticket = await accountDeletionWork(db, "ticket", { requestId }, z.uuid());
+      try {
+        await temporal.workflow.start("accountDeletionWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ requestId, ticket }],
+        });
+      } catch (error) {
+        if (!isWorkflowAlreadyStarted(error)) throw error;
+      }
+    },
     scheduleTransientObjectDeletion: async ({ workspaceId, objectKeys, deleteAfter }) => {
       const keys = [...new Set(objectKeys)].sort();
       if (keys.length === 0) return;
@@ -805,6 +829,7 @@ export async function startApi(options: StartApiOptions = {}) {
           dbClient.db,
           routeDeps.managedEmailTransport,
           billingAppUrl,
+          { environment: settings.environment },
         )
       : undefined;
   const stopSlackInteractionPump = settings.slackSigningSecret
@@ -832,6 +857,7 @@ export async function startApi(options: StartApiOptions = {}) {
     },
     observability,
   });
+  const stopAccountDeletionDispatch = startAccountDeletionDispatch(routeDeps);
   const stopScheduledTaskLifecyclePump = startScheduledTaskLifecyclePump({
     db: dbClient.db,
     sync: (task) => workflowClient.client.syncScheduledTask({ task }),
@@ -952,6 +978,7 @@ export async function startApi(options: StartApiOptions = {}) {
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
+      await stopAccountDeletionDispatch();
       await stopScheduledTaskLifecyclePump();
       await stopEventTriggerDispatchPump();
       await stopAppSyncPump();

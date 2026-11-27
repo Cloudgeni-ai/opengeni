@@ -1,6 +1,8 @@
 export * from "./model-inference";
+export * from "./ai-processing-consent";
 export type * from "./decision-types";
 export * from "./billing-credit-notifications";
+export * from "./account-deletion";
 import { BillingCreditNotification } from "./billing-credit-notifications";
 import {
   FIRST_PARTY_MCP_TOOL_ALIASES,
@@ -86,6 +88,7 @@ export * from "./app-server";
 export * from "./site-sql";
 export * from "./app-package";
 export * from "./app-templates";
+export * from "./ready-made-setup";
 export * from "./sidebar-layout";
 export * from "./claude-subscription-usage";
 export * from "./subscription-usage-pool";
@@ -14585,8 +14588,12 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * `session_usage_limit` (an existing-session task reached its per-task usage
  * limit; admitted again once a person raises or clears it)
  * (transient), and for event runs `chain_limit` (too deep a chain of
- * automations) and `duplicate_agent_run` (another automation of the same
- * agent took the delivery). Readers must tolerate new reasons.
+ * automations), `duplicate_agent_run` (another automation of the same
+ * agent took the delivery) and `owner_only_event` (an event only the
+ * automation's owner may see, such as their private meeting, would have run in
+ * a chat shared with the workspace). `scheduled_dispatch_exhausted` records a failed
+ * occurrence whose dispatch retries have run out; it is `retryable: true`
+ * because later occurrences can still start. Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z
@@ -22608,13 +22615,15 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       session: z.literal("cookie"),
       emailVerificationRequired: primitives.boolean.default(true),
       socialProviders: z
-        .array(z.enum(["google", "github"]))
-        .max(2)
+        .array(z.enum(["google", "github", "apple"]))
+        .max(3)
         .default([]),
       // False while the deployment has paused new account creation (launch-load
       // safety switch). Sign-in for existing accounts stays available.
       newSignupsEnabled: primitives.boolean.default(true),
       signupChallengeSiteKey: z.string().optional(),
+      /** Email sign-in also needs the challenge (same site key); omitted means no. */
+      signInChallengeRequired: primitives.boolean.optional(),
       /** Heedeo signup scoring's browser script; present only while scoring is on. */
       heedeo: z
         .object({ publishableKey: z.string(), scriptUrl: z.string() })

@@ -9,6 +9,9 @@ These provider-owned marks identify the connected service; they do not imply end
 - `google-drive.svg`: Google's Drive product mark,
   https://www.gstatic.com/images/branding/productlogos/drive_2020q4/v10/192px.svg
   (retrieved 2026-11-09, unmodified).
+- `google-chrome.svg`: Google's Chrome product mark,
+  https://www.gstatic.com/images/branding/productlogos/chrome/v7/192px.svg
+  (retrieved 2026-11-26, unmodified).
 - `outlook.ico`: https://outlook.live.com/favicon.ico (retrieved 2026-09-20).
 - `microsoft-teams.svg`, `onedrive.svg`, `sharepoint.svg`: byte-identical copies of the
   Microsoft product marks the console already bundles in

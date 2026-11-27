@@ -1,42 +1,30 @@
 /**
- * Get started: the guided setups (./guided-setups.ts). The list, and one
- * setup's three steps, each with one action. Nothing here is new machinery:
- * Connect opens the existing Connect pages, Add uses the Agents page's
- * ready-made add, and Turn on opens the agent page's Add trigger dialog.
+ * Get started: the front door into Enable (docs/agents.md#guided-setups).
+ * A showcase: an example of what the selected setup produces, labelled
+ * "Example", beside the setups; one button opens the selected setup on the
+ * Enable page (components/enable), with what it needs underneath. Hovering or
+ * selecting a setup swaps the example. `?setup=` opens one setup on Enable.
  */
-import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { ChartLineIcon, GitPullRequestIcon, ListChecksIcon, RocketIcon } from "lucide-react";
-import type { Agent, AgentSummary, AgentTemplate, CapabilityCatalogItem } from "@opengeni/sdk";
+import { useEffect, useState, type ReactNode } from "react";
+import { ArrowRightIcon, ChartLineIcon, GitPullRequestIcon, ListChecksIcon } from "lucide-react";
+import type { AgentTemplate } from "@opengeni/sdk";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
-import {
-  addAgentSuggestedTrigger,
-  AgentTriggerDialog,
-  agentTriggerSaveError,
-} from "@opengeni/react/app/components/agents/agent-trigger-dialog";
-import { t } from "@opengeni/react/app/lib/console-text";
-import { githubConnectedOf, githubConnectHref } from "@opengeni/react/app/lib/github-connect";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { useNavigate } from "@opengeni/react/app/lib/navigation";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
-import { toast } from "@opengeni/react/app/lib/toast";
-import { userErrorText } from "@opengeni/react/ui/api-error";
-import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
-import { DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { Button } from "@opengeni/react/ui/button";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
-import { Notice } from "@opengeni/react/ui/notice";
-import { RowButton } from "@opengeni/react/ui/page-actions";
-import { SettingRow, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
 
+import { EnablePage } from "../enable/enable-page";
+import type { EnableStep } from "../enable/enable-subject";
 import {
   GUIDED_SETUPS,
-  agentForSetup,
-  catalogConnectHref,
-  catalogItemConnected,
-  catalogItemFor,
   guidedSetupByKey,
-  setupTriggerTask,
+  needsLine,
+  setupNeeds,
   type GuidedSetup,
 } from "./guided-setups";
 
@@ -46,416 +34,198 @@ const SETUP_ICONS: Record<GuidedSetup["icon"], ReactNode> = {
   "chart-line": <ChartLineIcon />,
 };
 
-/** One setup's trigger: on, paused (with its task), none, or unknown when it can't be read. */
-type TriggerState =
-  | { kind: "on" }
-  | { kind: "paused"; taskId: string }
-  | { kind: "off" }
-  | { kind: "unknown" };
-
-/** What the page knows about the workspace; null while it reads. */
-type SetupState = {
-  /** Null when they can't be read: then nothing offers to add another. */
-  agents: AgentSummary[] | null;
-  /** Each setup's trigger, by key; absent while it has no agent. */
-  triggers: Map<string, TriggerState>;
-  /** The connector catalog; null when it can't be read. */
-  catalog: CapabilityCatalogItem[] | null;
+/** Each setup's tile hue, so the three read apart at a glance. */
+const SETUP_HUES: Record<GuidedSetup["icon"], number> = {
+  "git-pull-request": 275,
+  "list-checks": 185,
+  "chart-line": 45,
 };
 
-function useSetupState(workspaceId: string) {
-  const { client } = useAppContext();
-  const [state, setState] = useState<SetupState | null>(null);
-  const [revision, setRevision] = useState(0);
-  const reload = useCallback(() => setRevision((value) => value + 1), []);
-  useEffect(() => {
-    let live = true;
-    void (async () => {
-      // Each read degrades on its own: a step it can't read shows as not done.
-      const [agents, catalog] = await Promise.all([
-        client.listAgents(workspaceId).catch(() => null),
-        client
-          .listCapabilities(workspaceId)
-          .then((response) => response.items)
-          .catch(() => null),
-      ]);
-      const triggers = new Map<string, TriggerState>();
-      await Promise.all(
-        GUIDED_SETUPS.map(async (setup) => {
-          const agent = agents ? agentForSetup(agents, setup) : null;
-          if (!agent) return;
-          const tasks = await client
-            .listScheduledTasks(workspaceId, { agentId: agent.id, limit: 200 })
-            .catch(() => null);
-          const task = tasks ? setupTriggerTask(tasks, agent.id, setup) : null;
-          triggers.set(
-            setup.key,
-            !tasks
-              ? { kind: "unknown" }
-              : !task
-                ? { kind: "off" }
-                : task.status === "active"
-                  ? { kind: "on" }
-                  : { kind: "paused", taskId: task.id },
-          );
-        }),
-      );
-      if (live) setState({ agents, triggers, catalog });
-    })();
-    return () => {
-      live = false;
-    };
-  }, [client, workspaceId, revision]);
-  return { state, reload };
+export function getStartedHref(workspaceId: string, setupKey?: string, step?: EnableStep): string {
+  const params = new URLSearchParams();
+  if (setupKey) params.set("setup", setupKey);
+  if (step) params.set("step", step);
+  const search = params.toString();
+  return `/workspaces/${encodeURIComponent(workspaceId)}/get-started${search ? `?${search}` : ""}`;
 }
 
 export function GetStartedPage({
   workspaceId,
   setupKey,
+  step,
 }: {
   workspaceId: string;
   setupKey?: string | undefined;
+  step?: EnableStep | undefined;
 }) {
   const navigate = useNavigate();
-  const { state, reload } = useSetupState(workspaceId);
-  const open = (key: string | undefined) =>
-    void navigate({
-      to: "/workspaces/$workspaceId/get-started",
-      params: { workspaceId },
-      search: key ? { setup: key } : {},
-    });
   const setup = guidedSetupByKey(setupKey);
   if (setup) {
     return (
-      <GuidedSetupSteps
+      <EnablePage
         key={setup.key}
         workspaceId={workspaceId}
-        setup={setup}
-        state={state}
-        reload={reload}
-        onBack={() => open(undefined)}
+        subject={{
+          kind: "agent",
+          templateKey: setup.agentTemplateKey,
+          triggerName: setup.triggerName,
+          requireProviders: setup.requireProviders,
+        }}
+        step={step}
+        title={setup.title}
+        description={setup.description}
+        icon={SETUP_ICONS[setup.icon]}
+        back={{
+          label: "Get started",
+          onClick: () => void navigate({ href: getStartedHref(workspaceId) }),
+        }}
+        returnPath={getStartedHref(workspaceId, setup.key, "connect")}
       />
     );
   }
   return (
-    <DetailPage>
-      <DetailPageHeader
-        leading={<LogoTile name="Get started" icon={<RocketIcon />} />}
-        title="Get started"
-        meta={["Pick a setup. Each ends with an agent at work."]}
-      />
-      <DetailSection title="Setups">
-        <RowList label="Setups" variant="catalog" busy={state === null}>
-          {state === null ? (
-            <ListRowSkeleton count={GUIDED_SETUPS.length} />
-          ) : (
-            GUIDED_SETUPS.map((entry) => (
-              <ListRow
-                key={entry.key}
-                leading={<LogoTile name={entry.title} icon={SETUP_ICONS[entry.icon]} />}
-                title={entry.title}
-                description={entry.description}
-                status={
-                  state.triggers.get(entry.key)?.kind === "on" ? (
-                    <StatusBadge status="ready" variant="dot" />
-                  ) : undefined
-                }
-                onOpen={() => open(entry.key)}
-              />
-            ))
-          )}
-        </RowList>
-      </DetailSection>
-    </DetailPage>
+    <Showcase
+      workspaceId={workspaceId}
+      onOpen={(key) => void navigate({ href: getStartedHref(workspaceId, key) })}
+    />
   );
 }
 
-function DoneBadge({ children = "Done" }: { children?: ReactNode }) {
-  return (
-    <StatusBadge tone="success" variant="dot">
-      {children}
-    </StatusBadge>
-  );
-}
-
-function GuidedSetupSteps({
-  workspaceId,
-  setup,
-  state,
-  reload,
-  onBack,
-}: {
-  workspaceId: string;
-  setup: GuidedSetup;
-  state: SetupState | null;
-  reload: () => void;
-  onBack: () => void;
-}) {
-  const context = useAppContext();
-  const { client, accessContext } = context;
-  const navigate = useNavigate();
-  const [adding, setAdding] = useState(false);
-  const [turningOn, setTurningOn] = useState(false);
-  const [template, setTemplate] = useState<AgentTemplate | null>(null);
-  const [agent, setAgent] = useState<Agent | null>(null);
-  const [triggerOpen, setTriggerOpen] = useState(false);
-
-  const summary = state?.agents ? agentForSetup(state.agents, setup) : null;
-  const agentId = agent?.id ?? summary?.id ?? null;
-  // The full agent, for the Add trigger dialog.
-  useEffect(() => {
-    if (!summary || agent?.id === summary.id) return;
-    let live = true;
-    client.getAgent(workspaceId, summary.id).then(
-      (full) => live && setAgent(full),
-      () => undefined,
-    );
-    return () => {
-      live = false;
-    };
-  }, [agent?.id, client, summary, workspaceId]);
-  // The template's suggested trigger this setup turns on.
+/** The agent templates, for what each setup needs; null while they load or when they can't. */
+function useTemplates(workspaceId: string): AgentTemplate[] | null {
+  const { client } = useAppContext();
+  const [templates, setTemplates] = useState<AgentTemplate[] | null>(null);
   useEffect(() => {
     let live = true;
     client.listAgentTemplates(workspaceId).then(
-      (list) =>
-        live && setTemplate(list.find((entry) => entry.key === setup.agentTemplateKey) ?? null),
+      (list) => live && setTemplates(list),
       () => undefined,
     );
     return () => {
       live = false;
     };
-  }, [client, setup.agentTemplateKey, workspaceId]);
-  const suggestion = template?.suggestedTriggers.find((entry) => entry.name === setup.triggerName);
+  }, [client, workspaceId]);
+  return templates;
+}
 
-  // Step 1: the connection.
-  const connection = setup.connection;
-  const catalogItem =
-    connection.kind === "catalog" && state?.catalog
-      ? catalogItemFor(state.catalog, connection.mcpUrl)
-      : null;
-  const githubStatus = context.githubStatus?.status;
-  const connected =
-    connection.kind === "github"
-      ? githubConnectedOf(githubStatus) === true
-      : catalogItemConnected(catalogItem);
-  // A connector this deployment doesn't offer, or GitHub without its app here.
-  const notOffered =
-    connection.kind === "github"
-      ? githubStatus === "disabled"
-      : state?.catalog != null && catalogItem === null;
-  const connect = () =>
-    void navigate({
-      href:
-        connection.kind === "github"
-          ? githubConnectHref(workspaceId)
-          : catalogConnectHref(workspaceId, catalogItem?.id ?? null),
-    });
-
-  // Step 2: the agent.
-  const canAdd = hasWorkspacePermission(accessContext, workspaceId, "sessions:create");
-  const agentsUnknown = state !== null && state.agents === null && !agent;
-  const addAgent = async () => {
-    if (adding) return;
-    setAdding(true);
-    try {
-      const created = await client.createAgentFromTemplate(workspaceId, setup.agentTemplateKey, {
-        editAccess: "everyone",
-      });
-      setAgent(created);
-      toast.success(`Added ${created.name}`);
-      reload();
-    } catch (error) {
-      toast.error(`Couldn't add ${setup.agentName}`, { description: userErrorText(error) });
-    } finally {
-      setAdding(false);
-    }
-  };
-  const openAgent = () => {
-    if (!agentId) return;
-    void navigate({
-      to: "/workspaces/$workspaceId/agents/$agentId",
-      params: { workspaceId, agentId },
-    });
-  };
-
-  // Step 3: the trigger.
-  const trigger = state?.triggers.get(setup.key) ?? null;
-  const triggerOn = trigger?.kind === "on";
-  const ready = Boolean(agentId) && triggerOn;
-  const canEditAgent = agent?.viewer.canEdit !== false;
-  const resume = async (taskId: string) => {
-    setTurningOn(true);
-    try {
-      await client.resumeScheduledTask(workspaceId, taskId);
-      reload();
-    } catch (error) {
-      toast.error("Couldn't turn on the trigger", { description: userErrorText(error) });
-    } finally {
-      setTurningOn(false);
-    }
-  };
-  // A one-click suggestion is added as it is; anything it lacks opens the dialog.
-  const turnOn = async () => {
-    if (!agent || !suggestion || turningOn) return;
-    if (!suggestion.oneClick) {
-      setTriggerOpen(true);
-      return;
-    }
-    setTurningOn(true);
-    try {
-      const outcome = await addAgentSuggestedTrigger(t, {
-        client,
-        workspaceId,
-        agent,
-        suggestion,
-        githubConnected: githubConnectedOf(githubStatus),
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        now: new Date(),
-      });
-      if (outcome.kind === "needs_setup") {
-        setTriggerOpen(true);
-        return;
-      }
-      toast.success("Trigger added", { description: outcome.task.name });
-      reload();
-    } catch (error) {
-      toast.error("Couldn't add the trigger", {
-        description: agentTriggerSaveError(
-          error,
-          agent.visibility === "private" ? "private" : "workspace",
-        ),
-      });
-    } finally {
-      setTurningOn(false);
-    }
-  };
-  const triggerDescription = !agentId
-    ? `Add ${setup.agentName} first.`
-    : trigger?.kind === "unknown"
-      ? "Couldn't check its triggers."
-      : !canEditAgent
-        ? `Needs edit access to ${setup.agentName}.`
-        : undefined;
-
+export function Showcase({
+  workspaceId,
+  onOpen,
+  initialKey,
+}: {
+  workspaceId: string;
+  onOpen: (key: string) => void;
+  initialKey?: string | undefined;
+}) {
+  const templates = useTemplates(workspaceId);
+  const [selectedKey, setSelectedKey] = useState(initialKey ?? GUIDED_SETUPS[0]!.key);
+  const selected = guidedSetupByKey(selectedKey) ?? GUIDED_SETUPS[0]!;
+  const template = templates?.find((entry) => entry.key === selected.agentTemplateKey) ?? null;
+  const needs = templates ? needsLine(setupNeeds(selected, template)) : null;
   return (
-    <DetailPage back={{ label: "Get started", onClick: onBack }}>
-      <DetailPageHeader
-        leading={<LogoTile name={setup.title} icon={SETUP_ICONS[setup.icon]} />}
-        title={setup.title}
-        meta={[setup.description]}
-      />
-      {ready ? (
-        <Notice tone="success" className="mt-6">
-          {setup.ready}
-        </Notice>
-      ) : null}
-      <DetailSection title="Steps">
-        {state === null ? (
-          <SettingRowSkeleton />
-        ) : (
-          <>
-            <SettingRow
-              data-guided-step="connect"
-              label={`1. Connect ${connection.name}`}
-              description={notOffered ? `${connection.name} isn't offered here.` : undefined}
-              control={
-                connected ? (
-                  <DoneBadge>Connected</DoneBadge>
-                ) : notOffered ? undefined : (
-                  <RowButton onClick={connect}>Connect</RowButton>
-                )
-              }
-            />
-            <SettingRow
-              data-guided-step="agent"
-              label={`2. Add ${setup.agentName}`}
-              description={
-                agentsUnknown
-                  ? "Couldn't check your agents."
-                  : !agentId && !canAdd
-                    ? "Ask a workspace admin to add it."
-                    : (template?.description ?? undefined)
-              }
-              control={
-                agentId ? (
-                  <RowButton onClick={openAgent}>Open</RowButton>
-                ) : agentsUnknown ? (
-                  <RowButton onClick={reload}>Retry</RowButton>
-                ) : canAdd ? (
-                  <RowButton disabled={adding} onClick={() => void addAgent()}>
-                    Add
-                  </RowButton>
-                ) : undefined
-              }
-            />
-            <SettingRow
-              data-guided-step="trigger"
-              label={`3. ${setup.triggerLabel}`}
-              description={triggerDescription}
-              control={
-                triggerOn ? (
-                  <DoneBadge>On</DoneBadge>
-                ) : trigger?.kind === "unknown" ? (
-                  <RowButton onClick={reload}>Retry</RowButton>
-                ) : trigger?.kind === "paused" ? (
-                  <RowButton
-                    disabled={!canEditAgent || turningOn}
-                    onClick={() => void resume(trigger.taskId)}
-                  >
-                    Turn on
-                  </RowButton>
-                ) : (
-                  <RowButton
-                    disabled={!agent || !suggestion || !canEditAgent || turningOn}
-                    onClick={() => void turnOn()}
-                  >
-                    Turn on
-                  </RowButton>
-                )
-              }
-            />
-          </>
-        )}
-      </DetailSection>
-      {agent && suggestion ? (
-        <AgentTriggerDialog
-          agent={agent}
-          workspaceId={workspaceId}
-          suggestion={suggestion}
-          open={triggerOpen}
-          onOpenChange={setTriggerOpen}
-          onCreated={(task) => {
-            setTriggerOpen(false);
-            toast.success("Trigger added", { description: task.name });
-            reload();
-          }}
-          onOpenFullForm={(start) =>
-            void navigate({
-              to: "/workspaces/$workspaceId/automations/new",
-              params: { workspaceId },
-              search: {
-                agent: agent.id,
-                ...(template
-                  ? { agentTrigger: template.suggestedTriggers.indexOf(suggestion) }
-                  : {}),
-                ...(start.sourceId ? { source: start.sourceId } : {}),
-                returnTo: "agent",
-              },
-              ...(start.note || start.chat
-                ? { state: { agentTriggerStart: { note: start.note, chat: start.chat } } }
-                : {}),
-            })
-          }
-          onAddSource={(kind) =>
-            void navigate({
-              to: "/workspaces/$workspaceId/automations/sources/new",
-              params: { workspaceId },
-              search: kind ? { kind } : {},
-            })
-          }
-        />
-      ) : null}
-    </DetailPage>
+    <div className="mx-auto w-full max-w-[1040px] px-8 pt-10 pb-12 max-sm:px-4 max-sm:pt-6">
+      <section
+        data-get-started-showcase=""
+        aria-labelledby="get-started-title"
+        className="grid grid-cols-1 overflow-hidden rounded-xl border border-border bg-surface lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]"
+      >
+        <div className="order-2 min-w-0 border-border bg-surface-2 p-6 max-lg:border-t lg:order-1 lg:border-r lg:p-8">
+          <SetupExampleCard setup={selected} />
+        </div>
+        <div className="order-1 flex min-w-0 flex-col p-6 lg:order-2 lg:p-8">
+          <h1 id="get-started-title" className="text-xl leading-7 font-semibold text-fg">
+            Put agents on your engineering work
+          </h1>
+          <p className="mt-1 text-sm text-fg-muted">Each one is ready in three steps.</p>
+          <div role="radiogroup" aria-label="Setups" className="mt-6 flex flex-col gap-1">
+            {GUIDED_SETUPS.map((entry) => {
+              const active = entry.key === selected.key;
+              return (
+                <button
+                  key={entry.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  data-setup={entry.key}
+                  onMouseEnter={() => setSelectedKey(entry.key)}
+                  onFocus={() => setSelectedKey(entry.key)}
+                  onClick={() => setSelectedKey(entry.key)}
+                  className={cn(
+                    "flex w-full items-center gap-3 rounded-lg border px-3 py-3 text-left transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40",
+                    active ? "border-border bg-surface-2" : "border-transparent hover:bg-hover",
+                  )}
+                >
+                  <LogoTile
+                    size="md"
+                    name={entry.title}
+                    icon={SETUP_ICONS[entry.icon]}
+                    hue={SETUP_HUES[entry.icon]}
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium text-fg">{entry.title}</span>
+                    <span className="block text-xs leading-4.5 text-fg-muted">
+                      {entry.description}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <Button
+            type="button"
+            className="mt-6 w-full"
+            data-get-started-open=""
+            onClick={() => onOpen(selected.key)}
+          >
+            {selected.action}
+            <ArrowRightIcon aria-hidden="true" />
+          </Button>
+          <p className="mt-2 min-h-4 text-center text-xs text-fg-muted" data-get-started-needs="">
+            {needs ?? ""}
+          </p>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/** What the setup's agent produces, drawn from its definition and labelled "Example". */
+export function SetupExampleCard({ setup }: { setup: GuidedSetup }) {
+  const example = setup.example;
+  return (
+    <figure data-setup-example={setup.key} aria-label={`Example: ${setup.title}`}>
+      <MetaChip variant="outline">Example</MetaChip>
+      <div className="mt-6 flex flex-col gap-3">
+        <div className="flex items-center gap-3 rounded-lg border border-border bg-surface px-4 py-3">
+          <LogoTile
+            size="sm"
+            name={example.subject}
+            icon={SETUP_ICONS[setup.icon]}
+            hue={SETUP_HUES[setup.icon]}
+          />
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-fg">{example.subject}</p>
+            <p className="text-xs text-fg-muted">{example.subjectMeta}</p>
+          </div>
+        </div>
+        <div className="rounded-lg border border-border bg-surface px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-fg">{setup.agentName}</span>
+            <StatusBadge tone={example.verdictTone} variant="outline">
+              {example.verdict}
+            </StatusBadge>
+          </div>
+          <ul className="mt-3 flex flex-col gap-2">
+            {example.lines.map((line) => (
+              <li key={line.label} className="flex items-baseline gap-2 text-sm">
+                <StatusDot tone={line.tone} size="sm" className="translate-y-[-1px]" />
+                <span className="w-16 shrink-0 text-xs text-fg-muted">{line.label}</span>
+                <span className="text-fg">{line.text}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </figure>
   );
 }

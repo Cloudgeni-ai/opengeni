@@ -72,6 +72,7 @@ export const englishMessages = {
   "artifacts.artifactChrome.couldNotOpenThisArtifact": "Could not open this artifact",
   "artifacts.artifactChrome.couldnTLoadThisSite": "Couldn’t load this app.",
   "artifacts.artifactChrome.couldnTLoadThisSite2": "Couldn't load this app",
+  "artifacts.artifactChrome.couldnTLoadThisPreview": "Couldn’t load this preview.",
   "artifacts.artifactChrome.countvalueWorkspaceToolsAvailableTo":
     "{countValue} workspace tools available to this app",
   "artifacts.artifactChrome.edit": "Edit",
@@ -568,6 +569,8 @@ export const englishMessages = {
   "automations.run.error.chatGone": "The chat it runs in no longer exists.",
   "automations.run.error.duplicateAgentRun":
     "Skipped because another automation of the same agent took this event.",
+  "automations.run.error.ownerOnlyEvent":
+    "Skipped the owner's private events because this automation's chat is shared. Run it in a new chat each time to include later ones.",
   "automations.run.error.chatPaused":
     "Skipped because the chat was paused. Resume the chat to let later runs start; skipped runs aren't replayed.",
   "automations.run.error.machineUnavailable":
@@ -1321,6 +1324,9 @@ export const englishMessages = {
     "Voice input is unavailable while the composer is disabled.",
   "composerTranscriptionControl.voiceInputNeedsCreditsRecording":
     "Voice input needs credits. Recording saved; retry after adding credits.",
+  "composerTranscriptionControl.voiceInputNoCredits": "No credits are available for voice input.",
+  "composerTranscriptionControl.voiceInputNoCreditsRecordingSaved":
+    "No credits are available for voice input. Your recording is saved.",
   "composerTranscriptionControl.voiceInputStoppedBecauseAudio":
     "Voice input stopped because audio could not be saved safely.",
   "computerViewer.acting": "Acting",
@@ -2171,6 +2177,13 @@ export const englishMessages = {
     "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
   "lib.format.apiCreditsRequiredHeadline":
     "API usage uses credits, not your plan credit. Add credits to continue.",
+  "lib.format.apiCreditsUnavailable": "No credits are available for API use.",
+  "lib.format.modelCreditsUnavailable": "There aren't enough credits for this model.",
+  "lib.format.ownKeyCreditsUnavailable": "No credits are available for using your own key.",
+  "lib.format.ownKeyUnavailableOnPlan":
+    "Your organization's plan doesn't include using your own key.",
+  "lib.format.subscriptionUnavailableOnPlan":
+    "Your organization's plan doesn't include using your own subscription.",
   "lib.format.byokPaidCreditRequired":
     "Add credits to use your own key. The conversation is preserved.",
   "lib.format.byokPaidCreditRequiredAskOwner":
@@ -2202,6 +2215,8 @@ export const englishMessages = {
   "lib.format.minutes": "{count}m",
   "lib.format.accountUnavailable":
     "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your message.",
+  "lib.format.sandboxUnavailableInApp": "The sandbox is unavailable for this organization.",
+  "lib.format.providerPaymentUnavailable": "The model provider couldn’t bill this request.",
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue.",
   "lib.format.newChatModelUnavailable": "This model isn't available to you. Choose another model.",
@@ -3555,6 +3570,7 @@ export const englishMessages = {
   "modelPolicy.models": "Models",
   "modelPolicy.needsCredits": "Not covered by your credits",
   "modelPolicy.needsPlan": "Needs {plan}",
+  "modelPolicy.notOnCurrentPlan": "Not available on your current plan",
   "modelPolicy.notEntitled": "Not entitled",
   "modelPolicy.opengeniCredits": "{product} credits",
   "modelPolicy.opengeniCreditsAutomaticManagedRoute": "{product} credits · automatic managed route",
@@ -5798,6 +5814,7 @@ export const englishMessages = {
   "timeline.noticePresentation.youRejectedTitle": "You declined “{title}”.",
   "timeline.noticePresentation.youRejectedTitleWithDetail": "You declined “{title}” ({detail}).",
   "timeline.noticePresentation.youRespondedToThisApproval": "You responded to this approval.",
+  "timeline.noticePresentation.notAnswered": "Not answered.",
   "timeline.patchApplyCommand.commandToApplyTheseChanges": "Command to apply these changes",
   "timeline.patchApplyCommand.copied": "Copied",
   "timeline.patchApplyCommand.copiedPasteItInA":

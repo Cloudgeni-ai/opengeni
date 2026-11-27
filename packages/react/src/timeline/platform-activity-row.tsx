@@ -37,6 +37,9 @@ export default function PlatformActivityRow({
   // Hooks run for every row kind; only a running startup step ticks.
   const nowMs = useSecondTick(item.kind === "startup-phase" && item.status === "running");
   if (item.kind === "reasoning") {
+    // Provider summaries have no language metadata and are generally English.
+    // Keep the original available on expansion even when it is not a row preview.
+    const showPreview = msg.locale === undefined || /^en(?:-|$)/i.test(msg.locale);
     return j(ActivityDisclosure, {
       icon: brainIcon(j, s),
       iconTone: "muted",
@@ -47,11 +50,13 @@ export default function PlatformActivityRow({
             children: msg("timeline.platformActivityRow.thought"),
           }),
       running: item.streaming,
-      compactPreview: item.text.replace(/\*\*|__|`/g, "").replace(/\s+/g, " "),
-      preview: j("span", {
-        className: "og-reasoning-preview",
-        children: j(Markdown, { streaming: item.streaming, children: item.text }),
-      }),
+      compactPreview: showPreview ? item.text.replace(/\*\*|__|`/g, "").replace(/\s+/g, " ") : null,
+      preview: showPreview
+        ? j("span", {
+            className: "og-reasoning-preview",
+            children: j(Markdown, { streaming: item.streaming, children: item.text }),
+          })
+        : undefined,
       children: j("div", {
         className: "text-og-base leading-6 text-og-fg-muted [&_strong]:text-og-fg-muted",
         children: j(Markdown, { streaming: item.streaming, children: item.text }),

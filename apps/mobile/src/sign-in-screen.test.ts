@@ -15,6 +15,12 @@ mock.module("react", () => React);
 mock.module("react/jsx-dev-runtime", () => JsxDevRuntime);
 mock.module("react/jsx-runtime", () => JsxRuntime);
 const { act, createElement } = React;
+let isPublicIosApp = false;
+const opened: string[] = [];
+mock.module("@/store-review", () => ({
+  isPublicIosApp: () => isPublicIosApp,
+  openOpengeniPrivacyPolicy: () => opened.push("privacy policy"),
+}));
 type HostProps = {
   children?: React.ReactNode | ((state: { pressed: boolean }) => React.ReactNode);
   accessibilityLabel?: string;
@@ -111,6 +117,8 @@ beforeEach(() => {
   switched.length = 0;
   retried.length = 0;
   routes.length = 0;
+  opened.length = 0;
+  isPublicIosApp = false;
   params = {};
 });
 mock.module("@/account", () => ({
@@ -136,10 +144,24 @@ const switchRows = (container: HTMLElement) =>
 const button = (container: HTMLElement, label: string) =>
   [...container.querySelectorAll("button")].find((each) => each.textContent === label);
 
+test("the public iOS privacy policy is accessible before sign-in", async () => {
+  isPublicIosApp = true;
+  const view = await renderComponent(createElement(SignInScreen, { target: null }));
+  try {
+    const link = view.container.querySelector<HTMLButtonElement>('[data-role="link"]');
+    expect(link?.textContent).toBe("Privacy policy");
+    await act(async () => link?.click());
+    expect(opened).toEqual(["privacy policy"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a signed-out pick lists the other accounts, and one tap goes back to where you were", async () => {
   const view = await renderComponent(createElement(SignInScreen, { target: picked }));
   try {
     expect(view.container.textContent).toContain("Sign in again");
+    expect(view.container.querySelector('[data-role="link"]')).toBeNull();
     expect(view.container.textContent).toContain("Switch account");
     expect(switchRows(view.container)).toEqual([
       "Switch to work@example.com on app.opengeni.ai, signed in",

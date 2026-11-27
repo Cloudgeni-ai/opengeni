@@ -147,6 +147,7 @@ async function readWorkspaceFeed(
     occurredAt: event.occurredAt.toISOString(),
     title: event.title,
     purpose: event.purpose,
+    sharedWithWorkspace: event.sharedWithWorkspace,
   }));
   const activity: WorkspaceActivityFact[] = activityRead.events.map((event) => ({
     id: event.id,
@@ -167,6 +168,7 @@ async function readWorkspaceFeed(
       : chatUrl(deps.settings.publicBaseUrl, source.workspaceId, event.sessionId),
     appId: event.appId,
     appTitle: event.appTitle,
+    sharedWithWorkspace: event.sharedWithWorkspace,
   }));
   const body = workspaceDeliveryBody(facts, activity);
   const ids = [...facts.map((fact) => fact.id), ...activity.map((fact) => fact.id)];

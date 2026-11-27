@@ -1078,6 +1078,7 @@ export async function signInEmail(input: {
   email: string;
   password: string;
   rememberMe?: boolean;
+  signupChallengeToken?: string;
 }): Promise<unknown> {
   return await authRequest<unknown>("/sign-in/email", {
     method: "POST",
@@ -1210,7 +1211,7 @@ function authReturnBase(): string {
 }
 
 export async function startManagedSocialSignIn(
-  provider: "google" | "github",
+  provider: "google" | "github" | "apple",
   signupChallengeToken?: string,
 ): Promise<void> {
   const reauthentication = window.location.pathname === "/settings/security";
@@ -1221,7 +1222,7 @@ export async function startManagedSocialSignIn(
       : signupReturnPath(authReturnBase(), `${provider}_signin`),
   );
   const attribution = reauthentication ? null : signupAttribution();
-  // A Google or GitHub click may create an account, so each one identifies.
+  // A social sign-in may create an account, so each one identifies.
   const heedeoToken = reauthentication ? undefined : await heedeoSignupToken();
   const response = await authRequest<{ url?: unknown }>("/sign-in/social", {
     method: "POST",

@@ -8602,6 +8602,7 @@ describe("clean session control plane", () => {
     const [approval] = await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
       {
         type: "user.approvalDecision",
+        turnId: running!.id,
         payload: { approvalId: "approval-1", decision: "approve" },
       },
     ]);

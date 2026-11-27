@@ -101,11 +101,12 @@ test("without the chat list, the new-chat page shows no recent chats or project 
   expect(route).toMatch(/project=\{\s*chatList\s*\?/);
 });
 
-test("the new-chat page's Add credits button follows the addCredits switch", () => {
+test("the new-chat page's Add credits button follows the host presentation and addCredits switch", () => {
   const route = readFileSync(new URL("../routes/sessions-index.tsx", import.meta.url), "utf8");
   expect(route).toContain('const addCredits = useSessionUiFeature("addCredits");');
+  expect(route).toContain("const showPurchasePrompts = useShowPurchasePrompts();");
   expect(route).toMatch(
-    /const canTopUpCredits =\s*addCredits &&\s*context\.clientConfig\.billingMode === "stripe" &&/,
+    /const canTopUpCredits =\s*showPurchasePrompts &&\s*addCredits &&\s*context\.clientConfig\.billingMode === "stripe" &&/,
   );
   // Only people who may manage billing see it; members never get a button that fails.
   expect(route).toMatch(

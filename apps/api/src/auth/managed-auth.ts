@@ -14,6 +14,7 @@ import {
   MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE,
   MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
 } from "@opengeni/contracts";
+import { ManagedSignInProvider } from "@opengeni/contracts/managed-sign-in-methods";
 import { isConsoleHostname } from "@opengeni/contracts/console-sign-in";
 import {
   configureManagedUserAdmission,
@@ -59,6 +60,7 @@ import {
   MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES,
 } from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
+import { managedAppleProviderOptions } from "./apple-sign-in";
 import {
   createManagedAuthNewSignupsGate,
   type ManagedAuthNewSignupsGate,
@@ -489,6 +491,7 @@ export function createManagedAuth(
   // The deployment ceiling is static Better Auth configuration; the runtime
   // switch is checked per user create in the hook below.
   const newSignupsSocialProviderOptions = managedAuthSocialSignupOptions(settings);
+  const apple = managedAppleProviderOptions(settings, newSignupsSocialProviderOptions);
   const newSignupsGate =
     options.newSignupsGate ??
     createManagedAuthNewSignupsGate({ db, settings, observability: options.observability });
@@ -628,6 +631,12 @@ export function createManagedAuth(
         updatedAt: "updated_at",
       },
       additionalFields: {
+        nativeAppPlatform: {
+          type: "string",
+          fieldName: "native_app_platform",
+          input: false,
+          required: false,
+        },
         identityId: {
           type: "string",
           fieldName: "identity_id",
@@ -701,6 +710,7 @@ export function createManagedAuth(
       storeStateStrategy: "database",
     },
     socialProviders: {
+      ...(apple ? { apple } : {}),
       ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
         ? {
             google: {
@@ -844,7 +854,7 @@ export function createManagedAuth(
           }),
           after: async (account) => {
             if (
-              !["google", "github"].includes(account.providerId) ||
+              !ManagedSignInProvider.safeParse(account.providerId).success ||
               currentManagedSignInConnectIntent()
             )
               return;
@@ -1033,7 +1043,7 @@ export function createManagedAuth(
 
 export type ManagedAuthOAuthAttempt = {
   transactionId: string;
-  provider: "google" | "github";
+  provider: ManagedSignInProvider;
   authorityHash: string;
   transactionSecretHash: string;
   expectedGeneration: string;
@@ -1067,7 +1077,7 @@ export async function findManagedAuthOAuthState(
 export async function resolveManagedAuthOAuthAttempt(
   auth: ManagedAuth,
   request: Request,
-  provider: "google" | "github",
+  provider: ManagedSignInProvider,
   /** The public base URL, or every public origin sign-in may start from. */
   publicOrigins: string | readonly string[],
 ): Promise<ManagedAuthOAuthAttempt | null> {

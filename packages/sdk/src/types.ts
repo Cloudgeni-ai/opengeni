@@ -6462,13 +6462,15 @@ export type ClientAuthConfig =
       /** Defaults to true when omitted by an older deployment. */
       emailVerificationRequired?: boolean;
       /** Configured managed sign-in providers; omitted by older deployments. */
-      socialProviders?: ("google" | "github")[];
+      socialProviders?: ("google" | "github" | "apple")[];
       /**
        * False while the deployment has paused new account creation; existing
        * accounts can still sign in. Omitted (treat as true) by older deployments.
        */
       newSignupsEnabled?: boolean;
       signupChallengeSiteKey?: string | undefined;
+      /** Email sign-in also needs the challenge (same site key); omitted means no. */
+      signInChallengeRequired?: boolean | undefined;
       /** Heedeo signup scoring's browser script; present only while scoring is on. */
       heedeo?: { publishableKey: string; scriptUrl: string } | undefined;
       /** Sign in with a passkey, and add passkeys in Security; omitted (false) by older deployments. */

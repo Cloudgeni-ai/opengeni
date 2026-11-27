@@ -2,6 +2,7 @@ import type { BillingPlanBalance } from "@opengeni/sdk";
 import { Notice } from "@opengeni/react/ui/notice";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { planSeats, type SeatUpgrade } from "@opengeni/react/app/lib/subscription-plans";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 
 export function PlanSeats({ plan }: { plan: BillingPlanBalance | null }) {
   return plan ? (
@@ -24,6 +25,7 @@ export function SeatLimitNotice({
   upgrade: SeatUpgrade | null;
   onUpgrade: () => void;
 }) {
+  const showPurchasePrompts = useShowPurchasePrompts();
   const enterprise = upgrade?.key === "enterprise";
   const fix = !upgrade
     ? null
@@ -37,22 +39,24 @@ export function SeatLimitNotice({
       live="assertive"
       actionLayout="responsive"
       action={
-        canManage ? (
+        showPurchasePrompts && canManage ? (
           <RowButton variant="default" onClick={onUpgrade}>
             {fix ?? "View upgrade options"}
           </RowButton>
         ) : undefined
       }
     >
-      {canManage
-        ? !upgrade
-          ? "Upgrade your plan to invite more people."
-          : null
-        : !upgrade
-          ? "Ask an organization owner to upgrade the plan before inviting more people."
-          : enterprise
-            ? `Ask an organization owner about ${upgrade.label}.`
-            : `Ask an organization owner to upgrade to ${upgrade.label}.`}
+      {!showPurchasePrompts
+        ? "No seats are available for new invitations."
+        : canManage
+          ? !upgrade
+            ? "Upgrade your plan to invite more people."
+            : null
+          : !upgrade
+            ? "Ask an organization owner to upgrade the plan before inviting more people."
+            : enterprise
+              ? `Ask an organization owner about ${upgrade.label}.`
+              : `Ask an organization owner to upgrade to ${upgrade.label}.`}
     </Notice>
   );
 }

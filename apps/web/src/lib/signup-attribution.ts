@@ -17,6 +17,8 @@ export const AUTH_RETURN_EVENTS = [
   "google_signin",
   "github_signup",
   "github_signin",
+  "apple_signup",
+  "apple_signin",
 ] as const;
 export type AuthReturnEvent = (typeof AUTH_RETURN_EVENTS)[number];
 

@@ -156,10 +156,51 @@ export function resolveOpenSuffixResumeTarget(
   return rows.find((row) => row.callId === callId) ?? null;
 }
 
+/**
+ * The open call a resume's trigger answers, or null when it answers none: a
+ * decision answers an approval (or person-handoff) call, a question answer
+ * answers a question call. A trigger that answers no open call of this turn
+ * is stale (already applied, or recorded for another pause); the resume then
+ * applies the pause's other recorded decisions and keeps waiting for the
+ * rest, never failing the turn.
+ */
+export function resolveOpenSuffixTriggerTarget(
+  rows: readonly OpenSuffixPendingToolCall[],
+  trigger: Pick<SessionEvent, "type">,
+  callId: string | null,
+): OpenSuffixPendingToolCall | null {
+  const row = resolveOpenSuffixResumeTarget(rows, callId);
+  if (!row) return null;
+  if (trigger.type === "user.humanInputResponse") {
+    return row.interruptionKind === "human_input" ? row : null;
+  }
+  if (trigger.type === "user.approvalDecision") {
+    return row.interruptionKind === "approval" ||
+      row.interruptionKind === "interaction_intervention"
+      ? row
+      : null;
+  }
+  return null;
+}
+
 /** The trigger of a resume: the decision or answer that claimed it, with its log position. */
 export type OpenSuffixResumeTrigger = Pick<SessionEvent, "type" | "payload"> & {
   sequence?: number;
+  /** The turn the answer was recorded for; omitted only by callers without one. */
+  turnId?: string | null | undefined;
 };
+
+/**
+ * True when the trigger was recorded for this turn. Call ids can repeat across
+ * turns, so another turn's answer (or a turnless one) never settles or
+ * pre-approves this turn's call, even when its call id matches.
+ */
+export function openSuffixTriggerAnswersTurn(
+  trigger: Pick<OpenSuffixResumeTrigger, "turnId">,
+  turnId: string,
+): boolean {
+  return trigger.turnId === undefined || trigger.turnId === turnId;
+}
 
 /** The question round a still-open call asks, if its MCP server asked one. */
 function openSuffixRowRound(row: OpenSuffixPendingToolCall): number | undefined {
@@ -193,7 +234,8 @@ export async function openSuffixSiblingDecisions(input: {
     input.rows ??
     (await listTurnOpenSuffixToolCalls(input.db, input.workspaceId, input.sessionId, input.turnId));
   const triggerCallId =
-    input.trigger.type === "user.approvalDecision"
+    input.trigger.type === "user.approvalDecision" &&
+    openSuffixTriggerAnswersTurn(input.trigger, input.turnId)
       ? (input.trigger.payload as { approvalId?: unknown }).approvalId
       : undefined;
   const open = rows.filter(
@@ -235,6 +277,7 @@ export async function openSuffixApprovedCallIds(input: {
   const payload = input.trigger.payload as { approvalId?: unknown; decision?: unknown };
   if (
     input.trigger.type === "user.approvalDecision" &&
+    openSuffixTriggerAnswersTurn(input.trigger, input.turnId) &&
     payload.decision === "approve" &&
     typeof payload.approvalId === "string"
   ) {
@@ -292,7 +335,9 @@ function memberResult(input: {
  */
 export type OpenSuffixMemberOutcome =
   | { resultItem: Record<string, unknown>; eventOutput: unknown }
-  | { asked: McpInputRequest };
+  | { asked: McpInputRequest }
+  /** Nothing answers this call yet: it stays open for its own answer. */
+  | { open: true };
 
 /**
  * What the model reads after the person declined an MCP server's question:
@@ -370,7 +415,8 @@ export async function resultItemForOpenSuffixMember(input: {
   };
   if (input.row.interruptionKind === "human_input") {
     if (!input.humanInputResume || input.humanInputResume.toolCallId !== input.row.callId) {
-      throw new Error("Human-input open suffix is missing its durable response");
+      // Only the question's own answer settles it; anything else leaves it open.
+      return { open: true };
     }
     const output = JSON.stringify({
       requestId: input.humanInputResume.requestId,
@@ -422,7 +468,6 @@ export async function resultItemForOpenSuffixMember(input: {
 
 export async function settleOpenSuffixResumeIfNeeded(input: {
   additionalApprovals?: unknown[];
-  programmaticApprovalAcknowledged?: boolean;
   db: Database;
   agent: Agent<any, any>;
   accountId: string;
@@ -464,21 +509,18 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
     trigger: input.trigger,
     humanInputToolCallId: input.humanInputResume?.toolCallId,
   });
-  const target = resolveOpenSuffixResumeTarget(rows, callId);
-  if (
-    (!target || !callId) &&
-    !input.programmaticApprovalAcknowledged &&
-    (input.trigger.type === "user.approvalDecision" ||
-      input.trigger.type === "user.humanInputResponse" ||
-      !input.additionalApprovals?.length)
-  ) {
-    throw new Error("Open suffix resume event does not match an interruption");
-  }
+  // A trigger that answers no open call (stale, or a programmatic approval
+  // the dispatcher already took) settles nothing itself. Its pause's other
+  // recorded decisions still apply below, and whatever stays open is asked
+  // again, so a stale answer can never end the turn.
+  const target = openSuffixTriggerAnswersTurn(input.trigger, input.turnId)
+    ? resolveOpenSuffixTriggerTarget(rows, input.trigger, callId)
+    : null;
   // The pause's other decisions, recorded up to this resume's trigger, run
   // now too, all in the model's call order. Decisions recorded after the
   // trigger wait for the next resume, which applies them without asking.
   const settlements: Array<{ row: OpenSuffixPendingToolCall; trigger: OpenSuffixResumeTrigger }> = [
-    ...(target && callId ? [{ row: target, trigger: input.trigger }] : []),
+    ...(target ? [{ row: target, trigger: input.trigger }] : []),
     ...(await openSuffixSiblingDecisions({ ...input, rows })).map((sibling) => ({
       row: sibling.row,
       trigger: { type: "user.approvalDecision", payload: sibling.payload } as const,
@@ -573,7 +615,7 @@ async function unrecordedInteractionCallsOf(
 async function settleOpenSuffixTarget(
   input: Parameters<typeof settleOpenSuffixResumeIfNeeded>[0],
   target: OpenSuffixPendingToolCall,
-): Promise<"settled" | "asked" | "cancelled"> {
+): Promise<"settled" | "asked" | "open" | "cancelled"> {
   const truncationTokens =
     input.modelToolOutputTruncationTokens ?? target.modelToolOutputTruncationTokens ?? undefined;
   let resultItem = target.resultItem;
@@ -584,6 +626,7 @@ async function settleOpenSuffixTarget(
       trigger: input.trigger,
       humanInputResume: input.humanInputResume,
     });
+    if ("open" in member) return "open";
     if ("asked" in member) {
       const replaced = await replacePendingToolCallMcpInputRequest(input.db, {
         accountId: input.accountId,

@@ -1722,6 +1722,7 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET",
       "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID",
       "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET",
+      ...MANAGED_AUTH_APPLE_ENV,
     ] as const) {
       if (env[key]) vars.push(key);
     }
@@ -2683,6 +2684,10 @@ function runtimeEnvValues(
             "OPENGENI_SIGNUP_CHALLENGE_ENABLED",
             env.OPENGENI_SIGNUP_CHALLENGE_ENABLED ?? "false",
           ),
+          valueEnv(
+            "OPENGENI_SIGN_IN_CHALLENGE_ENABLED",
+            env.OPENGENI_SIGN_IN_CHALLENGE_ENABLED ?? "false",
+          ),
           ...[
             "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
             "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
@@ -2725,6 +2730,7 @@ function runtimeEnvValues(
             "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET",
             env.OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET,
           ),
+          ...MANAGED_AUTH_APPLE_ENV.map((key) => valueEnv(key, env[key])),
           requiredEnv(
             "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
             env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,
@@ -3099,6 +3105,14 @@ function platformRuntimeEnv(contract: DeploymentContract, key: string): string |
 function requiredEnv(key: string, value: string | undefined): RuntimeEnvEntry {
   return { key, value: nonEmpty(value), required: true };
 }
+
+const MANAGED_AUTH_APPLE_ENV = [
+  "OPENGENI_MANAGED_AUTH_APPLE_CLIENT_ID",
+  "OPENGENI_MANAGED_AUTH_APPLE_TEAM_ID",
+  "OPENGENI_MANAGED_AUTH_APPLE_KEY_ID",
+  "OPENGENI_MANAGED_AUTH_APPLE_PRIVATE_KEY",
+  "OPENGENI_MANAGED_AUTH_APPLE_APP_BUNDLE_IDENTIFIER",
+] as const;
 
 function valueEnv(key: string, value: string | undefined): RuntimeEnvEntry {
   return { key, value: nonEmpty(value), required: false };

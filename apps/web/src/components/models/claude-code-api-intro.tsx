@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 
 /* ----------------------------------------------------------------------------
    "Claude Code (API key)": the Anthropic API-key connection, introduced for
@@ -20,6 +21,7 @@ function ExternalLink({ href, children }: { href: string; children: ReactNode })
 
 /** What the plan's API credits are and how to get an API key that spends them. */
 export function ClaudeCodeApiIntro() {
+  if (!useShowPurchasePrompts()) return null;
   return (
     <div className="grid gap-3 rounded-lg border border-border bg-bg p-4 text-sm leading-5 text-fg-muted">
       <p className="m-0">

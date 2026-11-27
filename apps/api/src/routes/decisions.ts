@@ -3,11 +3,13 @@ import { ModelCallError, requireAccessGrant, type ApiRouteDeps } from "@opengeni
 import type { Hono } from "hono";
 import { chatCompletionError } from "../model-calls/chat-completions";
 import { isModelCallAbort, publicModelCallError } from "../model-calls/service";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 
 export function registerDecisionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/decisions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    await requireAiProcessingConsent(c, deps);
     try {
       if (!deps.decisions)
         throw new ModelCallError({

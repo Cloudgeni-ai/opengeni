@@ -150,9 +150,9 @@ pub(super) enum AfterReading {
     /// sleep to `level` or deeper, whose save may not fit; see
     /// [`compute_core::Host::save_room`].
     Sleep(Id, Option<u64>, Level, Reply<()>),
-    /// A hand-off of sandbox `id` under `owner`, awake or not, whose save
-    /// may not fit.
-    HandOff(Id, OwnerEpoch, bool, Reply<()>),
+    /// A hand-off of sandbox `id` under `owner`, awake or not and keeping
+    /// its memory or not, whose save may not fit.
+    HandOff(Id, OwnerEpoch, (bool, bool), Reply<()>),
 }
 
 /// What each VM had written, read just before the disk reading of a
@@ -489,8 +489,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 AfterReading::Sleep(id, generation, level, reply) => {
                     self.sleep(id, generation, level, reply);
                 }
-                AfterReading::HandOff(id, owner, awake, reply) => {
-                    self.hand_off(id, owner, awake, reply);
+                AfterReading::HandOff(id, owner, going, reply) => {
+                    self.hand_off(id, owner, going, reply);
                 }
             }
         }

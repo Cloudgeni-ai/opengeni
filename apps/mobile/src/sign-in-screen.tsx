@@ -15,6 +15,7 @@ import { DEFAULT_SERVER_URL, useAccount } from "@/account";
 import { normalizeServerUrl, serverLabel, type StoredAccount } from "@/account-store";
 import { signInSwitchChoices, type SignInSwitchChoice } from "@/account-switching";
 import { BrandMark } from "@/brand-mark";
+import { isPublicIosApp, openOpengeniPrivacyPolicy } from "@/store-review";
 import { InitialTile } from "@/ui";
 
 /**
@@ -268,6 +269,17 @@ export function SignInScreen({
 
         {choices.length > 0 ? (
           <SwitchAccountList choices={choices} onPick={switchAccount} disabled={busy} />
+        ) : null}
+        {isPublicIosApp() ? (
+          <Pressable
+            accessibilityRole="link"
+            onPress={openOpengeniPrivacyPolicy}
+            style={{ alignItems: "center", justifyContent: "center", minHeight: 44, marginTop: 8 }}
+          >
+            <Text style={{ ...fontStyle(theme), fontSize: 13, color: c["fg-muted"] }}>
+              Privacy policy
+            </Text>
+          </Pressable>
         ) : null}
       </ScrollView>
     </KeyboardAvoidingView>

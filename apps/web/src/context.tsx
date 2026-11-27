@@ -253,6 +253,7 @@ export function RootRouteComponent() {
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
+    pathname === "/account-deletion-requested" ||
     pathname.startsWith("/share/") ||
     pathname === "/setup-account" ||
     pathname === "/account-auth" ||
@@ -421,6 +422,10 @@ export function RootRouteComponent() {
                       ? clientConfig.auth.signupChallengeSiteKey
                       : undefined
                   }
+                  signInChallengeRequired={
+                    clientConfig?.auth.mode === "managedSession" &&
+                    clientConfig.auth.signInChallengeRequired === true
+                  }
                   socialProviders={socialProvidersForHost(
                     window.location.hostname,
                     managedSocialProviders,
@@ -448,6 +453,10 @@ export function RootRouteComponent() {
                 clientConfig?.auth.mode === "managedSession"
                   ? clientConfig.auth.signupChallengeSiteKey
                   : undefined
+              }
+              signInChallengeRequired={
+                clientConfig?.auth.mode === "managedSession" &&
+                clientConfig.auth.signInChallengeRequired === true
               }
               socialProviders={socialProvidersForHost(
                 window.location.hostname,

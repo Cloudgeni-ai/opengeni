@@ -617,9 +617,12 @@ function MachineRow({
 }
 
 export type ChromeState = {
-  connected: { name: string } | null;
+  /** The linked profile; `multiple` when more than one Chrome is linked. */
+  connected: { name: string; multiple: boolean } | null;
   /** A read completed, so a null `connected` means Chrome is not linked yet. */
   checked: boolean;
+  /** This mount read the inventory itself, not only a remembered reading. */
+  fresh: boolean;
   /** Start checking for the extension (after the person opens the store). */
   watch: () => void;
   /** Checking for the extension after the person opened the store. */
@@ -628,6 +631,37 @@ export type ChromeState = {
 
 /** Which Chrome to look for: one on an exact machine, or any the person connected. */
 export type AttachedChromeScope = { enrollmentId: string } | "any" | null;
+
+type ChromeReading = { connected: ChromeState["connected"]; checked: boolean };
+
+/**
+ * The last reading per person, workspace and scope, kept across mounts so a
+ * card shown again starts from what was last known and refreshes in the
+ * background.
+ */
+const chromeReadings = new Map<string, ChromeReading>();
+
+function chromeReadingKey(
+  subjectId: string,
+  workspaceId: string,
+  enrollmentId: string | null,
+): string | null {
+  return enrollmentId === null ? null : `${subjectId}\u0000${workspaceId}\u0000${enrollmentId}`;
+}
+
+function cachedChromeReading(
+  subjectId: string,
+  workspaceId: string,
+  enrollmentId: string | null,
+): ChromeReading {
+  const key = chromeReadingKey(subjectId, workspaceId, enrollmentId);
+  return (key && chromeReadings.get(key)) || { connected: null, checked: false };
+}
+
+/** Forget every remembered reading (tests). */
+export function resetAttachedChromeCache(): void {
+  chromeReadings.clear();
+}
 
 /**
  * Whether the Opengeni Browser extension linked a Chrome profile the agent can
@@ -642,24 +676,32 @@ export function useAttachedChrome(
   scope: AttachedChromeScope,
   refreshKey: string | null = null,
 ): ChromeState {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
+  const subjectId = accessContext?.subjectId ?? "";
   // Poll on its own timer; a new client identity on re-render must not refetch.
   const clientRef = useRef(client);
   clientRef.current = client;
-  const [connected, setConnected] = useState<{ name: string } | null>(null);
-  const [checked, setChecked] = useState(false);
+  const enrollmentId = scope === null ? null : scope === "any" ? "*" : scope.enrollmentId;
+  const [connected, setConnected] = useState<ChromeState["connected"]>(
+    () => cachedChromeReading(subjectId, workspaceId, enrollmentId).connected,
+  );
+  const [checked, setChecked] = useState(
+    () => cachedChromeReading(subjectId, workspaceId, enrollmentId).checked,
+  );
+  const [fresh, setFresh] = useState(false);
   const [watchSince, setWatchSince] = useState<number | null>(null);
   const [refreshSince, setRefreshSince] = useState<number | null>(null);
   const [expired, setExpired] = useState(false);
   const [denied, setDenied] = useState(false);
   const linked = connected !== null;
-  const enrollmentId = scope === null ? null : scope === "any" ? "*" : scope.enrollmentId;
 
   useEffect(() => {
-    setConnected(null);
-    setChecked(false);
+    const cached = cachedChromeReading(subjectId, workspaceId, enrollmentId);
+    setConnected(cached.connected);
+    setChecked(cached.checked);
+    setFresh(false);
     setDenied(false);
-  }, [enrollmentId]);
+  }, [enrollmentId, subjectId, workspaceId]);
 
   useEffect(() => {
     setRefreshSince(refreshKey === null ? null : Date.now());
@@ -672,24 +714,39 @@ export function useAttachedChrome(
       try {
         const result = await clientRef.current.listAttachedBrowsers(workspaceId);
         if (cancelled) return;
-        const device = result.devices.find(
+        const devices = result.devices.filter(
           (candidate) =>
             candidate.state === "connected" &&
             candidate.capabilities.debuggerAttachment &&
             (enrollmentId === "*" || candidate.enrollmentId === enrollmentId),
         );
-        setConnected(device ? { name: device.profileLabel ?? device.browserName } : null);
+        const device = devices[0];
+        const reading: ChromeReading = {
+          connected: device
+            ? { name: device.profileLabel ?? device.browserName, multiple: devices.length > 1 }
+            : null,
+          checked: true,
+        };
+        const key = chromeReadingKey(subjectId, workspaceId, enrollmentId);
+        if (key) chromeReadings.set(key, reading);
+        setConnected((current) =>
+          current?.name === reading.connected?.name &&
+          current?.multiple === reading.connected?.multiple
+            ? current
+            : reading.connected,
+        );
         setChecked(true);
+        setFresh(true);
       } catch (failure) {
+        if (cancelled) return;
         // Without inventory access the step still offers the install link.
-        if (
-          !cancelled &&
-          failure instanceof OpenGeniApiError &&
-          failure.status >= 400 &&
-          failure.status < 500
-        ) {
+        if (failure instanceof OpenGeniApiError && failure.status >= 400 && failure.status < 500) {
           setDenied(true);
+          setFresh(true);
         }
+        // Nothing more to learn now: show the step instead of waiting. A
+        // failed read is not a reading, so it stays out of `fresh`.
+        setChecked(true);
       }
     };
     void read();
@@ -712,7 +769,7 @@ export function useAttachedChrome(
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [denied, enrollmentId, linked, refreshSince, watchSince, workspaceId]);
+  }, [denied, enrollmentId, linked, refreshSince, subjectId, watchSince, workspaceId]);
 
   const watch = useCallback(() => {
     setExpired(false);
@@ -721,6 +778,7 @@ export function useAttachedChrome(
   return {
     connected,
     checked,
+    fresh,
     watch,
     watching: watchSince !== null && !linked && !expired && !denied,
   };

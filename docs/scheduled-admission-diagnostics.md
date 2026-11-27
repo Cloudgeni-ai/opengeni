@@ -48,6 +48,13 @@ carries no accepted execution, session, or raw exception text (the worker only
 logs the detail). A paused or deleted task still refuses without a run, since
 no occurrence is due.
 
+If dispatch of a scheduled or event occurrence exhausts Temporal's existing
+retries before a run was recorded, the fire workflow writes an immutable failed
+receipt with `scheduled_dispatch_exhausted` and then fails as before. It never
+copies the exception or retries dispatch again. A receipt already committed for
+that producer wins. Later occurrences can still run; an automation with an owner
+gets an inbox notice on the first such failure in an episode, without pausing it.
+
 ## Blocked schedules
 
 A schedule never stays stuck without its owner knowing. The API's scheduled-task
@@ -117,9 +124,8 @@ owner is told instead by a chat-less inbox notice linking to the automation
 episode, resolved when the review clears, a chat notice takes over, or the
 automation is deleted. A trigger on `scheduled_task_blocker_reviews` opens it
 through `opengeni_private.sync_scheduled_task_blocker_inbox_notice_v1`, whose
-runtime EXECUTE is withheld for one release (rolling safety); until a later
-migration grants it, such an owner sees the blocker only on the automation's
-page, as before.
+runtime EXECUTE was withheld for one release (rolling safety) and is granted
+by `1571_scheduled_task_blocker_inbox_notices_grant.sql`.
 
 ### Refused pull request runs
 

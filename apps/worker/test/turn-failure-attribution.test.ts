@@ -61,7 +61,47 @@ test("model response instrumentation separates customer HTTP quota from platform
   expect(lines.filter((line) => line.includes('failure_origin="platform"'))).toHaveLength(2);
 });
 
+test("a customer's compatible endpoint that cannot be reached is not a platform failure", async () => {
+  const obs = createObservability(testSettings(), { component: "worker" });
+  const hooks = runtimeMetricsHooksForObservability(obs);
+  const provider = "organization-compatible-6e55ba3e-4945-4edc-8a39-cb0bb9e1a624";
+  hooks.onModelCall!({ provider, outcome: "failed", transportFailure: true, durationSeconds: 1 });
+  hooks.onModelCall!({ provider, outcome: "failed", httpStatus: 408, durationSeconds: 1 });
+  hooks.onModelCall!({ provider, outcome: "failed", httpStatus: 400, durationSeconds: 1 });
+  hooks.onModelCall!({
+    provider: "organization-openrouter",
+    outcome: "failed",
+    transportFailure: true,
+    durationSeconds: 1,
+  });
+  const lines = (await obs.prometheusMetrics())
+    .split("\n")
+    .filter((line) => line.startsWith("opengeni_model_calls_total{"));
+  const customer = lines.filter(
+    (line) => line.includes(provider) && line.includes('failure_origin="customer_provider"'),
+  );
+  expect(customer.map((line) => Number(line.split(" ").at(-1)))).toEqual([2]);
+  expect(
+    lines.filter((line) => line.includes(provider) && line.includes('failure_origin="platform"')),
+  ).toHaveLength(1);
+  expect(
+    lines.filter(
+      (line) =>
+        line.includes("organization-openrouter") && line.includes('failure_origin="platform"'),
+    ),
+  ).toHaveLength(1);
+});
+
 test("settlement uses frozen payer rather than external metering and actual terminal evidence", () => {
+  // The organization's plan refusing a sandbox is not a platform failure,
+  // even on a deployment-paid model.
+  for (const code of ["sandbox_compute_unavailable", "sandbox_card_required"]) {
+    expect(
+      settledTurnFailureOrigin({ upstreamPayer: "deployment", metering: "external" }, "failed", [
+        { type: "turn.failed", payload: { code } },
+      ]),
+    ).toBe("customer_plan");
+  }
   const events = [{ type: "turn.failed", payload: { code: "provider_quota_exhausted" } }];
   for (const metering of ["external", "opengeni_credits"] as const) {
     expect(

@@ -8067,6 +8067,11 @@ export const sessionTurns = pgTable(
       table.sessionId,
       table.position,
     ),
+    // A session's person/API turns, for the effective-policy fallback after a
+    // settings write, without visiting every automated turn (migration 1589).
+    sessionPersonApi: index("session_turns_session_person_api_idx")
+      .on(table.workspaceId, table.sessionId)
+      .where(sql`${table.source} in ('user','api')`),
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
@@ -10799,6 +10804,12 @@ export const sandboxCheckpointArtifacts = pgTable(
       table.sandboxGroupId,
       table.sourceLeaseId,
     ),
+    // Tombstone prune walk (1585).
+    state: index("sandbox_checkpoint_artifacts_state_idx").on(
+      table.state,
+      table.deletedAt,
+      table.id,
+    ),
     sourceValid: check(
       "sandbox_checkpoint_artifacts_source_check",
       sql`${table.sourceLeaseEpoch} >= 0
@@ -11120,6 +11131,13 @@ export const sandboxLeases = pgTable(
           and ${table.liveness} in ('warming', 'warm')
           and ${table.rotationRequestedAt} is null`,
       ),
+    // Checkpoint GC and the artifact reference validator probe these (1583, 1584).
+    currentCheckpoint: index("sandbox_leases_current_checkpoint_idx")
+      .on(table.currentCheckpointArtifactId)
+      .where(sql`${table.currentCheckpointArtifactId} is not null`),
+    previousCheckpoint: index("sandbox_leases_previous_checkpoint_idx")
+      .on(table.previousCheckpointArtifactId)
+      .where(sql`${table.previousCheckpointArtifactId} is not null`),
     workspaceGenerationValid: check(
       "sandbox_leases_workspace_generation_check",
       sql`${table.workspaceGeneration} >= 0`,
@@ -13956,6 +13974,11 @@ export const creditLedgerEntries = pgTable(
     ),
     modelDebitPeriod: index("credit_ledger_entries_model_debit_period_idx")
       .on(table.accountId, table.occurredAt, table.workspaceId)
+      .where(
+        sql`${table.type}='model_usage_debit' and ${table.sourceType}='model_response' and ${table.amountMicros}<0`,
+      ),
+    modelDebitSource: index("credit_ledger_entries_model_debit_source_idx")
+      .on(table.accountId, table.sourceId)
       .where(
         sql`${table.type}='model_usage_debit' and ${table.sourceType}='model_response' and ${table.amountMicros}<0`,
       ),

@@ -173,3 +173,45 @@ test("the server-owned pump discovers and settles a durable notice before shutdo
     where notification_id=${notificationId}::uuid`;
   expect(row).toEqual({ status: "sent", provider_message_id: "pump-provider-accepted" });
 });
+
+test("a delivered email names the organization, host and a long workspace cut on whole characters", async () => {
+  if (!client) return;
+  const org = await organization();
+  const family = "👩‍👩‍👧";
+  const workspaceId = crypto.randomUUID();
+  await fixture!.admin`update managed_accounts set name='Pronta' where id=${org.accountId}`;
+  await fixture!.admin`insert into workspaces (id, account_id, name)
+    values (${workspaceId}, ${org.accountId}, ${`Team ${family.repeat(100)}`})`;
+  await fixture!
+    .admin`insert into credit_ledger_entries(account_id,workspace_id,amount_micros,type,source_type,source_id,idempotency_key)
+    values(${org.accountId},${workspaceId},-12000000,'model_usage_debit','credit-alert-test',${crypto.randomUUID()},${crypto.randomUUID()})`;
+  await enqueueBillingCreditNotification(client.db, {
+    accountId: org.accountId,
+    operationKey: "test:email-context",
+    kind: "unusual_spend",
+    details: { availableBalanceMicros: 20_000_000, lastHourSpendMicros: 12_000_000 },
+  });
+  const sent: { subject: string; text: string; html: string }[] = [];
+  const delivered = await deliverBillingCreditNotification({
+    db: client.db,
+    accountId: org.accountId,
+    appUrl: "https://staging.app.test",
+    environment: "azure-managed",
+    transport: {
+      sender: "sender@example.test",
+      idempotency: { scope: "context-durable-v1", retentionSeconds: 86400 },
+      send: async (message) => {
+        sent.push(message);
+        return { status: "sent", providerMessageId: "context-accepted" };
+      },
+    },
+  });
+  expect(delivered).toBe(true);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.subject).toBe("[staging.app.test] Unusual credit spending in Pronta");
+  // 79 whole characters ("Team " is five), then the ellipsis.
+  expect(sent[0]!.text).toContain(
+    `Top spending in the last hour:\n- Team ${family.repeat(74)}…: $12.00`,
+  );
+  expect(sent[0]!.html).toContain(`&amp;workspace=${workspaceId}"`);
+});

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { defineSchema } from "./define-schema";
 import { SessionAvatar } from "./bots";
 import { AutomationTemplateSchedule, AutomationTemplateTrigger } from "./automation-templates";
+import { ReadyMadeSetup } from "./ready-made-setup";
 import {
   SlackAgentChannelListResponse,
   SlackAgentIntroRequest,
@@ -131,6 +132,11 @@ export const AGENT_ERROR_CODES = [
   "agent_template_not_found",
   /** Two agents the caller can use share this name: use the agent's id. */
   "agent_name_ambiguous",
+  /**
+   * A ready-made agent's trigger can't be turned on yet: a required
+   * connection is missing. `details.missing` lists each with its reason.
+   */
+  "agent_setup_incomplete",
 ] as const;
 export type AgentErrorCode = (typeof AGENT_ERROR_CODES)[number];
 
@@ -818,6 +824,11 @@ export const AgentTemplate = /* @__PURE__ */ defineSchema(() =>
     toolPermissions: AgentToolPermissions.default([]),
     skills: AgentSkills.default([]),
     suggestedTriggers: z.array(AgentTemplateTrigger).max(10).default([]),
+    /**
+     * What it needs and says about itself on the Enable page. Absent from
+     * older servers and from templates that need nothing.
+     */
+    setup: ReadyMadeSetup.nullable().default(null),
   }),
 );
 export type AgentTemplate = z.output<typeof AgentTemplate>;

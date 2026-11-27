@@ -1,5 +1,32 @@
 # @opengeni/config
 
+## 6.42.0
+
+### Minor Changes
+
+- bf87544: Support Sign in with Apple as an optional managed sign-in method, including native browser sign-in and personal Security settings. Sign Apple client secrets automatically and expose a token revocation helper for account deletion flows.
+- cd461f0: Add versioned AI provider disclosure and consent for native app requests, with authenticated self-service API and SDK methods to review, grant and withdraw permission.
+- ebca2a8: Add the self-service account deletion API, its SDK methods, and the managed membership and erasure lifecycle behind it.
+
+### Patch Changes
+
+- 9d0896d: Email sign-in can now require the same Turnstile challenge as email sign-up, to stop scripted password guessing. Turn it on with `OPENGENI_SIGN_IN_CHALLENGE_ENABLED=true` (default off; needs the signup challenge on). The client config then reports `signInChallengeRequired`, the Sign in form shows the widget and sends its token, and refusals use sign-up's error codes.
+
+  Failed rows in the missing quiescence-receipt wake repair now log their error class and PostgreSQL SQLSTATE (no IDs or messages), so the worker's repair failures can be diagnosed.
+
+- Updated dependencies [9d0896d]
+- Updated dependencies [bf87544]
+- Updated dependencies [cd461f0]
+- Updated dependencies [27ba8d2]
+- Updated dependencies [42dc05c]
+- Updated dependencies [826dcce]
+- Updated dependencies [3ace70b]
+- Updated dependencies [b7064b0]
+- Updated dependencies [ebca2a8]
+  - @opengeni/contracts@6.42.0
+  - @opengeni/codex@6.42.0
+  - @opengeni/xai-subscription@6.42.0
+
 ## 6.41.0
 
 ### Patch Changes

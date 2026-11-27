@@ -1,106 +1,133 @@
 /**
- * Guided setups (docs/agents.md#guided-setups): a few ready-made
- * engineering setups, each three steps that end with something working.
+ * Guided setups (docs/agents.md#guided-setups): a few ready-made engineering
+ * setups. Get started shows them beside an example of what each one produces;
+ * one button opens the setup on the Enable page (components/enable), the same
+ * page that turns on any ready-made agent or app.
  *
- * 1. Connect the tool it needs, through the existing Connect pages.
- * 2. Add a ready-made agent (packages/core/src/agent-templates).
- * 3. Turn on one of that agent's suggested triggers, through the agent
- *    page's own Add trigger dialog.
- *
- * Each step reads its state from the workspace, so a setup finished
- * elsewhere (the Agents page, Capabilities) shows as done here too.
+ * A setup is a ready-made agent (packages/core/src/agent-templates) plus the
+ * suggested trigger it turns on. What it needs comes from that template's
+ * `setup.connections`, so Get started, Enable and the server agree; a setup
+ * may only make more of the agent's own connections required (Linear for
+ * issue triage), never another agent.
  */
-import type { AgentSummary, CapabilityCatalogItem, ScheduledTask } from "@opengeni/sdk";
+import type { AgentSummary, AgentTemplate, ScheduledTask } from "@opengeni/sdk";
 
 export type GuidedSetupKey = "pr-reviews" | "issue-triage" | "product-analytics";
 
-export type GuidedSetupConnection =
-  | { kind: "github"; name: "GitHub" }
-  /** A catalog connector, found by its MCP address. */
-  | { kind: "catalog"; name: string; mcpUrl: string };
+/** One line of an example outcome, with its status dot. */
+export type SetupExampleLine = {
+  label: string;
+  tone: "danger" | "attention" | "success" | "neutral";
+  text: string;
+};
+
+/** What the setup's agent produces, shown on Get started labelled "Example". */
+export type SetupExample = {
+  /** What it worked on: "Retry webhook delivery with backoff". */
+  subject: string;
+  subjectMeta: string;
+  /** The agent's verdict: "Changes requested". */
+  verdict: string;
+  verdictTone: "attention" | "success" | "progress";
+  lines: readonly SetupExampleLine[];
+};
 
 export type GuidedSetup = {
   key: GuidedSetupKey;
   title: string;
   description: string;
   icon: "git-pull-request" | "list-checks" | "chart-line";
-  connection: GuidedSetupConnection;
-  /** The ready-made agent it adds. */
+  /** The ready-made agent it turns on. */
   agentTemplateKey: string;
   agentName: string;
   /** The name of the agent template's suggested trigger it turns on. */
   triggerName: string;
-  /** What the trigger step does, in words. */
-  triggerLabel: string;
-  /** The last line once everything is done. */
-  ready: string;
+  /** Providers of the agent's own connections this setup needs although the agent alone doesn't. */
+  requireProviders: readonly string[];
+  /** The primary button on Get started: "Set up PR reviews". */
+  action: string;
+  example: SetupExample;
 };
 
 export const GUIDED_SETUPS: readonly GuidedSetup[] = [
   {
     key: "pr-reviews",
     title: "Review pull requests",
-    description: "An agent reviews each new pull request.",
+    description: "Catch bugs and risky changes before they merge.",
     icon: "git-pull-request",
-    connection: { kind: "github", name: "GitHub" },
     agentTemplateKey: "pr-reviewer",
     agentName: "PR reviewer",
     triggerName: "When a pull request opens",
-    triggerLabel: "Review each new pull request",
-    ready: "PR reviewer reviews each new pull request.",
+    requireProviders: [],
+    action: "Set up PR reviews",
+    example: {
+      subject: "Retry webhook delivery with backoff",
+      subjectMeta: "#8142 · 4 files",
+      verdict: "Changes requested",
+      verdictTone: "attention",
+      lines: [
+        {
+          label: "Must fix",
+          tone: "danger",
+          text: "Retries never stop when the endpoint returns 410.",
+        },
+        {
+          label: "Should fix",
+          tone: "attention",
+          text: "Backoff has no jitter, so retries arrive together.",
+        },
+        { label: "Good", tone: "success", text: "Tests cover the timeout path." },
+      ],
+    },
   },
   {
     key: "issue-triage",
-    title: "Triage issues",
-    description: "An agent sorts and labels each new Linear issue.",
+    title: "Triage new issues",
+    description: "Sort, label and route every new Linear issue.",
     icon: "list-checks",
-    connection: { kind: "catalog", name: "Linear", mcpUrl: "https://mcp.linear.app/mcp" },
     agentTemplateKey: "triage",
     agentName: "Triage",
     triggerName: "When a Linear issue is created",
-    triggerLabel: "Triage each new Linear issue",
-    ready: "Triage sorts each new Linear issue.",
+    requireProviders: ["linear.app"],
+    action: "Set up triage",
+    example: {
+      subject: "Sign-in fails on Safari after the update",
+      subjectMeta: "ENG-412 · from support",
+      verdict: "Triaged",
+      verdictTone: "success",
+      lines: [
+        { label: "Label", tone: "neutral", text: "Bug, high priority." },
+        { label: "Team", tone: "neutral", text: "Web, assigned to its on-call." },
+        { label: "Linked", tone: "neutral", text: "Same error as ENG-398." },
+      ],
+    },
   },
   {
     key: "product-analytics",
-    title: "Track product analytics",
-    description: "An agent sends a weekly PostHog report.",
+    title: "Weekly product report",
+    description: "What changed in PostHog, and why, every Monday.",
     icon: "chart-line",
-    connection: { kind: "catalog", name: "PostHog", mcpUrl: "https://mcp.posthog.com/mcp" },
     agentTemplateKey: "product-analyst",
     agentName: "Product analyst",
     triggerName: "Every Monday morning",
-    triggerLabel: "Send a report every Monday",
-    ready: "Product analyst sends a report every Monday.",
+    requireProviders: [],
+    action: "Set up the report",
+    example: {
+      subject: "Product report, week 47",
+      subjectMeta: "Monday 09:00 · PostHog",
+      verdict: "Sent",
+      verdictTone: "progress",
+      lines: [
+        { label: "Up", tone: "success", text: "Sign-ups 1,240, 8% more than last week." },
+        { label: "Down", tone: "danger", text: "Activation 41%, 3 points lower." },
+        { label: "Why", tone: "neutral", text: "Most new people stop at the invite step." },
+      ],
+    },
   },
 ];
 
 export function guidedSetupByKey(key: string | undefined): GuidedSetup | null {
   return GUIDED_SETUPS.find((setup) => setup.key === key) ?? null;
-}
-
-function normalizedUrl(url: string | null | undefined): string {
-  return (url ?? "").trim().replace(/\/+$/u, "").toLowerCase();
-}
-
-/**
- * The catalog entry for a connector, by its MCP address: one already on
- * here first, then any other. Null when this deployment doesn't offer it.
- */
-export function catalogItemFor(
-  items: readonly CapabilityCatalogItem[],
-  mcpUrl: string,
-): CapabilityCatalogItem | null {
-  const wanted = normalizedUrl(mcpUrl);
-  const matches = items.filter(
-    (item) => item.kind === "mcp" && normalizedUrl(item.mcpUrl ?? item.endpointUrl) === wanted,
-  );
-  return matches.find((item) => item.enabled) ?? matches[0] ?? null;
-}
-
-/** Whether a catalog connector is on and ready to use here. */
-export function catalogItemConnected(item: CapabilityCatalogItem | null): boolean {
-  return item !== null && item.enabled && item.lifecycle.readiness === "ready";
 }
 
 /** The agent added from this setup's template: one the reader can edit first. */
@@ -130,9 +157,46 @@ export function setupTriggerTask(
 
 /**
  * Where Capabilities opens a catalog connector's page, with its Connect
- * button; Capabilities itself when the catalog couldn't be read.
+ * button; Capabilities itself when the catalog couldn't be read. With
+ * `returnTo`, its back link (and a finished sign-in) returns there.
  */
-export function catalogConnectHref(workspaceId: string, itemId: string | null): string {
+export function catalogConnectHref(
+  workspaceId: string,
+  itemId: string | null,
+  returnTo?: { path: string; label: string },
+): string {
   const page = `/workspaces/${encodeURIComponent(workspaceId)}/plugins`;
-  return itemId ? `${page}?open=${encodeURIComponent(`item:${itemId}`)}` : page;
+  const params = new URLSearchParams();
+  if (itemId) params.set("open", `item:${itemId}`);
+  if (returnTo) {
+    params.set("from", returnTo.path);
+    params.set("fromLabel", returnTo.label);
+  }
+  const search = params.toString();
+  return search ? `${page}?${search}` : page;
+}
+
+/**
+ * What a setup needs, by name: its agent's required connections plus the ones
+ * the setup itself requires. "GitHub", "Linear". Empty when nothing is.
+ */
+export function setupNeeds(
+  setup: Pick<GuidedSetup, "requireProviders">,
+  template: Pick<AgentTemplate, "setup"> | null | undefined,
+): string[] {
+  return (template?.setup?.connections ?? [])
+    .filter(
+      (connection) => connection.required || setup.requireProviders.includes(connection.provider),
+    )
+    .map((connection) => connection.name);
+}
+
+/** "Needs GitHub", "Needs GitHub and Linear"; null when it needs nothing. */
+export function needsLine(names: readonly string[]): string | null {
+  if (names.length === 0) return null;
+  const list =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `Needs ${list}`;
 }

@@ -1,5 +1,6 @@
 export {
   failureOrigin,
+  isCustomerEndpointMetricProvider,
   isCustomerManagedMetricProvider,
   isProviderAccountRefusal,
   PROVIDER_ACCOUNT_REFUSALS,
@@ -28,15 +29,19 @@ import {
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 import { projectErrorCauseAttributes, projectErrorCauseMessage } from "./error-cause";
+import { MESSAGE_FINGERPRINT_PATTERN } from "./message-fingerprint";
 import { operationalErrorDiagnostic } from "./operational-error";
 export {
   errorCauseAttributes,
   errorCauseMessage,
+  errorCauseSourceMessage,
   ERROR_CAUSE_MESSAGE_MAX_BYTES,
   PUBLIC_ERROR_CAUSE_NAMES,
   PUBLIC_INTERACTION_ERROR_CODES,
+  PUBLIC_SANDBOX_FENCE_CODES,
   type ErrorCauseAttributes,
 } from "./error-cause";
+export { messageFingerprint, normalizeFingerprintMessage } from "./message-fingerprint";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
 export {
   AGENT_TOOL_CALL_OUTCOMES,
@@ -745,6 +750,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "ParallelSessionTitlePersistenceError",
   "RunCredentialRenewalOperationError",
   "SandboxChannelAOperationError",
+  "SandboxReaperOperationError",
   "SessionArchiveOperationError",
   "SnapshotOperationError",
   "StartupDependencyError",
@@ -827,6 +833,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "sandbox_channel_a_operation_failed",
   "sandbox_channel_a_provider_busy",
   "sandbox_channel_a_provider_unavailable",
+  "sandbox_reaper_drain_failed",
+  "sandbox_reaper_settlement_failed",
   "screenshot_capture_failed",
   "session_event_live_publish_failed",
   "session_archive_failed",
@@ -2046,7 +2054,8 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectApiFatalDiagnosticAttributes(attributes),
       ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
-      ...projectKnowledgeIndexDiagnosticAttributes(attributes),
+      ...projectSqlStateDiagnosticAttributes(attributes),
+      ...projectSandboxReaperDiagnosticAttributes(attributes),
       ...projectIndependentSessionTitleDiagnosticAttributes(attributes),
       ...projectTemporalSdkDiagnosticAttributes(attributes),
       ...projectContextCompactionAttributes(attributes),
@@ -2233,17 +2242,83 @@ function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attr
   };
 }
 
+/** Error classes a failed workspace save or restore may log by name. */
+const SNAPSHOT_CAUSE_NAMES = new Set([
+  "SnapshotTimeoutError",
+  "SandboxProviderCaptureTimeoutError",
+  "SandboxProviderError",
+  "SandboxArchiveError",
+  "SandboxSnapshotError",
+  "SandboxRuntimeError",
+  "SandboxLifecycleError",
+  "WorkspaceArchiveIntegrityError",
+]);
+
+/** The Agents SDK's sandbox error codes and the workspace archive integrity
+ * codes (`WorkspaceArchiveIntegrityCode`, packages/runtime). */
+const SNAPSHOT_INTEGRITY_CODES = new Set([
+  "archive_error",
+  "snapshot_error",
+  "runtime_error",
+  "lifecycle_error",
+  "provider_error",
+  "archive_metadata_missing",
+  "archive_metadata_invalid",
+  "archive_base64_invalid",
+  "archive_hash_mismatch",
+  "archive_hydration_failed",
+  "archive_object_missing",
+  "archive_storage_unavailable",
+  "workspace_fingerprint_unavailable",
+  "workspace_changed_during_capture",
+  "workspace_fingerprint_mismatch",
+  "native_snapshot_reference_invalid",
+  "native_snapshot_fallback_unverified",
+  "workspace_capture_timeout",
+]);
+
+/** Why the archive check refused a workspace archive, as a closed class. */
+export const SNAPSHOT_ARCHIVE_REASONS = [
+  "hardlink_member",
+  "symlink_member",
+  "unsupported_member_type",
+  "unsafe_member_path",
+  "duplicate_member",
+  "descends_through_non_directory",
+  "protected_path_overlap",
+  "member_count_limit",
+  "extracted_size_limit",
+  "input_size_limit",
+  "truncated_archive",
+  "invalid_tar_header",
+  "other_archive_check",
+  "tar_exit_nonzero",
+] as const;
+export type SnapshotArchiveReason = (typeof SNAPSHOT_ARCHIVE_REASONS)[number];
+
 function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes {
   if (attributes.errorClass !== "SnapshotOperationError") return {};
   const projected: Attributes = {};
   const causeName = attributes.causeName;
-  if (
-    typeof causeName === "string" &&
-    ["SnapshotTimeoutError", "SandboxProviderCaptureTimeoutError", "SandboxProviderError"].includes(
-      causeName,
-    )
-  )
+  if (typeof causeName === "string" && SNAPSHOT_CAUSE_NAMES.has(causeName))
     projected.causeName = causeName;
+  const integrityCode = attributes.integrityCode;
+  if (typeof integrityCode === "string" && SNAPSHOT_INTEGRITY_CODES.has(integrityCode))
+    projected.integrityCode = integrityCode;
+  const archiveReason = attributes.archiveReason;
+  if (
+    typeof archiveReason === "string" &&
+    (SNAPSHOT_ARCHIVE_REASONS as readonly string[]).includes(archiveReason)
+  )
+    projected.archiveReason = archiveReason;
+  const archiveExitCode = attributes.archiveExitCode;
+  if (
+    typeof archiveExitCode === "number" &&
+    Number.isInteger(archiveExitCode) &&
+    archiveExitCode >= 0 &&
+    archiveExitCode <= 255
+  )
+    projected.archiveExitCode = archiveExitCode;
   const name = attributes.providerErrorName;
   if (
     typeof name === "string" &&
@@ -2282,8 +2357,50 @@ function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes
   return projected;
 }
 
-function projectKnowledgeIndexDiagnosticAttributes(attributes: Attributes): Attributes {
-  if (attributes.errorClass !== "KnowledgeIndexOperationError") return {};
+const SANDBOX_REAPER_CAUSE_CLASS_PATTERN = /^[A-Z][A-Za-z0-9]{0,63}$/;
+
+/**
+ * A sandbox reaper drain or retained-process settlement that failed
+ * (worker retained-process-diagnostics.ts): the hashed lease key, backend and
+ * epoch, the reviewed cause classification (class, fence code, SQLSTATE), and
+ * a one-way fingerprint of the cause's message. Never message text or IDs;
+ * the protected diagnostic named by `correlationId` holds the throw site.
+ */
+function projectSandboxReaperDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "SandboxReaperOperationError") return {};
+  const { backend, leaseEpoch, sandboxLeaseKey, causeFingerprint, causeClass } = attributes;
+  return {
+    ...(typeof backend === "string" && SANDBOX_OPERATION_BACKENDS.has(backend) ? { backend } : {}),
+    ...(typeof leaseEpoch === "number" && Number.isSafeInteger(leaseEpoch) && leaseEpoch >= 0
+      ? { leaseEpoch }
+      : {}),
+    ...(typeof sandboxLeaseKey === "string" &&
+    PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get("sandboxLeaseKey")?.test(sandboxLeaseKey)
+      ? { sandboxLeaseKey }
+      : {}),
+    ...(typeof causeFingerprint === "string" && MESSAGE_FINGERPRINT_PATTERN.test(causeFingerprint)
+      ? { causeFingerprint }
+      : {}),
+    // The thrown error's class name (a code identifier, never message text).
+    ...(typeof causeClass === "string" && SANDBOX_REAPER_CAUSE_CLASS_PATTERN.test(causeClass)
+      ? { causeClass }
+      : {}),
+    ...projectErrorCauseAttributes(attributes),
+  };
+}
+
+/** Error classes whose logs may name the SQLSTATE of the database step that failed. */
+const SQLSTATE_DIAGNOSTIC_ERROR_CLASSES = new Set([
+  "KnowledgeIndexOperationError",
+  "SessionArchiveOperationError",
+]);
+
+function projectSqlStateDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (
+    typeof attributes.errorClass !== "string" ||
+    !SQLSTATE_DIAGNOSTIC_ERROR_CLASSES.has(attributes.errorClass)
+  )
+    return {};
   const sqlState = attributes.sqlState;
   // A SQLSTATE is a five-character protocol code, never message or SQL text.
   return typeof sqlState === "string" && /^[0-9A-Z]{5}$/.test(sqlState) ? { sqlState } : {};

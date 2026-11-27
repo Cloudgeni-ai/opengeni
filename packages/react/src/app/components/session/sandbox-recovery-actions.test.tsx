@@ -427,6 +427,8 @@ test("nonstructural unsupported recovery preserves ordinary failure controls", a
         throw new Error("unexpected mutation");
       },
     },
+    // Not structural (for example a tool or turn error): the Connected
+    // Machine says nothing about why it failed.
     false,
   );
   expect(container.textContent).toContain("Try again");
@@ -461,6 +463,8 @@ test("healthy no-gap Modal projection preserves unrelated failure remedies", asy
         throw new Error("unexpected mutation");
       },
     },
+    // Not structural (for example a tool or turn error): the Connected
+    // Machine says nothing about why it failed.
     false,
   );
   expect(container.textContent).toContain("Try again");
@@ -565,6 +569,28 @@ test.each(["restored", "connected_machine"] as const)(
     expect(writes).toBe(0);
   },
 );
+
+test("a failure unrelated to the sandbox on a Connected Machine keeps its ordinary remedies", async () => {
+  const container = await render(
+    {
+      getSandboxRecovery: async () => ({
+        ...eligible,
+        status: "unsupported",
+        reason: "connected_machine_selected",
+        checkpoint: null,
+      }),
+      recoverSandbox: async () => {
+        throw new Error("No recovery mutation expected");
+      },
+    },
+    // Not structural (for example a tool or turn error): the Connected
+    // Machine says nothing about why it failed.
+    false,
+  );
+  expect(container.textContent).toContain("Try again");
+  expect(container.textContent).not.toContain("Checkpoint recovery is unavailable");
+  expect(container.textContent).not.toContain("Connected Machine");
+});
 
 test("verified restoration retains Pause and permission fences", async () => {
   let retries = 0;

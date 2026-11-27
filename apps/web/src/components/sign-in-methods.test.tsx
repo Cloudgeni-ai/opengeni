@@ -91,6 +91,16 @@ test("shows provider identity and protects the last usable method without confla
   expect(host.textContent).toContain("Repository access, Gmail, and Google Drive are separate");
 });
 
+test("Apple uses the existing Security connection action", async () => {
+  const providers: string[] = [];
+  await mount({
+    methods: [{ ...base.methods[1]!, provider: "apple", reconnectRequired: false }],
+    onConnect: (provider) => providers.push(provider),
+  });
+  await click("Connect Apple");
+  expect(providers).toEqual(["apple"]);
+});
+
 test("fresh authentication locks sensitive actions and never automatically resubmits them", async () => {
   let reauth = 0;
   let changes = 0;

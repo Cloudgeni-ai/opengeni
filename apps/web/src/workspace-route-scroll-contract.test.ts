@@ -8,6 +8,7 @@ type ScrollContract =
 const workspaceRouteContracts = {
   workspaceIndexRoute: { kind: "redirect" },
   workspaceAgentRoute: { kind: "redirect" },
+  workspaceReadyMadeAgentRoute: { kind: "page", source: "routes/agents.tsx" },
   workspaceRetiredPriorityRoute: { kind: "redirect" },
   workspaceSessionsRoute: {
     kind: "self-managed",
@@ -32,6 +33,7 @@ const workspaceRouteContracts = {
   workspaceLegacyReadOnlyChatsRoute: { kind: "redirect" },
   workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
   workspaceGetStartedRoute: { kind: "page", source: "routes/get-started.tsx" },
+  workspaceEnableRoute: { kind: "page", source: "routes/enable.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
   workspaceCapabilitiesRoute: {
     kind: "self-managed",
@@ -48,6 +50,7 @@ const workspaceRouteContracts = {
   workspaceAgentDetailRoute: { kind: "page", source: "routes/agents.tsx" },
   workspaceAgentEditRoute: { kind: "page", source: "routes/agents.tsx" },
   workspaceAgentIntroRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentSettingsRoute: { kind: "page", source: "routes/agents.tsx" },
   // Bot templates became agents.
   workspaceBotTemplatesRoute: { kind: "redirect" },
   workspaceEventSourcesRoute: { kind: "page", source: "routes/automations.tsx" },

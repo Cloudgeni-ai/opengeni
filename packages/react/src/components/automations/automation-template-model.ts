@@ -62,6 +62,11 @@ export interface AutomationTemplate {
   maxRunsPerHour?: number | null | undefined;
   /** When it runs, for its card: "When a pull request opens". Default: said from its schedule and triggers. */
   when?: string | undefined;
+  /**
+   * The ready-made agent that does this job. Where agents are offered, the
+   * Agents page lists it once under Ready-made and Automations leaves it out.
+   */
+  readyMadeAgent?: string | undefined;
 }
 
 /* ----------------------------------------------------------------------------
@@ -98,6 +103,7 @@ export function builtinAutomationTemplates(t: OpenGeniText): AutomationTemplate[
     },
     {
       id: "pr-review",
+      readyMadeAgent: "pr-reviewer",
       name: t("automations.template.prReview.name"),
       description: t("automations.template.prReview.description"),
       instructions: t("automations.template.prReview.instructions"),
@@ -135,6 +141,7 @@ export function builtinAutomationTemplates(t: OpenGeniText): AutomationTemplate[
     },
     {
       id: "issue-triage",
+      readyMadeAgent: "triage",
       name: t("automations.template.issueTriage.name"),
       description: t("automations.template.issueTriage.description"),
       instructions: t("automations.template.issueTriage.instructions"),
@@ -157,6 +164,7 @@ export function builtinAutomationTemplates(t: OpenGeniText): AutomationTemplate[
     },
     {
       id: "dependency-pr",
+      readyMadeAgent: "dependency-updater",
       name: t("automations.template.dependencyPr.name"),
       description: t("automations.template.dependencyPr.description"),
       instructions: t("automations.template.dependencyPr.instructions"),
@@ -188,6 +196,13 @@ export function automationTemplatesFor(
       (options.workspaceEvents === true ||
         !template.triggers.some((trigger) => trigger.source.kind === "workspace")),
   );
+}
+
+/** The templates no ready-made agent already does: where agents are offered, those live there. */
+export function automationTemplatesWithoutAgent(
+  templates: readonly AutomationTemplate[],
+): AutomationTemplate[] {
+  return templates.filter((template) => !template.readyMadeAgent);
 }
 
 /** A template saved in the workspace, as the list and the form use it. */

@@ -35,9 +35,13 @@ test("one pump per database does not overlap and stop drains before allowing res
       return blocked;
     },
   } as unknown as Database;
-  const stop = startBillingCreditNotificationDelivery(db, transport, "https://app.test", 2);
+  const stop = startBillingCreditNotificationDelivery(db, transport, "https://app.test", {
+    intervalMs: 2,
+  });
   try {
-    expect(startBillingCreditNotificationDelivery(db, transport, "https://app.test", 2)).toBe(stop);
+    expect(
+      startBillingCreditNotificationDelivery(db, transport, "https://app.test", { intervalMs: 2 }),
+    ).toBe(stop);
     await Bun.sleep(20);
     expect(calls).toBe(1);
     let drained = false;
@@ -79,7 +83,9 @@ test("a failed discovery is retried on the next scheduled pass", async () => {
       return [];
     },
   } as unknown as Database;
-  const stop = startBillingCreditNotificationDelivery(db, transport, "https://app.test", 2);
+  const stop = startBillingCreditNotificationDelivery(db, transport, "https://app.test", {
+    intervalMs: 2,
+  });
   try {
     await retried;
     expect(calls).toBe(2);

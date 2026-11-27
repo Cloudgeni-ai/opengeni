@@ -170,6 +170,21 @@ export function personalIntegrationSetupAccess(
 }
 
 /**
+ * Whether this person may connect a catalog item from a Connect page, the
+ * rule `catalogConnectAccess` (apps/web) shows and the readiness check on
+ * Enable reads: an item that is already on, or isn't an MCP integration,
+ * never blocks; anything else follows {@link personalIntegrationSetupAccess}.
+ */
+export function catalogItemConnectable(
+  grant: Parameters<typeof personalIntegrationSetupAccess>[0],
+  item: Parameters<typeof personalIntegrationSetupAccess>[1],
+  memberIntegrationSetup?: MemberIntegrationSetup,
+): boolean {
+  if (item.kind !== "mcp" || item.enabled) return true;
+  return personalIntegrationSetupAccess(grant, item, memberIntegrationSetup) !== null;
+}
+
+/**
  * What an agent's setup card for one capability can offer this person in
  * their chat, read from their workspace grant and the capability's catalog
  * entry (`undefined` when the catalog has none):

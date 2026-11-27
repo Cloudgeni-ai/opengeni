@@ -1,7 +1,8 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   BotIcon,
+  CodeIcon,
   KeyRoundIcon,
   PanelLeftIcon,
   ShieldCheckIcon,
@@ -22,7 +23,6 @@ import {
   isSidebarItemIcon,
   mergeSidebarLayout,
   mergeSidebarOptions,
-  readResolvedSidebarOptions,
   SIDEBAR_LIVE_LIST_DEFAULT_LIMIT,
   SIDEBAR_LIVE_LIST_LABELS,
   sidebarPersonalChangesCustomized,
@@ -38,9 +38,9 @@ import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
 import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
 import { resetSidebarLayoutCache } from "@/components/sidebar-layout/use-sidebar-layout";
 import { SettingsShell, type SettingsRailSection } from "@/components/settings/settings-sidebar";
-import { foldSettingsRail } from "@/components/settings/settings-more";
-import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
+import { foldAdvancedSettings } from "@/components/settings/settings-advanced";
 import { SidebarCustomizeRoute } from "@/routes/sidebar-customize";
+import { applyPersonaSidebar } from "@/components/onboarding/persona-sidebar";
 import { currentWorkspace } from "../fixtures";
 import { KitBlock, KitCanvas, KitSection } from "../kit";
 
@@ -52,6 +52,11 @@ import { KitBlock, KitCanvas, KitSection } from "../kit";
    -------------------------------------------------------------------------- */
 
 const WORKSPACE_ID = currentWorkspace.id;
+/** `&persona=cloud|everyday`: the sidebar right after that first-run answer. */
+const PERSONA = (() => {
+  const value = new URLSearchParams(window.location.search).get("persona");
+  return value === "cloud" || value === "everyday" ? value : null;
+})();
 const APPS = [
   { appId: "0b5b7c3e-6f3e-4d55-9a3c-1f2b3c4d5e01", title: "Release notes" },
   { appId: "0b5b7c3e-6f3e-4d55-9a3c-1f2b3c4d5e02", title: "Incident board" },
@@ -106,16 +111,19 @@ function createFixture() {
       },
     ],
   };
-  let personal: StoredSidebarPersonalChanges = {
-    ...EMPTY_SIDEBAR_PERSONAL_CHANGES,
-    added: [
-      {
-        parentId: null,
-        item: { id: "my-links", type: "group", label: "My links", items: [] },
-      },
-    ],
-    options: { settingsMore: ["workspace:keys", "workspace:security"] },
-  };
+  // A first run starts from a sidebar the person hasn't changed.
+  let personal: StoredSidebarPersonalChanges = PERSONA
+    ? EMPTY_SIDEBAR_PERSONAL_CHANGES
+    : {
+        ...EMPTY_SIDEBAR_PERSONAL_CHANGES,
+        added: [
+          {
+            parentId: null,
+            item: { id: "my-links", type: "group", label: "My links", items: [] },
+          },
+        ],
+        options: { settingsMore: ["workspace:keys", "workspace:security"] },
+      };
   let revisions = { personal: 1, workspace: 1 };
   let next = 0;
   const randomId = () => `k${(next += 1)}`;
@@ -259,6 +267,21 @@ function Provider({ children }: { children: ReactNode }) {
     resetSidebarLayoutCache();
     return createFixture();
   });
+  // The real first-run write, through the same client, before the rail reads it.
+  const [ready, setReady] = useState(PERSONA === null);
+  // Once, though dev effects run twice (the kit's store doesn't check the revision).
+  const applied = useRef(false);
+  useEffect(() => {
+    if (!PERSONA || applied.current) return;
+    applied.current = true;
+    void applyPersonaSidebar(
+      fixture.context.client as never,
+      WORKSPACE_ID,
+      PERSONA,
+      "https://app.opengeni.ai",
+    ).then(() => setReady(true));
+  }, [fixture]);
+  if (!ready) return null;
   return (
     <AppContext.Provider value={fixture.context as never}>
       <RailProvider workspaceId={WORKSPACE_ID}>{children}</RailProvider>
@@ -267,44 +290,27 @@ function Provider({ children }: { children: ReactNode }) {
 }
 
 function SettingsSearchPreview() {
-  const sections = useMemo<SettingsRailSection[]>(
-    () => [
+  // The production fold: rarely used pages under one collapsed Advanced.
+  const rail = useMemo<SettingsRailSection[]>(() => {
+    const row = (id: string, label: string, icon: typeof SlidersHorizontalIcon) => ({
+      id,
+      label,
+      icon,
+      link: <Link to="/dev/ui-kit" />,
+    });
+    return foldAdvancedSettings([
       {
         id: "workspace",
         label: "Workspace",
         groups: [
           {
             items: [
-              {
-                id: "workspace:general",
-                label: "General",
-                icon: SlidersHorizontalIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
-              {
-                id: "workspace:members",
-                label: "Members",
-                icon: UsersIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
-              {
-                id: "workspace:agents",
-                label: "Agent settings",
-                icon: BotIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
-              {
-                id: "workspace:keys",
-                label: "API keys",
-                icon: KeyRoundIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
-              {
-                id: "workspace:security",
-                label: "Security",
-                icon: ShieldCheckIcon,
-                link: <Link to="/dev/ui-kit" />,
-              },
+              row("workspace:general", "General", SlidersHorizontalIcon),
+              row("workspace:access", "Access", UsersIcon),
+              row("workspace:available", "Available here", BotIcon),
+              row("workspace:learning", "Agent learning", BotIcon),
+              row("workspace:api-keys", "API keys", KeyRoundIcon),
+              row("workspace:developer", "Developer", CodeIcon),
             ],
           },
         ],
@@ -318,15 +324,22 @@ function SettingsSearchPreview() {
           },
         ],
       },
-    ],
-    [],
-  );
-  // The person's own choice of top-level entries; the rest fold under More.
-  const { layout, update } = useSidebarLayout(WORKSPACE_ID);
-  const more = readResolvedSidebarOptions(layout?.options).settingsMore;
-  const rail = foldSettingsRail(sections, more, (settingsMore) => {
-    void update({ scope: "personal", changes: [{ op: "options", settingsMore }] });
-  });
+      {
+        id: "organization",
+        label: "Organization",
+        groups: [
+          {
+            items: [
+              row("organization:people", "People", UsersIcon),
+              row("organization:billing", "Billing", KeyRoundIcon),
+              row("organization:security", "Security & data", ShieldCheckIcon),
+              row("organization:developer", "Developer", CodeIcon),
+            ],
+          },
+        ],
+      },
+    ]);
+  }, []);
   return (
     <div
       data-kit-settings-search

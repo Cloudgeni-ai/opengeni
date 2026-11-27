@@ -53,8 +53,9 @@
   --color-brand-strong: var(--og-color-accent-deep);
   --color-brand-fg: var(--og-color-accent-fg);
 
-  /* The filled primary action ("teal wash"). `primary` is the button only;
-     brand stays the neutral mark for icons, links, focus and selection. */
+  /* The filled primary action (solid ink in light, near-white in dark).
+     `primary` is the button only; brand stays the neutral mark for icons,
+     links, focus and selection. */
   --color-primary: var(--og-color-primary);
   --color-primary-foreground: var(--og-color-primary-fg);
   --color-primary-border: var(--og-color-primary-border);
@@ -193,24 +194,17 @@
   background-image: linear-gradient(var(--color-hover), var(--color-hover));
 }
 
-/* Rail glow: a soft teal wash from the top-left and a peach wash from the
-   bottom-right over the rail color. Used by the main rail and the settings
-   rail; layered so a rail's own background utilities can still override it. */
+/* The rail surface and the signed-out page surface. Both are solid: no
+   gradients or washes anywhere (DESIGN.md "Tokens"). The class names stay
+   for existing markup; layered so a rail's own background utilities can
+   still override them. */
 @layer components {
   .og-rail-glow {
-    background:
-      radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal), transparent 85%),
-      radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach), transparent 85%),
-      var(--og-color-bg);
+    background: var(--og-color-bg);
   }
 
-  /* The signed-out pages: the same two washes along the left edge of the
-     canvas. */
   .og-page-glow {
-    background:
-      radial-gradient(ellipse 42% 70% at 0 20%, var(--og-glow-teal), transparent 95%),
-      radial-gradient(ellipse 42% 65% at 0 100%, var(--og-glow-peach), transparent 95%),
-      var(--og-color-canvas);
+    background: var(--og-color-canvas);
   }
 }
 

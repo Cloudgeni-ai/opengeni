@@ -22,6 +22,79 @@ const NON_SPEND_TYPES = [
   "video_generation_refund",
 ];
 const HOUR_MS = 3_600_000;
+const notSpend = () =>
+  sql.join(
+    NON_SPEND_TYPES.map((t) => sql`${t}`),
+    sql`,`,
+  );
+
+/** Spend window shown with a notice: the detector's hour for unusual spend, a
+ * day for balance notices. Other kinds show no breakdown. */
+export const BILLING_CREDIT_SPEND_WINDOW_HOURS: Partial<
+  Record<BillingCreditNotificationKind, number>
+> = { unusual_spend: 1, low_balance: 24, exhausted: 24 };
+
+export type BillingCreditSpendWorkspace = {
+  /** A shared organization workspace, all members' personal workspaces, or
+   * usage without a (still existing) workspace. */
+  kind: "workspace" | "personal" | "other";
+  workspaceId: string | null;
+  name: string | null;
+  spendMicros: number;
+};
+export type BillingCreditSpend = { windowHours: number; workspaces: BillingCreditSpendWorkspace[] };
+
+/** Top three spend groups in the window ending at `end`. Read once per delivery,
+ * when its message is first built; the frozen message keeps it on retries.
+ * Recipients are organization owners and admins, who already see spend by
+ * workspace in Billing and Insights. Personal workspaces are grouped without
+ * names, and per-person attribution is left out: it would need session rows,
+ * which row security keeps out of this organization-level context. */
+export async function billingCreditSpendBreakdown(
+  tx: Database,
+  input: { accountId: string; end: string; windowHours: number },
+): Promise<BillingCreditSpend | null> {
+  const rows = await rawRows<{
+    kind: BillingCreditSpendWorkspace["kind"];
+    workspace_id: string | null;
+    name: string | null;
+    spend: string;
+  }>(
+    tx,
+    sql`
+    with spend as (
+      select l.workspace_id,sum(-l.amount_micros) as micros from credit_ledger_entries l
+      where l.account_id=${input.accountId}::uuid and l.amount_micros<0 and l.type not in (${notSpend()})
+        and l.created_at>=${input.end}::timestamptz-${input.windowHours}*interval '1 hour'
+        and l.created_at<=${input.end}::timestamptz
+      group by l.workspace_id
+    ), shared as (
+      -- The organization's own inventory: every workspace except members' personal ones.
+      select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid)
+    ), grouped as (
+      select case when sh.workspace_id is not null then 'workspace' when w.id is not null then 'personal' else 'other' end as kind,
+        -- Generous bound only: the email cuts names on whole visible characters.
+        sh.workspace_id,case when sh.workspace_id is not null then left(w.name,1000) end as name,sum(s.micros) as micros
+      from spend s left join workspaces w on w.account_id=${input.accountId}::uuid and w.id=s.workspace_id
+      left join shared sh on sh.workspace_id=w.id
+      group by 1,2,3
+    )
+    select kind,workspace_id::text,name,micros::text as spend from grouped
+    order by micros desc,kind,workspace_id nulls last limit 3`,
+  );
+  return rows.length
+    ? {
+        windowHours: input.windowHours,
+        workspaces: rows.map((row) => ({
+          kind: row.kind,
+          workspaceId: row.workspace_id,
+          name: row.name,
+          spendMicros: Number(row.spend),
+        })),
+      }
+    : null;
+}
+
 export function unusualCreditSpend(input: {
   historyHours: number;
   baselineSpendMicros: number;
@@ -170,15 +243,9 @@ export async function evaluateBillingCreditAlerts(
       select coalesce(bool_or(amount_micros>0 and eligible_model_ids is null
         and type in ('credit_topup','grant','manual_credit_grant','plan_credit_grant')),false) as funded,
         min(created_at)::text as first_at,
-        coalesce(sum(-amount_micros) filter(where amount_micros<0 and type not in (${sql.join(
-          NON_SPEND_TYPES.map((t) => sql`${t}`),
-          sql`,`,
-        )})
+        coalesce(sum(-amount_micros) filter(where amount_micros<0 and type not in (${notSpend()})
           and created_at>=${state.now}::timestamptz-interval '169 hours' and created_at<${state.now}::timestamptz-interval '1 hour'),0)::text as baseline,
-        coalesce(sum(-amount_micros) filter(where amount_micros<0 and type not in (${sql.join(
-          NON_SPEND_TYPES.map((t) => sql`${t}`),
-          sql`,`,
-        )})
+        coalesce(sum(-amount_micros) filter(where amount_micros<0 and type not in (${notSpend()})
           and created_at>=${state.now}::timestamptz-interval '1 hour' and created_at<=${state.now}::timestamptz),0)::text as recent
       from credit_ledger_entries where account_id=${accountId}::uuid`,
     );
@@ -298,6 +365,23 @@ export function billingCreditActionPath(personalWorkspaceId: string | null): str
     ? `/workspaces/${encodeURIComponent(personalWorkspaceId)}/organization?section=billing`
     : "/billing";
 }
+/** The organization billing page opened on one workspace's budget and usage,
+ * when the recipient has a workspace to anchor the organization page. */
+export function billingCreditWorkspacePath(
+  personalWorkspaceId: string | null,
+  workspaceId: string,
+): string | null {
+  return personalWorkspaceId
+    ? `${billingCreditActionPath(personalWorkspaceId)}&workspace=${encodeURIComponent(workspaceId)}`
+    : null;
+}
+export type BillingCreditMessageContext = {
+  /** Display name of the organization, null when unavailable. */
+  organizationName: string | null;
+  workspacePath: (workspaceId: string) => string | null;
+  /** Where the notice's window spend went, for kinds that show it. */
+  spend: BillingCreditSpend | null;
+};
 export type BillingCreditDeliveryClaim = {
   id: string;
   accountId: string;
@@ -321,6 +405,7 @@ export async function claimBillingCreditNotification(
       details: BillingCreditNotificationDetails,
       email: string,
       actionPath: string,
+      context: BillingCreditMessageContext,
     ) => BillingCreditEmailMessage;
   },
 ): Promise<BillingCreditDeliveryClaim | null> {
@@ -338,10 +423,14 @@ export async function claimBillingCreditNotification(
       provider_scope: string | null;
       live_email: string | null;
       personal_workspace_id: string | null;
+      organization_name: string | null;
+      notification_created_at: string;
     }>(
       tx,
       sql`
-      select d.*,n.kind,n.details,r.personal_workspace_id,case when u.email_verified and lower(u.email) not like '%@passkey.invalid' then u.email end as live_email
+      select d.*,n.kind,n.details,r.personal_workspace_id,case when u.email_verified and lower(u.email) not like '%@passkey.invalid' then u.email end as live_email,
+        (select a.name from managed_accounts a where a.id=d.account_id) as organization_name,
+        n.created_at::text as notification_created_at
       from billing_credit_notification_deliveries d join billing_credit_notifications n on n.id=d.notification_id
       left join billing_credit_notification_recipients r on r.account_id=d.account_id and r.subject_id=d.subject_id
       left join auth_users u on r.subject_id='user:' || u.id
@@ -363,14 +452,28 @@ export async function claimBillingCreditNotification(
       );
       return null;
     }
-    const message =
-      row.message ??
-      input.message(
+    let message = row.message;
+    if (!message) {
+      const windowHours = BILLING_CREDIT_SPEND_WINDOW_HOURS[row.kind];
+      message = input.message(
         row.kind,
         row.details,
         row.live_email,
         billingCreditActionPath(row.personal_workspace_id),
+        {
+          organizationName: row.organization_name,
+          workspacePath: (workspaceId) =>
+            billingCreditWorkspacePath(row.personal_workspace_id, workspaceId),
+          spend: windowHours
+            ? await billingCreditSpendBreakdown(tx, {
+                accountId: input.accountId,
+                end: row.notification_created_at,
+                windowHours,
+              })
+            : null,
+        },
       );
+    }
     const claimId = crypto.randomUUID();
     await tx.execute(sql`update billing_credit_notification_deliveries set status='sending',claim_id=${claimId}::uuid,
       lease_until=clock_timestamp()+interval '1 minute',email=${row.live_email},message=${JSON.stringify(message)}::jsonb,

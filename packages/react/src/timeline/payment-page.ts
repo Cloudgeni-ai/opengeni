@@ -35,6 +35,33 @@ export const TRUSTED_APP_ACTION_CALL_NAMES: readonly string[] = [
   "mcp__opengeni__admin_action_call",
 ];
 
+const OTHER_PURCHASE_ACTIONS = new Set([
+  "createBillingAutoTopUpSetupSession",
+  "POST /v1/billing/auto-top-up/setup",
+  "createBillingCardVerificationSession",
+  "POST /v1/billing/card-verification/setup",
+  "changeBillingSubscription",
+  "POST /v1/billing/subscription/change",
+  "upgradeBillingSubscription",
+  "POST /v1/billing/subscription/upgrade",
+  "updateBillingAutoTopUp",
+  "PUT /v1/billing/auto-top-up",
+]);
+
+function billingActionOf(item: ToolCallItem) {
+  if (!TRUSTED_APP_ACTION_CALL_NAMES.includes(item.name)) return null;
+  return presentedAppActionId(parseToolArgs(item.arguments).id) ?? null;
+}
+
+export function isBillingAppAction(item: ToolCallItem): boolean {
+  if (!TRUSTED_APP_ACTION_CALL_NAMES.includes(item.name)) return false;
+  const id = parseToolArgs(item.arguments).id;
+  return (
+    Boolean(presentedAppActionId(id)) ||
+    (typeof id === "string" && OTHER_PURCHASE_ACTIONS.has(id.trim()))
+  );
+}
+
 /** A secure page, or a local one while developing. */
 function openableUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length > 4096) return null;
@@ -58,10 +85,8 @@ function record(value: unknown): Record<string, unknown> | null {
 /** The payment page a completed app-action call opened, or null for any other call. */
 export function paymentPageOf(item: ToolCallItem): PaymentPage | null {
   if (item.kind !== "tool-call" || item.status !== "complete") return null;
-  if (!TRUSTED_APP_ACTION_CALL_NAMES.includes(item.name)) return null;
-  const args = parseToolArgs(item.arguments);
   // The same classification that keeps the call in a reloaded history.
-  const action = presentedAppActionId(args.id);
+  const action = billingActionOf(item);
   if (!action) return null;
   const kind = SESSION_EVENT_PRESENTED_APP_ACTIONS[action].page;
   const output = normalizeMcpOutput(item.output);
@@ -77,7 +102,7 @@ export function paymentPageOf(item: ToolCallItem): PaymentPage | null {
   if (typeof status !== "number" || status < 200 || status >= 300 || !body) return null;
   const url = openableUrl(body.url);
   if (!url) return null;
-  const sent = record(args.body);
+  const sent = record(parseToolArgs(item.arguments).body);
   const checkoutSessionId =
     kind === "credits" &&
     typeof body.checkoutSessionId === "string" &&

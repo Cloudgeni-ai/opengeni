@@ -314,6 +314,7 @@ mod tests {
             id,
             owner_epoch: 4,
             awake: false,
+            keep_memory: false,
         };
         assert_eq!(check(sent(3, 10, Some(4)), &hand_off), None);
         assert_eq!(

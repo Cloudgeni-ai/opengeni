@@ -38,9 +38,16 @@ import {
   getConnectionMetadata,
   getProviderConnectionHomeWorkspace,
   latestConnectionAuthNotice,
+  latestCapabilityAuthNotice,
+  listAttachedBrowserDevices,
   listInboxItems,
 } from "@opengeni/db";
-import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
+import {
+  buildCapabilityCatalog,
+  CONNECTED_MACHINE_CAPABILITY_ID,
+  integrationDefinitionIdFromCapabilityId,
+} from "@opengeni/core";
+import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
 import { capabilitySetupReadiness } from "../capability-setup-readiness";
 import {
@@ -82,6 +89,7 @@ import type {
 import { requireUsableSessionAvatar } from "./session-avatar";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
+import { isNativeIosRequest, purchaseRefusalMessage } from "../http/native-purchase-presentation";
 import {
   resolveSiteSessionOrigin,
   siteViewConversationContext,
@@ -368,6 +376,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { Context, Hono, MiddlewareHandler } from "hono";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
@@ -486,6 +495,7 @@ import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { allSettledInOrder } from "../http/settled-in-order";
 import { liveStreamSignal } from "../http/server-drain";
+import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { measureSessionCreatePhase } from "../session-create-observability";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -573,9 +583,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
   const realtimeVoiceBilling = createRealtimeVoiceBilling({ db, settings });
   /** Credit refusal / unavailable deployment voice as an HTTP response, else null. */
-  const realtimeVoiceRefusalResponse = (c: Context, error: unknown): Response | null => {
+  const realtimeVoiceRefusalResponse = async (
+    c: Context,
+    error: unknown,
+  ): Promise<Response | null> => {
     if (error instanceof TranscriptionBillingRefusedError) {
-      return transcriptionBillingRefusal(c, error);
+      return transcriptionBillingRefusal(c, error, "live voice", await isNativeIosRequest(c, deps));
     }
     if (error instanceof InferenceRegionRestrictedError) {
       return c.json(
@@ -895,6 +908,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         },
         422,
       );
+    }
+    // A realtime shell admits no turn; the realtime entry points gate provider use separately.
+    const intent = payload as { initialMessage?: unknown; goal?: unknown } | null;
+    if (typeof intent?.initialMessage === "string" || intent?.goal != null) {
+      await requireAiProcessingConsent(c, deps);
     }
     let session: Session;
     try {
@@ -1918,6 +1936,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireAiProcessingConsent(c, deps);
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(400, { message: "invalid session id" });
     }
@@ -1934,7 +1953,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         attribution: creditDebitAttributionForGrant(grant),
       });
     } catch (error) {
-      const refused = realtimeVoiceRefusalResponse(c, error);
+      const refused = await realtimeVoiceRefusalResponse(c, error);
       if (refused) return refused;
       throw error;
     }
@@ -2011,7 +2030,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           mode: result.mode,
           replay: result.replay,
           ...(stop && result.mode.state === "active"
-            ? { stop: { code: stop.code, message: stop.message } }
+            ? {
+                stop: {
+                  code: stop.code,
+                  message: purchaseRefusalMessage(
+                    stop.code,
+                    stop.message,
+                    "live voice",
+                    await isNativeIosRequest(c, deps),
+                  ),
+                },
+              }
             : {}),
         });
       } catch (error) {
@@ -2068,6 +2097,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireAiProcessingConsent(c, deps);
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
@@ -2169,7 +2199,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           attribution: creditDebitAttributionForGrant(grant),
         });
       } catch (error) {
-        const refused = realtimeVoiceRefusalResponse(c, error);
+        const refused = await realtimeVoiceRefusalResponse(c, error);
         await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
           scopedDb.transaction(async (tx) =>
             failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
@@ -2318,6 +2348,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const sessionId = c.req.param("sessionId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireAiProcessingConsent(c, deps);
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
@@ -2455,7 +2486,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ),
         ).catch(() => undefined);
       }
-      const refused = realtimeVoiceRefusalResponse(c, error);
+      const refused = await realtimeVoiceRefusalResponse(c, error);
       if (refused) return refused;
       if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
       if (!(error instanceof RealtimeWebsocketBrokerError)) throw error;
@@ -2495,6 +2526,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const realtimeId = c.req.param("realtimeId");
       const connectionId = c.req.param("connectionId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      await requireAiProcessingConsent(c, deps);
       if (
         !z.string().uuid().safeParse(sessionId).success ||
         !z.string().uuid().safeParse(realtimeId).success ||
@@ -2543,6 +2575,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         "sessions:control",
       );
       const grant = authorization.grant;
+      await requireAiProcessingConsent(c, deps);
       const beforeCommit = externalContinuationCommitAuthorizer(authorization);
       const captureLinked = prepareExternalLinkTurnAdmission(authorization);
       if (
@@ -3390,6 +3423,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     };
   }
 
+  /** Whether the person has a Chrome linked to this workspace that the agent can use. */
+  async function personHasLinkedChrome(grant: AccessGrant, workspaceId: string): Promise<boolean> {
+    const devices = await listAttachedBrowserDevices(db, {
+      ...(await attachedBrowserViewer(deps, grant, workspaceId)),
+      includeDisconnected: false,
+    }).catch(() => null);
+    return (
+      devices?.devices.some(
+        (device) => device.state === "connected" && device.capabilities.debuggerAttachment,
+      ) ?? false
+    );
+  }
+
   /**
    * Withdraw a finished card's open notices in this chat and the person's
    * others. A key naming one account reaches the person's chats anywhere; a
@@ -3491,6 +3537,44 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         relatedSessionAccessFor(c),
       );
       if (!session) throw new HTTPException(404, { message: "session not found" });
+      if ("capabilityId" in payload && payload.capabilityId === CONNECTED_MACHINE_CAPABILITY_ID) {
+        // The Chrome card continues through its own message. Once the
+        // person's Chrome is linked, this chat no longer waits on them for it,
+        // whatever the agent does next. Only this chat: a machine card
+        // elsewhere has the same key and may still need a computer.
+        // Chrome and computer requests share that key, so clear it only while
+        // the chat's latest machine request is the Chrome one; a newer
+        // computer request keeps waiting until a computer is allowed.
+        const latest = await latestCapabilityAuthNotice(db, {
+          workspaceId,
+          sessionId,
+          capabilityId: CONNECTED_MACHINE_CAPABILITY_ID,
+        }).catch(() => null);
+        // Only the person whose turn asked for their Chrome (the chat's
+        // creator when no person started that turn) can clear it, and only
+        // while the chat still waits on the person for a machine.
+        const machineKey = connectionCardNoticeKey({
+          providerDomain: "",
+          capability: { id: CONNECTED_MACHINE_CAPABILITY_ID },
+        });
+        if (
+          latest?.payload.purpose === "chrome" &&
+          latest.awaitingConnectionKeys.includes(machineKey) &&
+          latest.askedBySubjectId === grant.subjectId &&
+          (await personHasLinkedChrome(grant, workspaceId))
+        ) {
+          await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+            {
+              type: "session.notification.withdrawn" as const,
+              payload: { key: machineKey },
+            },
+          ]);
+        }
+        return c.json({
+          outcome: "not_needed",
+          reason: "not_applicable",
+        } satisfies ContinueAfterCapabilitySetupResponse);
+      }
       let askedScopes: string[] = [];
       let target: {
         capabilityId: string;
@@ -3775,6 +3859,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
       const payload = await parseRequestJson(c, ApplySessionGoalRevisionRequest);
+      await requireAiProcessingConsent(c, deps);
       const revision = await getSessionGoalRevision(
         db,
         workspaceId,
@@ -3867,6 +3952,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
       const payload = await parseRequestJson(c, RollbackSessionGoalRevisionRequest);
+      await requireAiProcessingConsent(c, deps);
       const revision = await getSessionGoalRevision(
         db,
         workspaceId,
@@ -3919,6 +4005,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = await parseRequestJson(c, UpdateSessionGoalRequest);
+    if (!("status" in payload) || payload.status === "active") {
+      await requireAiProcessingConsent(c, deps);
+    }
     const existing = await getSessionGoal(db, workspaceId, sessionId);
     if (!existing) {
       throw new HTTPException(404, { message: "session goal not found" });
@@ -4106,6 +4195,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/context/compact", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
@@ -4553,6 +4643,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/edit", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
@@ -4580,6 +4671,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/steer", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
@@ -4766,6 +4858,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/retry", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireAiProcessingConsent(c, deps);
     const parsed = parseRequestBody(SessionRetryRequest, await c.req.json().catch(() => null), {
       status: 400,
       message: "invalid session retry request",
@@ -4794,6 +4887,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       status: 400,
       message: "invalid session control request",
     });
+    if (parsed.action === "resume") await requireAiProcessingConsent(c, deps);
     try {
       const response = await controlHumanSessionWorkstream(
         deps,
@@ -4819,6 +4913,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/steer", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
       c,
@@ -4871,6 +4966,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft/submit", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
       c,
@@ -4900,6 +4996,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
       c,
@@ -5588,16 +5685,29 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         }
       }
     } else {
-      result = await attachViewer(viewerServices, {
-        accountId: grant.accountId,
-        workspaceId,
-        session,
-        viewerSubjectId: grant.subjectId,
-        grant,
-        waitSignal: c.req.raw.signal,
-        ...(parsed.viewerId ? { viewerId: parsed.viewerId } : {}),
-        ...viewerInteractionAgeFor(c.req.raw, grant, parsed.lastInteractionAgeMs),
-      });
+      try {
+        // The attach bounds its own lifecycle wait, so the server idle timeout
+        // must not cut it (that abort would then read as a client disconnect).
+        result = await withoutRequestIdleTimeout(c, () =>
+          attachViewer(viewerServices, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerSubjectId: grant.subjectId,
+            grant,
+            waitSignal: c.req.raw.signal,
+            ...(parsed.viewerId ? { viewerId: parsed.viewerId } : {}),
+            ...viewerInteractionAgeFor(c.req.raw, grant, parsed.lastInteractionAgeMs),
+          }),
+        );
+      } catch (error) {
+        // A caller that disconnects while the attach waits on a lifecycle
+        // transition cancels that wait through `waitSignal`. That is a client
+        // disconnect, not a server failure: answer with the client-gone
+        // convention (mcp/request-abort.ts), 499 and no body.
+        if (c.req.raw.signal.aborted) return new Response(null, { status: 499 });
+        throw error;
+      }
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
       // (resume by id → ensureDisplayStack → exposeStreamPort) scoped to THIS

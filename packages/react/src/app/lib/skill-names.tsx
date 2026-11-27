@@ -1,3 +1,7 @@
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { toString } from "mdast-util-to-string";
+import { parseDocument } from "yaml";
+
 /* ----------------------------------------------------------------------------
    How people read a Skill's name. Registries and SKILL.md frontmatter hand us
    slugs ("vercel-react-best-practices"); a Skill written in Opengeni without a
@@ -7,6 +11,8 @@
    -------------------------------------------------------------------------- */
 
 const SMALL_WORDS = new Set(["a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"]);
+const FRONTMATTER_START = /^\uFEFF?---\r?\n/;
+const FRONTMATTER = /^\uFEFF?---\r?\n((?:[^\n]*\n)*?)---[ \t]*(?:\r?\n|$)/;
 
 /** "agent-browser" -> "Agent browser". Names that already read as names are kept. */
 export function humanizeName(value: string): string {
@@ -38,6 +44,43 @@ export function skillDisplayName(skill: { title: string | null; stableKey: strin
   return humanizeName(raw) || "Untitled Skill";
 }
 
+/** Display metadata only: a title is distinct from the Skill's stable name. */
+export function skillReadLabels(markdown: string): { title: string | null; name: string | null } {
+  const header = FRONTMATTER.exec(markdown);
+  const start = FRONTMATTER_START.exec(markdown);
+  // A replay preview may end inside YAML. Only inspect complete lines in its
+  // header, and do not look for Markdown headings until the header closes.
+  const yaml =
+    header?.[1] ?? (start && markdown.slice(start[0].length, markdown.lastIndexOf("\n") + 1));
+  const doc = yaml === null ? null : parseDocument(yaml);
+  const field = (key: "title" | "name") => {
+    const value = doc?.errors.length === 0 ? doc.get(key) : undefined;
+    return typeof value === "string" ? value.trim() || null : null;
+  };
+  const body = header ? markdown.slice(header[0].length) : start ? "" : markdown;
+  return { title: field("title") ?? firstSkillHeading(body), name: field("name") };
+}
+
+function firstSkillHeading(body: string): string | null {
+  const candidate = /^ {0,3}(?:#[ \t]+.*|=+[ \t]*)$/gm;
+  if (!candidate.test(body)) return null;
+  const firstEnd = candidate.lastIndex;
+  const heading = (end: number) => {
+    const node = fromMarkdown(body.slice(0, end)).children.find(
+      (entry) => entry.type === "heading" && entry.depth === 1,
+    );
+    return node ? toString(node, { includeHtml: false }).trim() || null : null;
+  };
+  // Most Skills open with their title. Parse only that prefix, not the rest
+  // of a potentially long guide. If the candidate was inside code or a
+  // comment, search through the last candidate with the full block context.
+  const first = heading(firstEnd);
+  if (first !== null) return first;
+  let lastEnd = firstEnd;
+  while (candidate.test(body)) lastEnd = candidate.lastIndex;
+  return lastEnd === firstEnd ? null : heading(lastEnd);
+}
+
 /** The first sentence of a Skill's description, for one line in a list. */
 export function skillShortDescription(description: string | null | undefined): string | null {
   const text = description?.replace(/\s+/g, " ").trim();
@@ -48,7 +91,7 @@ export function skillShortDescription(description: string | null | undefined): s
 
 /** The SKILL.md body without its YAML frontmatter. */
 export function skillBody(markdown: string | null | undefined): string {
-  return (markdown ?? "").replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").trim();
+  return (markdown ?? "").replace(FRONTMATTER, "").trim();
 }
 
 /**

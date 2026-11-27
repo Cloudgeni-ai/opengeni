@@ -320,9 +320,10 @@ test("idle checkpoint claims do not multiply artifacts by leases", async () => {
       (node.Plans ?? []).reduce((sum: number, child: PlanNode) => sum + comparisons(child), 0);
     expect(before.Plan["Actual Rows"]).toBe(0);
     expect(after.Plan["Actual Rows"]).toBe(0);
-    // Assert work rather than elapsed time. The old OR join fails this bound;
-    // both queries still use the owner's real FORCE-RLS capability predicates.
-    expect(comparisons(before.Plan)).toBeGreaterThan(100_000);
+    // Assert work rather than elapsed time; both queries still use the owner's
+    // real FORCE-RLS capability predicates. (Since 1583/1584 index the lease
+    // references, the old OR join probes them too, so only the current shape
+    // is bounded here; the lease projection test below covers the scans.)
     expect(comparisons(after.Plan)).toBeLessThan(10_000);
     console.info(
       "checkpoint-gc-idle-plan",
@@ -338,3 +339,111 @@ test("idle checkpoint claims do not multiply artifacts by leases", async () => {
     await tx.unsafe("RESET ROLE");
   });
 }, 60_000);
+
+type RelationPlan = { "Relation Name"?: string; Plans?: RelationPlan[] };
+const relations = (node: RelationPlan): string[] => [
+  ...(node["Relation Name"] ? [node["Relation Name"]] : []),
+  ...(node.Plans ?? []).flatMap(relations),
+];
+
+// Every lease row read through the row-secured table pays its policies (FORCE
+// RLS binds the owner), so GC reads lease references from the private lease
+// projection with index probes and never scans public leases.
+test("checkpoint GC, its due probe and the inventories read the lease projection", async () => {
+  await fixture(async (tx) => {
+    const s = await scope(tx);
+    const tombstones: string[] = [];
+    for (let n = 0; n < 300; n++) {
+      const linked = { ...s, lease: id(), group: id() };
+      const current = await artifact(tx, linked, { state: "current" });
+      const previous = await artifact(tx, linked, { state: "previous" });
+      await lease(tx, linked, current, previous);
+      if (n % 3 === 0) tombstones.push((await artifact(tx, { ...s, lease: id(), group: id() })).id);
+    }
+    await tx`UPDATE sandbox_checkpoint_artifacts SET state = 'deleted', deleted_at = ${past}
+      WHERE id = ANY(${tombstones}::uuid[])`;
+    await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
+    for (const table of ["sandbox_checkpoint_artifacts", "sandbox_leases"]) {
+      await tx.unsafe(`ANALYZE ${table}`);
+      await tx.unsafe(`ANALYZE opengeni_private.maintenance_probe_${table}`);
+    }
+
+    // The gauges count every row, as the superuser sees them, through the app role.
+    await tx.unsafe("SET LOCAL ROLE opengeni_app");
+    const liveness = await tx`SELECT * FROM opengeni_private.count_sandbox_leases_by_liveness()`;
+    const states = await tx`SELECT * FROM opengeni_private.sandbox_checkpoint_artifact_inventory()`;
+    await tx.unsafe("RESET ROLE");
+    expect(liveness.map((row) => [row.liveness, Number(row.count)]).sort()).toEqual(
+      (await tx`SELECT liveness, count(*) AS count FROM sandbox_leases GROUP BY liveness`)
+        .map((row) => [row.liveness, Number(row.count)])
+        .sort(),
+    );
+    const visible = (
+      await tx`SELECT state, count(*) AS count FROM sandbox_checkpoint_artifacts
+        GROUP BY state ORDER BY state`
+    ).map((row) => [row.state, Number(row.count)]);
+    expect(visible).toContainEqual(["current", 300]);
+    expect(states.map((row) => [row.state, Number(row.count)])).toEqual(visible);
+
+    const body = async (signature: string) =>
+      String(
+        (await tx`SELECT prosrc FROM pg_proc WHERE oid = ${signature}::regprocedure`)[0]!.prosrc,
+      );
+    const claimCandidates = (
+      await body("opengeni_private.maintenance_claim_checkpoint_gc_inner(uuid,integer,bigint)")
+    )
+      .split("WITH candidates AS (\n")[1]!
+      .split("\n      )\n      UPDATE")[0]!
+      .replace("LIMIT p_limit", "LIMIT 50");
+    const pruneCandidates = (
+      await body("opengeni_private.maintenance_claim_checkpoint_prune_inner(bigint,integer)")
+    )
+      .split("WITH candidates AS MATERIALIZED (\n")[1]!
+      .split("\n      ),\n      removed")[0]!
+      .replace("p_retention_ms", "86400000")
+      .replace("LIMIT p_limit", "LIMIT 1000");
+    const dueProbe = (await body("opengeni_private.sandbox_checkpoint_artifact_gc_due_v1(bigint)"))
+      .split("RETURN EXISTS (")[1]!
+      .split("\n      );")[0]!
+      .replace("p_claim_ttl_ms", "60000");
+    await tx.unsafe(`SET LOCAL ROLE "${shared.ownerRole}"`);
+    await tx`INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
+      (${id()},pg_backend_pid(),pg_current_xact_id(),'checkpoint_gc')`;
+    const explain = async (query: string) =>
+      (await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) ${query}`))[0]![
+        "QUERY PLAN"
+      ][0];
+    const comparisons = (node: PlanNode): number =>
+      Number(node["Rows Removed by Join Filter"] ?? 0) * Number(node["Actual Loops"] ?? 1) +
+      (node.Plans ?? []).reduce((sum: number, child: PlanNode) => sum + comparisons(child), 0);
+    const claimPlan = await explain(claimCandidates);
+    const prunePlan = await explain(pruneCandidates);
+    const duePlan = await explain(`SELECT EXISTS (${dueProbe})`);
+    await tx.unsafe("RESET ROLE");
+    // Every current and previous artifact is referenced and every tombstone is
+    // old enough to prune, so the answers exercise each reference probe.
+    expect(claimPlan.Plan["Actual Rows"]).toBe(0);
+    expect(prunePlan.Plan["Actual Rows"]).toBe(100);
+    expect(relations(claimPlan.Plan)).not.toContain("sandbox_leases");
+    expect(relations(prunePlan.Plan)).not.toContain("sandbox_leases");
+    expect(relations(claimPlan.Plan)).toContain("maintenance_probe_sandbox_leases");
+    // The due probe asks per reference too. The old OR test was one BitmapOr
+    // of three lease-index probes per candidate artifact.
+    const nodeTypes = (node: PlanNode & { "Node Type"?: string }): string[] => [
+      String(node["Node Type"]),
+      ...(node.Plans ?? []).flatMap(nodeTypes),
+    ];
+    expect(nodeTypes(duePlan.Plan)).not.toContain("BitmapOr");
+    console.info(
+      "checkpoint-gc-lease-projection-plan",
+      JSON.stringify({
+        leases: 300,
+        artifacts: 700,
+        claimMs: claimPlan["Execution Time"],
+        pruneMs: prunePlan["Execution Time"],
+        dueMs: duePlan["Execution Time"],
+        dueJoinComparisons: comparisons(duePlan.Plan),
+      }),
+    );
+  });
+}, 120_000);

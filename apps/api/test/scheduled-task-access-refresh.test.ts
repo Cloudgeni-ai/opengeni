@@ -26,6 +26,7 @@ import {
   createDb,
   createOrganizationApiKey,
   createScheduledTask,
+  createSession,
   getScheduledTask,
   getScheduledTaskCreatorPolicy,
   type DbClient,
@@ -460,6 +461,76 @@ describe("scheduled task access drift and refresh", () => {
     });
     expect(created.agentConfig.toolPolicy).toBeUndefined();
     expect(created.agentConfig.tools.map((tool) => tool.id)).toEqual(["notion"]);
+  }, 60_000);
+
+  test("a list of schedules that run in chats reads those chats once, not once per schedule", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const target = (tools: { kind: "mcp"; id: string }[]) =>
+      createSession(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        initialMessage: "",
+        resources: [],
+        metadata: {},
+        tools,
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+        model: "stored-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+    const withLinear = await target([{ kind: "mcp", id: "linear" }]);
+    const withoutTools = await target([]);
+    const tasks: ScheduledTask[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      tasks.push(
+        await createScheduledTask(client.db, {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          name: `In chat ${index}`,
+          status: "active",
+          schedule: { type: "interval", everySeconds: 3_600 },
+          temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+          runMode: "existing_session",
+          overlapPolicy: "skip",
+          targetSessionId: index % 2 === 0 ? withLinear.id : withoutTools.id,
+          agentConfig: { prompt: "Check in", resources: [], tools: [], metadata: {} },
+          createdBy: { kind: "subject", subjectId: workspace.owner },
+          metadata: {},
+        }),
+      );
+    }
+    const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+    const debug = driver.options.debug;
+    const queries: string[] = [];
+    driver.options.debug = (_id, query) => {
+      queries.push(query);
+    };
+    let views: ScheduledTask[];
+    try {
+      views = await withScheduledTaskPolicyDrift({
+        db: client.db,
+        settings: settings(),
+        authorization: signedIn(workspace, workspace.owner),
+        tasks,
+        permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
+      });
+    } finally {
+      driver.options.debug = debug;
+    }
+    // Each schedule's plan follows its own chat's tools.
+    for (const [index, view] of views.entries()) {
+      expect(view.accountPlan?.connectors.map((connector) => connector.id) ?? []).toEqual(
+        index % 2 === 0 ? ["linear"] : [],
+      );
+    }
+    // One batched read of the chats' tool configuration; never a full chat
+    // read (control, event cursors, effective model) per schedule.
+    const sessionReads = queries.filter((query) => /from "sessions"/.test(query));
+    expect(sessionReads).toHaveLength(1);
+    expect(queries.filter((query) => query.includes('"session_event_cursors"'))).toHaveLength(0);
+    expect(queries.filter((query) => query.includes("latest_started_policy"))).toHaveLength(0);
   }, 60_000);
 
   test("names what is out of date only for the owner", async () => {

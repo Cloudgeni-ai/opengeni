@@ -17,6 +17,7 @@ import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 export * from "./app-sync";
 export * from "./app-webhooks";
+export * from "./setup-connection-requests";
 export * from "./app-server";
 export * from "./site-tool-data";
 export * from "./app-package-exports";
@@ -34,7 +35,11 @@ import {
   isActivityXidToken,
   normalizeActivityToken,
 } from "./session-activity-xid";
-import { syncGitHubEventRoutes, wakeScheduledTaskEventSubscriptions } from "./event-triggers";
+import {
+  scheduledTaskRunOwnerOnly,
+  syncGitHubEventRoutes,
+  wakeScheduledTaskEventSubscriptions,
+} from "./event-triggers";
 export {
   listExhaustedScheduledTasks,
   retireExhaustedScheduledTask,
@@ -47,6 +52,12 @@ export * from "./session-target";
 export * from "./session-resource-removal";
 export * from "./session-repository-attach";
 import { admitRequestedRepositories } from "./session-resource-removal";
+import {
+  droppedPersonalGitHubOwner,
+  lacksPersonalGitHubForResources,
+  ownPersonalGitHubDelegation,
+  projectPersonalGitHubDelegationsOntoResources,
+} from "./personal-github-delegation-projection";
 export * from "./github-gateway";
 import { isGitHubGatewayApprovalId } from "./github-gateway";
 export * from "./active-session-history";
@@ -165,6 +176,8 @@ export {
   apiSpendableCreditMicros,
   byokFeeSpendableMicros,
   chargeBillingOrigin,
+  checkCreditLedgerAccountTotals,
+  type CreditLedgerTotalsCheck,
   getBillingBalance,
   getByokFeeSpendableBalance,
   getSpendableCreditBalance,
@@ -408,6 +421,7 @@ import {
 } from "./organization-api-key-access";
 export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
 export * from "./personal-api-keys";
+export * from "./account-deletion";
 export * from "./organization-privacy-preferences";
 export * from "./organization-inference-residency";
 export * from "./workspace-content-flow";
@@ -1336,6 +1350,8 @@ import {
   type SessionRealtimeContinuityEntry,
 } from "./session-realtime-context";
 import * as schema from "./schema";
+import { isPauseResponseEventType, pauseResponseTrigger } from "./pause-response-trigger";
+export { pauseResponseTrigger } from "./pause-response-trigger";
 import {
   boundedChildProgressNote,
   buildChildRequiresActionPayload,
@@ -1406,8 +1422,12 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export * from "./child-terminal-wake-repair";
-export type { QuiescenceReceiptWakeRepairCursor } from "./quiescence-receipt-wake-repair";
+export type {
+  QuiescenceReceiptWakeRepairCursor,
+  QuiescenceReceiptWakeRepairFailure,
+} from "./quiescence-receipt-wake-repair";
 export {
+  classifyQuiescenceReceiptWakeRepairFailure,
   QUIESCENCE_REPAIR_CLOSE_GRACE_SECONDS,
   QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS,
 } from "./quiescence-receipt-wake-repair";
@@ -1477,6 +1497,8 @@ export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
 export * from "./nango-integrations";
+export * from "./oauth-grant-siblings";
+import { oauthGrantReauthSiblings } from "./oauth-grant-siblings";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -1506,6 +1528,7 @@ export * from "./inbox";
 export * from "./vaults";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
+export * from "./ai-processing-consent";
 export * from "./capability-integrations";
 export * from "./integration-bindings";
 import { IntegrationChangeRequiresAdminError } from "./integration-bindings";
@@ -4551,6 +4574,9 @@ export async function deleteWorkspaceIfQuiescent(
     workspaceId: string;
     observer?: WorkspaceDeleteObserver;
     organizationAdministratorSubjectId?: string;
+    /** Internal closure only; checked against the locked account row. */
+    accountDeletionRequestId?: string;
+    beforeClosureCascade?: (tx: Database) => Promise<unknown>;
   },
 ): Promise<DeleteWorkspaceIfQuiescentResult> {
   const transactionStartedAt = performance.now();
@@ -4610,7 +4636,14 @@ export async function deleteWorkspaceIfQuiescent(
           // the same way; FOR UPDATE here deadlocked those writers against the
           // workspace locks below.
           const [account] = await tx
-            .select({ id: schema.managedAccounts.id })
+            .select({
+              id: schema.managedAccounts.id,
+              closedByDeletion: input.accountDeletionRequestId
+                ? sql<
+                    string | null
+                  >`to_jsonb(${schema.managedAccounts}) ->> 'closed_by_account_deletion'`
+                : sql<null>`null`,
+            })
             .from(schema.managedAccounts)
             .where(eq(schema.managedAccounts.id, input.accountId))
             .for("no key update")
@@ -4673,7 +4706,11 @@ export async function deleteWorkspaceIfQuiescent(
             });
             return { status: "not_found" as const };
           }
-          if (accountWorkspaces.length <= 1) {
+          if (
+            accountWorkspaces.length <= 1 &&
+            (!input.accountDeletionRequestId ||
+              account.closedByDeletion !== input.accountDeletionRequestId)
+          ) {
             observeWorkspaceDeletePhase(input.observer, {
               phase: "account_workspace_lock",
               outcome: "only_workspace",
@@ -5032,6 +5069,12 @@ export async function deleteWorkspaceIfQuiescent(
           // cascade, not between rows. Activity and retention constraint
           // triggers stay immediate.
           await tx.execute(sql`select opengeni_private.defer_workspace_cascade_foreign_keys()`);
+          if (
+            input.accountDeletionRequestId &&
+            account.closedByDeletion === input.accountDeletionRequestId
+          ) {
+            await input.beforeClosureCascade?.(tx);
+          }
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -8802,6 +8845,11 @@ export type SessionTurnForExecution = SessionTurn & {
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
   goalSnapshot: SessionGoalSnapshot;
+  /**
+   * Set when this claim resumed the turn from an approval or question pause:
+   * the execution generation advanced, but nothing was interrupted.
+   */
+  resumedFromPause?: true;
 };
 
 export async function createFileUpload(
@@ -22501,8 +22549,12 @@ export async function listScheduledTasks(
    * null reads shared schedules only.
    */
   viewerSubjectId?: string | null,
-  /** Only automations whose runs are chats with this agent (`agentConfig.agentId`). */
-  filters: { agentId?: string } = {},
+  /**
+   * Only automations whose runs are chats with this agent, or one of these
+   * (`agentConfig.agentId`). `activeFirst` lists active ones before paused
+   * ones, so paused rows never use up the limit ahead of active ones.
+   */
+  filters: { agentId?: string; agentIds?: readonly string[]; activeFirst?: boolean } = {},
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -22514,6 +22566,15 @@ export async function listScheduledTasks(
           isNull(schema.scheduledTasks.deletedAt),
           ...(filters.agentId
             ? [sql`${schema.scheduledTasks.agentConfig} ->> 'agentId' = ${filters.agentId}`]
+            : []),
+          ...(filters.agentIds
+            ? [
+                filters.agentIds.length > 0
+                  ? inArray(sql`${schema.scheduledTasks.agentConfig} ->> 'agentId'`, [
+                      ...filters.agentIds,
+                    ])
+                  : sql`false`,
+              ]
             : []),
           ...(viewerSubjectId === undefined
             ? []
@@ -22533,7 +22594,11 @@ export async function listScheduledTasks(
             : []),
         ),
       )
-      .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
+      .orderBy(
+        ...(filters.activeFirst ? [sql`(${schema.scheduledTasks.status} = 'active') DESC`] : []),
+        desc(schema.scheduledTasks.createdAt),
+        desc(schema.scheduledTasks.id),
+      )
       .limit(limit)
       .offset(offset);
     return rows.map(mapScheduledTask);
@@ -22801,29 +22866,58 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
   | "monthly_agent_run_limit"
-  | "session_usage_limit";
+  | "session_usage_limit"
+  | "owner_only_event";
+
+export const SCHEDULED_TASK_DISPATCH_EXHAUSTED = "scheduled_dispatch_exhausted";
+
+type ScheduledTaskRefusalIdentity = {
+  workspaceId: string;
+  taskId: string;
+  producerKey: string;
+  scheduledAt?: Date | null;
+};
+
+type ScheduledTaskAdmissionRefusalInput = ScheduledTaskRefusalIdentity & {
+  taskAuthorityRevision: number;
+  taskExecutionDigest: string;
+  triggerType: ScheduledTaskTriggerType;
+  reason: ScheduledTaskAdmissionRefusalReason;
+  retryable: boolean;
+};
+
+type ScheduledTaskExhaustedDispatchInput = ScheduledTaskRefusalIdentity & {
+  triggerType: "scheduled" | "event";
+  reason: typeof SCHEDULED_TASK_DISPATCH_EXHAUSTED;
+  retryable: true;
+  /** Same-transaction settlement for a new receipt, never a replay. */
+  onRecorded?: (
+    tx: Database,
+    run: ScheduledTaskRun,
+    ownerSubjectId: string | null,
+  ) => Promise<void>;
+};
 
 /**
  * Record a refused occurrence as an immutable run receipt under its producer
- * identity (migration 0539). A transient refusal is `skipped`, a terminal one
- * `failed`; neither carries accepted execution. An existing receipt for the
- * producer wins, so redelivery never duplicates a run: the caller replays it.
+ * identity. An exhausted dispatch can use the same path if nothing has been
+ * accepted: this occurrence failed, but future ones may work. An existing
+ * receipt always wins, including a dispatch whose result was lost in transit.
  */
+export function recordScheduledTaskAdmissionRefusal(
+  db: Database,
+  input: ScheduledTaskAdmissionRefusalInput,
+): Promise<ScheduledTaskRun>;
+export function recordScheduledTaskAdmissionRefusal(
+  db: Database,
+  input: ScheduledTaskExhaustedDispatchInput,
+): Promise<ScheduledTaskRun | null>;
 export async function recordScheduledTaskAdmissionRefusal(
   db: Database,
-  input: {
-    workspaceId: string;
-    taskId: string;
-    taskAuthorityRevision: number;
-    taskExecutionDigest: string;
-    triggerType: ScheduledTaskTriggerType;
-    producerKey: string;
-    scheduledAt?: Date | null;
-    reason: ScheduledTaskAdmissionRefusalReason;
-    retryable: boolean;
-  },
-): Promise<ScheduledTaskRun> {
+  input: ScheduledTaskAdmissionRefusalInput | ScheduledTaskExhaustedDispatchInput,
+): Promise<ScheduledTaskRun | null> {
   if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
+  const dispatchExhausted = input.reason === SCHEDULED_TASK_DISPATCH_EXHAUSTED;
   const refusal = ScheduledTaskAdmissionRefusal.parse({
     version: 1,
     reason: input.reason,
@@ -22841,7 +22935,10 @@ export async function recordScheduledTaskAdmissionRefusal(
       )
       .for("update")
       .limit(1);
-    if (!task) throw new Error("Scheduled task not found");
+    if (!task) {
+      if (dispatchExhausted) return null;
+      throw new Error("Scheduled task not found");
+    }
     const readPrior = async () => {
       const [prior] = await tx
         .select()
@@ -22860,11 +22957,13 @@ export async function recordScheduledTaskAdmissionRefusal(
     };
     const prior = await readPrior();
     if (prior) return mapScheduledTaskRun(prior);
+    if (dispatchExhausted && (task.status !== "active" || task.deletedAt)) return null;
     if (
-      task.status !== "active" ||
-      task.deletedAt ||
-      task.authorityRevision !== input.taskAuthorityRevision ||
-      task.executionDigest !== input.taskExecutionDigest
+      !dispatchExhausted &&
+      (task.status !== "active" ||
+        task.deletedAt ||
+        task.authorityRevision !== input.taskAuthorityRevision ||
+        task.executionDigest !== input.taskExecutionDigest)
     ) {
       throw new Error("scheduled task changed before refusal recording");
     }
@@ -22875,15 +22974,17 @@ export async function recordScheduledTaskAdmissionRefusal(
         accountId: task.accountId,
         workspaceId: input.workspaceId,
         taskId: task.id,
-        taskAuthorityRevision: input.taskAuthorityRevision,
-        taskExecutionDigest: input.taskExecutionDigest,
+        taskAuthorityRevision: task.authorityRevision,
+        taskExecutionDigest: task.executionDigest,
         triggerType: input.triggerType,
         producerKey: input.producerKey,
         scheduledAt: input.scheduledAt ?? null,
         firedAt: now,
         completedAt: now,
-        actionKind: "agent_turn",
-        status: refusal.retryable ? "skipped" : "failed",
+        actionKind: dispatchExhausted
+          ? ((task.action as ScheduledTaskAction | null)?.kind ?? "agent_turn")
+          : "agent_turn",
+        status: dispatchExhausted || !refusal.retryable ? "failed" : "skipped",
         error: refusal.reason,
         admissionRefusal: refusal,
       })
@@ -22894,7 +22995,9 @@ export async function recordScheduledTaskAdmissionRefusal(
       .returning();
     const result = inserted ?? (await readPrior());
     if (!result) throw new Error("scheduled refusal receipt missing");
-    return mapScheduledTaskRun(result);
+    const run = mapScheduledTaskRun(result);
+    if (dispatchExhausted && inserted) await input.onRecorded?.(tx, run, task.ownerSubjectId);
+    return run;
   });
 }
 
@@ -34127,11 +34230,19 @@ async function createSessionInTransaction(
           // accepted run was admitted for. The capability below re-proves that
           // person may still create Only me chats here.
           const taskOwner = acceptedRun.task.ownerSubjectId;
-          if (
+          // So does a new chat for an event only the owner may see (their
+          // private meeting or chat), whatever the automation's visibility.
+          const onlyMeTask =
             acceptedRun.task.visibility === "private" &&
-            taskOwner &&
             (acceptedRun.task.runMode === "new_session_per_run" ||
-              acceptedRun.task.runMode === "reusable_session") &&
+              acceptedRun.task.runMode === "reusable_session");
+          const ownerOnlyEventRun =
+            !onlyMeTask &&
+            acceptedRun.task.runMode === "new_session_per_run" &&
+            (await scheduledTaskRunOwnerOnly(tx, input.workspaceId, input.scheduledSourceRunId));
+          if (
+            (onlyMeTask || ownerOnlyEventRun) &&
+            taskOwner &&
             acceptedRun.causalHumanSubjectId === taskOwner &&
             acceptedRun.causalHumanAuthority?.subjectId === taskOwner
           )
@@ -34836,6 +34947,43 @@ export async function getSession(
   sessionId: string,
 ): Promise<Session | null> {
   return readSession(db, workspaceId, sessionId, "full");
+}
+
+/** The tool configuration of sessions a schedule runs in, read in one
+ * workspace-scoped pass: the same row visibility as {@link getSession}, without
+ * its control, event-cursor and effective-model reads. Missing ids are absent. */
+export async function getSessionToolConfigs(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, Pick<Session, "id" | "tools" | "toolPolicy" | "mcpServers">>> {
+  const configs = new Map<string, Pick<Session, "id" | "tools" | "toolPolicy" | "mcpServers">>();
+  const ids = [...new Set(sessionIds)];
+  if (ids.length === 0) return configs;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.sessions.id,
+        tools: schema.sessions.tools,
+        toolPolicy: schema.sessions.toolPolicy,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
+    const servers = await sessionMcpServerMetadataForSessions(
+      scopedDb,
+      workspaceId,
+      rows.map((row) => row.id),
+    );
+    for (const row of rows) {
+      configs.set(row.id, {
+        id: row.id,
+        tools: row.tools as ToolRef[],
+        toolPolicy: row.toolPolicy as SessionToolPolicy,
+        mcpServers: servers.get(row.id) ?? [],
+      });
+    }
+    return configs;
+  });
 }
 
 /** Fresh admission read; retain canonical control/policy/row validation without UI decorations. */
@@ -50986,6 +51134,9 @@ export class SandboxOrganizationBoxLimitError extends Error {
     public readonly sandboxGroupId: string,
     public readonly limit: number,
     public readonly reason: SandboxOrganizationBoxLimitReason = "running",
+    /** When the refusal lifts on its own, when known (a young organization's
+     * first day ending). */
+    public readonly liftsAt?: Date,
   ) {
     super(sandboxOrganizationBoxLimitMessage(reason, limit));
     this.code = SANDBOX_FLEET_REFUSAL_REASONS.includes(reason)
@@ -53458,10 +53609,142 @@ async function acquireLeaseOnce(
                       ? (fleet?.limits.youngTurnlessBoxSeconds ?? 0)
                       : sandboxDailyBoxTimeLimitSeconds(planLimit, standing),
                 refusal,
+                refusal === "young_box_time" ? (fleet?.youngUntil ?? undefined) : undefined,
               );
             }
           }
         }
+        // The running-box limits bound how many boxes run at once. A new box
+        // counts against the organization's running-box limit for its plan.
+        // The acting person's limited organizations share a second budget
+        // (runningBoxesPerPerson); their other organizations' boxes were
+        // counted before this transaction.
+        // A young unpaid organization runs fewer boxes (fleet limits).
+        // It counts boxes a turn or a person's own work keeps warm, not
+        // boxes only viewers keep warm (the viewer-only limits bound those),
+        // so an open desktop does not park the organization's next chat.
+        // Every unpaid organization together (fleet limits): a new box past
+        // the fleet's box time, its running cap, or while the fleet is
+        // under pressure is refused for every holder kind; a turn fails with
+        // the reason rather than waiting. Reads that fail refuse (fail
+        // closed) for unpaid boxes only.
+        // Attaching to, or re-arming, a box that already runs adds none and
+        // is not checked. A sleeping compute box is not counted as running
+        // (migration 1574), so waking one is checked like a new box
+        // (wakesSleepingComputeBox).
+        // At a limit a turn parks (organization_sandbox_capacity) and every
+        // other holder is refused.
+        const admitRunningBox = async () => {
+          const youngLimit =
+            backend !== "selfhosted" &&
+            kind !== "viewer" &&
+            fleet !== null &&
+            fleet.young &&
+            fleet.limits.youngOrganizationRunningBoxes !== undefined
+              ? fleet.limits.youngOrganizationRunningBoxes
+              : undefined;
+          const runningBoxLimit =
+            backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
+          const personBoxLimit =
+            backend === "selfhosted" || standing === null || !standing.bounded
+              ? undefined
+              : planLimit.runningBoxesPerPerson;
+          if (
+            runningBoxLimit !== undefined ||
+            personBoxLimit !== undefined ||
+            youngLimit !== undefined ||
+            cardTrialTurn
+          ) {
+            await lockOrganizationSandboxLimit(tx, accountId);
+            const counts =
+              !cardTrialTurn && (runningBoxLimit === 0 || personBoxLimit === 0 || youngLimit === 0)
+                ? null
+                : await organizationWarmSandboxCounts(tx, {
+                    accountId,
+                    subjectId: null,
+                    excludeLeaseId: row.id,
+                  });
+            // A trial box runs alone: while another box runs, the card is
+            // asked for instead of waiting for it.
+            if (cardTrialTurn && (counts === null || counts.runningBoxes > 0)) {
+              throw new SandboxOrganizationBoxLimitError(
+                workspaceId,
+                sandboxGroupId,
+                0,
+                "card_required",
+              );
+            }
+            const organizationFull =
+              runningBoxLimit !== undefined &&
+              (runningBoxLimit === 0 ||
+                (counts !== null && counts.runningBoxes >= runningBoxLimit));
+            const youngFull =
+              !organizationFull &&
+              youngLimit !== undefined &&
+              (youngLimit === 0 ||
+                (counts !== null && counts.runningBoxes - counts.viewerOnlyBoxes >= youngLimit));
+            const personFull =
+              !organizationFull &&
+              !youngFull &&
+              personBoxLimit !== undefined &&
+              (personBoxLimit === 0 ||
+                (counts !== null &&
+                  (standing?.personOwnsOrganization ? counts.runningBoxes : 0) +
+                    (standing?.personOtherRunningBoxes ?? 0) >=
+                    personBoxLimit));
+            if (organizationFull || youngFull || personFull) {
+              const limit = organizationFull
+                ? (runningBoxLimit ?? 0)
+                : youngFull
+                  ? (youngLimit ?? 0)
+                  : (personBoxLimit ?? 0);
+              if (kind !== "turn") {
+                throw new SandboxOrganizationBoxLimitError(
+                  workspaceId,
+                  sandboxGroupId,
+                  limit,
+                  organizationFull ? "running" : youngFull ? "young_running" : "person_running",
+                );
+              }
+              return {
+                role: "fenced" as const,
+                reason: "organization_sandbox_capacity" as const,
+                lease: mapLeaseRow(row),
+                organizationBoxLimit: limit,
+              };
+            }
+          }
+          if (backend !== "selfhosted" && sandboxFleetBounded(standing) && fleet !== null) {
+            await enforceSandboxFleetLimits(tx, {
+              fleet,
+              leaseId: row.id,
+              workspaceId,
+              sandboxGroupId,
+              onFallback: input.onComputeStandingFallback,
+            });
+          }
+          return null;
+        };
+        // A compute box sleeps instead of draining when idle, and its lease
+        // stays warm (or draining, until its group ends). Waking it with no
+        // turn on it adds a running box. Replaying a holder it already has
+        // does not wake it any more than it already is.
+        // A turn's wake counts at once (its turn holder, migration 1574); a
+        // woken box no turn holds counts once the gateway records it awake.
+        const wakesSleepingComputeBox = async () =>
+          backend !== "selfhosted" &&
+          row.backend === "compute" &&
+          row.compute_asleep_since != null &&
+          Number(row.turn_holders) === 0 &&
+          !(
+            (
+              await tx.execute<{ held: boolean }>(sql`
+                select exists (select 1 from sandbox_lease_holders
+                  where lease_id = ${row.id} and kind = ${kind}
+                    and holder_id = ${holderId}) as held
+              `)
+            )[0]?.held ?? false
+          );
         const organizationViewerLimit = planLimit.viewerOnlyBoxesPerOrganization;
         const memberViewerLimit = input.viewerSubjectId
           ? planLimit.viewerOnlyBoxesPerMember
@@ -53501,6 +53784,8 @@ async function acquireLeaseOnce(
                   and other.id <> ${row.id}
                   and other.liveness in ('warming', 'warm')
                   and other.turn_holders = 0
+                  -- A sleeping compute box runs nothing (migration 1574).
+                  and not (other.backend = 'compute' and other.compute_asleep_since is not null)
                   and exists (select 1 from sandbox_lease_holders h
                     where h.lease_id = other.id and h.kind = 'viewer')
               `);
@@ -53729,6 +54014,10 @@ async function acquireLeaseOnce(
         // The row lock serializes this holder insertion against the reaper claim:
         // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
+          if (await wakesSleepingComputeBox()) {
+            const capacity = await admitRunningBox();
+            if (capacity !== null) return capacity;
+          }
           // Capture may have failed after an earlier stop attempt recorded a
           // cutoff. The box is wanted again: a provider that was never stopped
           // keeps running, and a Docker container stopped for a capture is
@@ -53806,110 +54095,10 @@ async function acquireLeaseOnce(
               lease: mapLeaseRow(row),
             };
           }
-          // A new box counts against the organization's running-box limit for
-          // its plan. Attaching to, or re-arming, a box that already runs
-          // adds none and never reaches this election.
-          // The acting person's limited organizations share a second budget
-          // (runningBoxesPerPerson); their other organizations' boxes were
-          // counted before this transaction.
-          // A young unpaid organization runs fewer boxes (fleet limits).
-          // It counts boxes a turn or a person's own work keeps warm, not
-          // boxes only viewers keep warm (the viewer-only limits bound those),
-          // so an open desktop does not park the organization's next chat.
-          const youngLimit =
-            backend !== "selfhosted" &&
-            kind !== "viewer" &&
-            fleet !== null &&
-            fleet.young &&
-            fleet.limits.youngOrganizationRunningBoxes !== undefined
-              ? fleet.limits.youngOrganizationRunningBoxes
-              : undefined;
-          const runningBoxLimit =
-            backend === "selfhosted" ? undefined : planLimit.runningBoxesPerOrganization;
-          const personBoxLimit =
-            backend === "selfhosted" || standing === null || !standing.bounded
-              ? undefined
-              : planLimit.runningBoxesPerPerson;
-          if (
-            runningBoxLimit !== undefined ||
-            personBoxLimit !== undefined ||
-            youngLimit !== undefined ||
-            cardTrialTurn
-          ) {
-            await lockOrganizationSandboxLimit(tx, accountId);
-            const counts =
-              !cardTrialTurn && (runningBoxLimit === 0 || personBoxLimit === 0 || youngLimit === 0)
-                ? null
-                : await organizationWarmSandboxCounts(tx, {
-                    accountId,
-                    subjectId: null,
-                    excludeLeaseId: row.id,
-                  });
-            // A trial box runs alone: while another box runs, the card is
-            // asked for instead of waiting for it.
-            if (cardTrialTurn && (counts === null || counts.runningBoxes > 0)) {
-              throw new SandboxOrganizationBoxLimitError(
-                workspaceId,
-                sandboxGroupId,
-                0,
-                "card_required",
-              );
-            }
-            const organizationFull =
-              runningBoxLimit !== undefined &&
-              (runningBoxLimit === 0 ||
-                (counts !== null && counts.runningBoxes >= runningBoxLimit));
-            const youngFull =
-              !organizationFull &&
-              youngLimit !== undefined &&
-              (youngLimit === 0 ||
-                (counts !== null && counts.runningBoxes - counts.viewerOnlyBoxes >= youngLimit));
-            const personFull =
-              !organizationFull &&
-              !youngFull &&
-              personBoxLimit !== undefined &&
-              (personBoxLimit === 0 ||
-                (counts !== null &&
-                  (standing?.personOwnsOrganization ? counts.runningBoxes : 0) +
-                    (standing?.personOtherRunningBoxes ?? 0) >=
-                    personBoxLimit));
-            if (organizationFull || youngFull || personFull) {
-              const limit = organizationFull
-                ? (runningBoxLimit ?? 0)
-                : youngFull
-                  ? (youngLimit ?? 0)
-                  : (personBoxLimit ?? 0);
-              if (kind !== "turn") {
-                throw new SandboxOrganizationBoxLimitError(
-                  workspaceId,
-                  sandboxGroupId,
-                  limit,
-                  organizationFull ? "running" : youngFull ? "young_running" : "person_running",
-                );
-              }
-              return {
-                role: "fenced" as const,
-                reason: "organization_sandbox_capacity" as const,
-                lease: mapLeaseRow(row),
-                organizationBoxLimit: limit,
-              };
-            }
-          }
-          // Every unpaid organization together (fleet limits): a new box past
-          // the fleet's box time, its running cap, or while the fleet is
-          // under pressure is refused for every holder kind; a turn fails with
-          // the reason rather than waiting. Joining a running box never gets
-          // here. Reads that fail refuse (fail closed) for unpaid boxes only.
+          // A new box counts against the running-box limits (admitRunningBox).
+          const capacity = await admitRunningBox();
+          if (capacity !== null) return capacity;
           const unpaidBox = backend !== "selfhosted" && sandboxFleetBounded(standing);
-          if (unpaidBox && fleet !== null) {
-            await enforceSandboxFleetLimits(tx, {
-              fleet,
-              leaseId: row.id,
-              workspaceId,
-              sandboxGroupId,
-              onFallback: input.onComputeStandingFallback,
-            });
-          }
           const casRows = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'warming',
@@ -53971,6 +54160,13 @@ async function acquireLeaseOnce(
             reason: "superseded" as const,
             lease: mapLeaseRow(row),
           };
+        }
+
+        // A sleeping compute box is not a running box: waking it is admitted
+        // like a new one. A warming box is never asleep.
+        if (liveness === "warm" && (await wakesSleepingComputeBox())) {
+          const capacity = await admitRunningBox();
+          if (capacity !== null) return capacity;
         }
 
         // -- warm / warming: attach (A2 / A1). refcount++ ONLY; never touch
@@ -54062,6 +54258,8 @@ type SandboxFleetAdmission = {
   boxSecondsFailed: boolean;
   /** The organization is younger than `youngOrganizationAgeMs`. */
   young: boolean;
+  /** When a young organization stops being young (its first-day bounds lift). */
+  youngUntil: Date | null;
   /** A young organization's metered box seconds since it was created; null
    * when unbounded or unreadable (fails open, like its other own bounds). */
   youngBoxSeconds: number | null;
@@ -54211,7 +54409,20 @@ async function readSandboxFleetAdmission(
       reportSandboxComputeStandingFallback(input.onComputeStandingFallback, error, "organization");
     }
   }
-  return { limits, pressure, boxSecondsToday, boxSecondsFailed, young, youngBoxSeconds, turnless };
+  const youngUntil =
+    young && createdAt !== null && limits.youngOrganizationAgeMs !== undefined
+      ? new Date(createdAt.getTime() + limits.youngOrganizationAgeMs)
+      : null;
+  return {
+    limits,
+    pressure,
+    boxSecondsToday,
+    boxSecondsFailed,
+    young,
+    youngUntil,
+    youngBoxSeconds,
+    turnless,
+  };
 }
 
 export async function acquireLease(
@@ -74685,6 +74896,133 @@ export async function renewSandboxAgentLink(
   });
 }
 
+/** The most claims one batched renewal statement takes. */
+export const SANDBOX_AGENT_LINK_RENEW_BATCH_MAX = 500;
+
+/** One claim's answer from a batched renewal: renewed, refused for good, or
+ * `busy` when another transaction held its row, which counts as one missed
+ * renewal; the next tick renews it again. */
+export type SandboxAgentLinkRenewal =
+  | { renewed: true }
+  | { renewed: false; code: SandboxAgentLinkEnd }
+  | { renewed: false; busy: true };
+
+/**
+ * RENEW many open link sessions' claims in one workspace with one statement,
+ * the batched form of {@link renewSandboxAgentLink} with the same decision per
+ * claim. The gateway renews every open session every few seconds; one
+ * transaction per session made a fleet of sleeping sandboxes the largest
+ * write load on the database. Rows are locked in id order and a row another
+ * transaction holds (an open, release, power write or revoke) is skipped and
+ * answered `busy`, so a batch never waits on one contended row while it holds
+ * the others, and two overlapping batches cannot deadlock. Results come back
+ * in the order of `claims`.
+ */
+export async function renewSandboxAgentLinks(
+  db: Database,
+  input: {
+    workspaceId: string;
+    leaseMs: number;
+    claims: ReadonlyArray<Omit<SandboxAgentLinkInput, "workspaceId">>;
+  },
+): Promise<SandboxAgentLinkRenewal[]> {
+  if (input.claims.length === 0) return [];
+  if (input.claims.length > SANDBOX_AGENT_LINK_RENEW_BATCH_MAX) {
+    throw new Error(`at most ${SANDBOX_AGENT_LINK_RENEW_BATCH_MAX} claims per renewal batch`);
+  }
+  const seen = new Set<string>();
+  for (const claim of input.claims) {
+    assertSandboxAgentLinkInput({ ...claim, workspaceId: input.workspaceId }, input.leaseMs);
+    const agentId = claim.agentId.toLowerCase();
+    if (seen.has(agentId)) throw new Error("a renewal batch names an agent twice");
+    seen.add(agentId);
+  }
+  const agentIds = input.claims.map((claim) => claim.agentId);
+  const epochs = input.claims.map((claim) => claim.epoch);
+  const instances = input.claims.map((claim) => claim.connectionInstanceId);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    // As in renewSandboxAgentLink: lock first, then sample time per row, so a
+    // contended lock never shortens the lease it grants.
+    const rows = await rawRows<{
+      ordinal: string | number;
+      renewed: boolean;
+      busy: boolean;
+      code: SandboxAgentLinkEnd;
+    }>(
+      scopedDb,
+      sql`
+        with claim as materialized (
+          select agent_id, epoch, connection_instance_id, ordinal
+          from unnest(
+            ${new Param(agentIds)}::uuid[],
+            ${new Param(epochs)}::bigint[],
+            ${new Param(instances)}::text[]
+          ) with ordinality as claim(agent_id, epoch, connection_instance_id, ordinal)
+        ), locked as materialized (
+          select e.id, e.kind, e.status, e.link_epoch, e.connection_instance_id,
+            e.connection_lease_expires_at
+          from enrollments e
+          join claim on claim.agent_id = e.id
+          where e.workspace_id = ${input.workspaceId}
+          order by e.id
+          for no key update of e skip locked
+        ), present as materialized (
+          -- Rows this statement's snapshot sees; one present but not locked
+          -- was held by another transaction and is answered busy.
+          select e.id from enrollments e
+          join claim on claim.agent_id = e.id
+          where e.workspace_id = ${input.workspaceId}
+        ), checked as materialized (
+          select claim.agent_id, claim.ordinal, locked.id as locked_id,
+            locked.connection_lease_expires_at,
+            (locked.id is null and present.id is not null) as busy,
+            case
+              when locked.id is null then 'revoked'
+              when locked.kind <> 'sandbox' or locked.status <> 'active' then 'revoked'
+              when locked.link_epoch > claim.epoch then 'superseded'
+              when locked.connection_instance_id is distinct from claim.connection_instance_id
+                then 'lost'
+              else null
+            end as refusal,
+            date_trunc('milliseconds', clock_timestamp()) as renewed_at
+          from claim
+          left join locked on locked.id = claim.agent_id
+          left join present on present.id = claim.agent_id
+        ), updated as (
+          update enrollments e set
+            connection_lease_expires_at = greatest(
+              case when isfinite(checked.connection_lease_expires_at)
+                -- Match Date's upper bound after its millisecond truncation.
+                and date_trunc('milliseconds', checked.connection_lease_expires_at)
+                  <= '275760-09-13 00:00:00+00'::timestamptz
+                then date_trunc('milliseconds', checked.connection_lease_expires_at)
+                else null end,
+              checked.renewed_at + ${input.leaseMs} * interval '1 millisecond'
+            ),
+            updated_at = checked.renewed_at
+          from checked
+          where e.id = checked.locked_id and e.workspace_id = ${input.workspaceId}
+            and checked.refusal is null
+          returning e.id
+        )
+        select checked.ordinal,
+          (updated.id is not null) as renewed,
+          checked.busy,
+          coalesce(checked.refusal, 'revoked') as code
+        from checked
+        left join updated on updated.id = checked.agent_id
+      `,
+    );
+    const byOrdinal = new Map(rows.map((row) => [Number(row.ordinal), row]));
+    return input.claims.map((_claim, index): SandboxAgentLinkRenewal => {
+      const row = byOrdinal.get(index + 1);
+      if (row?.renewed) return { renewed: true };
+      if (row?.busy) return { renewed: false, busy: true };
+      return { renewed: false, code: row?.code ?? "revoked" };
+    });
+  });
+}
+
 /** How long after its host reported a hand-off of a compute sandbox it may
  * still be refusing wakes. A host refuses them for at most two minutes of a
  * hand-off; a wake later than that cancels the hand-off and the sandbox runs
@@ -84829,12 +85167,7 @@ export async function claimSessionWorkForAttempt(
                     ),
                   )
                   .limit(1);
-                if (
-                  !legacyResumeTrigger ||
-                  !["user.approvalDecision", "user.humanInputResponse"].includes(
-                    legacyResumeTrigger.type,
-                  )
-                ) {
+                if (!legacyResumeTrigger || !isPauseResponseEventType(legacyResumeTrigger.type)) {
                   throw new SessionControlInvariantError(
                     `Running turn ${activeTurn.id} has no pending-update attempt boundary`,
                   );
@@ -84893,11 +85226,11 @@ export async function claimSessionWorkForAttempt(
             if (input.trigger.kind !== "approval") {
               return { action: "unclaimed", reason: "no-work" };
             }
-            const advancesApproval = await isNewerApprovalTrigger(
+            const advancesApproval = await isPauseResponseTriggerOf(
               tx as unknown as Database,
               workspaceId,
               sessionId,
-              activeTurn.triggerEventId,
+              activeTurn,
               input.trigger.triggerEventId,
             );
             if (!advancesApproval) {
@@ -84950,7 +85283,8 @@ export async function claimSessionWorkForAttempt(
             await registerAttempt(resumed);
             return {
               action: "claimed",
-              turn: mapSessionTurnForExecution(resumed),
+              // The previous attempt ended cleanly at the pause; nothing was cut off.
+              turn: { ...mapSessionTurnForExecution(resumed), resumedFromPause: true },
             };
           }
           if (activeTurn?.status === "recovering" || activeTurn?.status === "waiting_capacity") {
@@ -85648,11 +85982,25 @@ export async function claimSessionWorkForAttempt(
           const receiverContext = delivered.receiverContext;
           const authorityUpdate = delivered.updates[0];
           if (!authorityUpdate) throw new Error("Delivered update batch has no authority source");
-          const internalPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
+          const frozenPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
             receiverContext?.personalConnectionDelegations ??
               authorityUpdate.personalConnectionDelegations,
             `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
           );
+          // The receiving context's own authority already fits this session;
+          // a sender's (an agent message or steer) is fitted to its repositories.
+          let internalPersonalConnectionDelegations = receiverContext
+            ? frozenPersonalConnectionDelegations
+            : projectPersonalGitHubDelegationsOntoResources(
+                frozenPersonalConnectionDelegations,
+                session.resources,
+              );
+          const droppedGitHubOwner = receiverContext
+            ? null
+            : droppedPersonalGitHubOwner(
+                frozenPersonalConnectionDelegations,
+                internalPersonalConnectionDelegations,
+              );
           const internalXaiAuthority = receiverContext
             ? subscriptionExecutionAuthorityFromTurn(receiverContext, "xai")
             : frozenXaiExecutionAuthority(authorityUpdate);
@@ -86048,6 +86396,62 @@ export async function claimSessionWorkForAttempt(
             // not an ambient request subject. The attempt snapshot below also
             // freezes the same visibility/owner-membership authority tuple.
             initiatingHumanSubjectId = privateOwnerSubjectId;
+          }
+          // A sender's Your GitHub that didn't fit, or a sender without one,
+          // would leave this chat's personal repositories without Git access:
+          // keep what the same person gave this chat in their latest message.
+          // Scheduled runs keep exactly what their schedule admitted.
+          const ownGitHubSubjectId =
+            receiverContext || scheduledTaskRunId
+              ? null
+              : (droppedGitHubOwner ??
+                (lacksPersonalGitHubForResources(
+                  internalPersonalConnectionDelegations,
+                  session.resources,
+                )
+                  ? initiatingHumanSubjectId
+                  : null));
+          if (ownGitHubSubjectId) {
+            // Only the person's latest own message counts: if they sent it
+            // without Your GitHub, nothing older is brought back.
+            const recent = await tx
+              .select({
+                id: schema.sessionTurns.id,
+                delegations: schema.sessionTurns.personalConnectionDelegations,
+              })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, workspaceId),
+                  eq(schema.sessionTurns.sessionId, sessionId),
+                  eq(schema.sessionTurns.initiatorKind, "subject"),
+                  eq(schema.sessionTurns.initiatingHumanSubjectId, ownGitHubSubjectId),
+                ),
+              )
+              .orderBy(desc(schema.sessionTurns.position))
+              .limit(1);
+            const history = recent.flatMap((row) => {
+              // One unreadable old snapshot must not stop this turn starting.
+              try {
+                return [
+                  parsedPersonalConnectionDelegations(
+                    row.delegations,
+                    `session_turns:${workspaceId}:${sessionId}:own-github`,
+                  ),
+                ];
+              } catch {
+                console.warn(
+                  `[session-claim] skipped unreadable Your GitHub snapshot on turn ${row.id}`,
+                );
+                return [];
+              }
+            });
+            const own = ownPersonalGitHubDelegation(history, ownGitHubSubjectId, session.resources);
+            if (own)
+              internalPersonalConnectionDelegations = [
+                ...internalPersonalConnectionDelegations,
+                own,
+              ];
           }
           let acceptedPersonalConnectionDelegations = internalPersonalConnectionDelegations;
           let acceptedMcpAccountBindings = parseAcceptedMcpAccountBindings(
@@ -88494,34 +88898,18 @@ export async function peekSessionWork(
         if (!currentTrigger) {
           throw new Error(`Turn ${turn.id} points to missing trigger ${turn.triggerEventId}`);
         }
-        const [actionResponse] = await scopedDb
-          .select({ id: schema.sessionEvents.id })
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, workspaceId),
-              eq(schema.sessionEvents.sessionId, sessionId),
-              inArray(schema.sessionEvents.type, [
-                "user.approvalDecision",
-                "user.humanInputResponse",
-              ]),
-              gt(schema.sessionEvents.sequence, currentTrigger.sequence),
-            ),
-          )
-          // One question answer is accepted per pause and only the trigger
-          // carries it, so it resumes first. Approval decisions are applied
-          // together by any resume (those up to its trigger), and one recorded
-          // after the trigger resumes the turn again.
-          .orderBy(
-            sql`(${schema.sessionEvents.type} = 'user.humanInputResponse') desc`,
-            desc(schema.sessionEvents.sequence),
-            desc(schema.sessionEvents.id),
-          )
-          .limit(1);
-        if (actionResponse) {
+        // Only an answer recorded for this turn resumes it (see
+        // pauseResponseTrigger); the claim applies the same rule.
+        const actionResponseId = await pauseResponseTrigger(scopedDb as unknown as Database, {
+          workspaceId,
+          sessionId,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
+        });
+        if (actionResponseId) {
           return {
             kind: "approval-pending",
-            triggerEventId: actionResponse.id,
+            triggerEventId: actionResponseId,
             ...fence,
           };
         }
@@ -89661,11 +90049,11 @@ async function settleSessionWorkBeforeAttemptClaim(
           } else if (turn && input.trigger.kind === "approval") {
             if (
               turn.status !== "requires_action" ||
-              !(await isNewerApprovalTrigger(
+              !(await isPauseResponseTriggerOf(
                 tx as unknown as Database,
                 workspaceId,
                 input.sessionId,
-                turn.triggerEventId,
+                turn,
                 input.trigger.triggerEventId,
               ))
             ) {
@@ -91690,34 +92078,26 @@ function readWorkerDeathRedispatchMetadata(metadata: unknown): WorkerDeathRedisp
   return { kind: "valid", count: raw };
 }
 
-async function isNewerApprovalTrigger(
+/**
+ * The claim's half of the pause-response rule: the candidate resumes the
+ * paused turn only if it is an answer recorded for that turn after its
+ * current trigger. The peek picks candidates with the same rule.
+ */
+async function isPauseResponseTriggerOf(
   tx: Database,
   workspaceId: string,
   sessionId: string,
-  currentTriggerEventId: string,
+  turn: { id: string; triggerEventId: string },
   candidateTriggerEventId: string,
 ): Promise<boolean> {
-  const rows = await tx
-    .select({
-      id: schema.sessionEvents.id,
-      type: schema.sessionEvents.type,
-      sequence: schema.sessionEvents.sequence,
-    })
-    .from(schema.sessionEvents)
-    .where(
-      and(
-        eq(schema.sessionEvents.workspaceId, workspaceId),
-        eq(schema.sessionEvents.sessionId, sessionId),
-        inArray(schema.sessionEvents.id, [currentTriggerEventId, candidateTriggerEventId]),
-      ),
-    );
-  const current = rows.find((row) => row.id === currentTriggerEventId);
-  const candidate = rows.find((row) => row.id === candidateTriggerEventId);
-  return Boolean(
-    current &&
-    candidate &&
-    ["user.approvalDecision", "user.humanInputResponse"].includes(candidate.type) &&
-    candidate.sequence > current.sequence,
+  return (
+    (await pauseResponseTrigger(tx, {
+      workspaceId,
+      sessionId,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      candidateEventId: candidateTriggerEventId,
+    })) === candidateTriggerEventId
   );
 }
 
@@ -97228,6 +97608,70 @@ export async function latestConnectionAuthNotice(
   });
 }
 
+/**
+ * The latest auth notice this chat showed for one capability, such as a
+ * Connected Machine, with whom it asked, so the caller can
+ * tell which request is still open, and for whom, before it clears that
+ * request's wait. Null when the chat showed none.
+ */
+export async function latestCapabilityAuthNotice(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; capabilityId: string },
+): Promise<{
+  id: string;
+  payload: Record<string, unknown>;
+  /** The person whose turn posted it, or the chat's creator for a service turn. */
+  askedBySubjectId: string;
+  /** The notice keys the chat still waits on the person for. */
+  awaitingConnectionKeys: string[];
+} | null> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const tx = scoped as unknown as Database;
+    const [card] = await tx
+      .select({
+        id: schema.sessionEvents.id,
+        payload: schema.sessionEvents.payload,
+        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+      })
+      .from(schema.sessionEvents)
+      .leftJoin(schema.sessionTurns, eq(schema.sessionTurns.id, schema.sessionEvents.turnId))
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.type, "tool.auth_needed"),
+          sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    if (!card) return null;
+    const [session] = await tx
+      .select({
+        awaitingKeys: schema.sessions.awaitingConnectionKeys,
+        createdBySubjectId: schema.sessions.createdBySubjectId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    const payload =
+      card.payload && typeof card.payload === "object" && !Array.isArray(card.payload)
+        ? (card.payload as Record<string, unknown>)
+        : {};
+    return {
+      id: card.id,
+      payload,
+      askedBySubjectId: card.initiatingHumanSubjectId ?? session?.createdBySubjectId ?? "",
+      awaitingConnectionKeys: session?.awaitingKeys ?? [],
+    };
+  });
+}
+
 async function userMessageAfterSequenceTx(
   tx: Database,
   input: Pick<EnqueueCapabilitySetupContinuationInput, "workspaceId" | "sessionId">,
@@ -102606,6 +103050,7 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
     setStatus: setConnectionStatus,
     recordUsed: recordConnectionUsed,
     refresh: refreshOAuthConnectionCredentialCore,
+    findGrantReauthSiblings: oauthGrantReauthSiblings,
     encrypt: encryptEnvironmentValue,
     keyBytes: environmentsEncryptionKeyBytes,
     now: () => new Date(),
@@ -102642,6 +103087,7 @@ export {
   isPrivateAddress,
   normalizeBearerScheme,
   refreshOAuthConnectionCredential,
+  SHARED_GRANT_REFUSED_ERROR,
   type ConnectionBrokerDeps,
   type ConnectionCredentialForBroker,
   type ConnectionCredentialLookupInput,

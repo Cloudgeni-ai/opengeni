@@ -54,6 +54,7 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { cn } from "@opengeni/react/app/lib/utils";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import {
   isSeatLimitError,
   planSeatsFull,
@@ -288,6 +289,7 @@ function usePeopleActions(
   setConfirm: (confirm: Confirm) => void,
   canManageBilling: boolean,
 ): PeopleActions {
+  const showPurchasePrompts = useShowPurchasePrompts();
   return useMemo(
     () => ({
       requestSuspend: (member) => setConfirm({ kind: "suspend", member }),
@@ -301,7 +303,7 @@ function usePeopleActions(
           });
         } catch (error) {
           toast.error(`Couldn't restore ${memberName(member)}`, {
-            description: seatRefusalText(error, directory, canManageBilling),
+            description: seatRefusalText(error, directory, canManageBilling, showPurchasePrompts),
           });
         }
       },
@@ -320,7 +322,7 @@ function usePeopleActions(
         }
       },
     }),
-    [directory, setConfirm, canManageBilling],
+    [directory, setConfirm, canManageBilling, showPurchasePrompts],
   );
 }
 
@@ -329,10 +331,13 @@ function seatRefusalText(
   error: unknown,
   directory: OrganizationDirectory,
   canManageBilling: boolean,
+  showPurchasePrompts: boolean,
 ): string {
   // Directory actions wrap the API error; the refusal is its cause.
   const refusal = error instanceof Error && error.cause !== undefined ? error.cause : error;
-  if (canManageBilling || !isSeatLimitError(refusal, directory.plan)) return userErrorText(error);
+  if (!isSeatLimitError(refusal, directory.plan)) return userErrorText(error);
+  if (!showPurchasePrompts) return "No seats are available to restore this person.";
+  if (canManageBilling) return userErrorText(error);
   const upgrade = seatUpgradeFor(directory.plan, directory.plans) ?? seatUpgradeFromError(refusal);
   return upgrade?.key === "enterprise"
     ? `Ask an organization owner about ${upgrade.label}.`
@@ -1415,6 +1420,7 @@ function InvitePage({
   canManageBilling: boolean;
 }) {
   const directory = useOrganizationDirectory();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const [emails, setEmails] = useState<string[]>([]);
   const [role, setRole] = useState<OrganizationMembershipRole>("member");
   const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
@@ -1533,7 +1539,9 @@ function InvitePage({
           />
         ) : seatLimitError ? (
           <Notice tone="waiting" title="Couldn't send the invitation" live="assertive">
-            {seatLimitError.message}
+            {showPurchasePrompts
+              ? seatLimitError.message
+              : "No seats are available for new invitations."}
           </Notice>
         ) : null}
         <Field

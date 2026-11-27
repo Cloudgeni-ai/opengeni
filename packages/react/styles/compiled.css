@@ -201,32 +201,32 @@
 @property --og-color-bg {
   syntax: "*";
   inherits: true;
-  initial-value: #303030;
+  initial-value: #141414;
 }
 @property --og-color-canvas {
   syntax: "*";
   inherits: true;
-  initial-value: #202020;
+  initial-value: #0d0d0d;
 }
 @property --og-color-surface-1 {
   syntax: "*";
   inherits: true;
-  initial-value: #333333;
+  initial-value: #1a1a1a;
 }
 @property --og-color-surface-2 {
   syntax: "*";
   inherits: true;
-  initial-value: #383838;
+  initial-value: #232323;
 }
 @property --og-color-surface-3 {
   syntax: "*";
   inherits: true;
-  initial-value: #404040;
+  initial-value: #2c2c2c;
 }
 @property --og-color-selection {
   syntax: "*";
   inherits: true;
-  initial-value: #484848;
+  initial-value: #303030;
 }
 @property --og-color-hover {
   syntax: "*";
@@ -241,32 +241,32 @@
 @property --og-color-border {
   syntax: "*";
   inherits: true;
-  initial-value: #454545;
+  initial-value: #363636;
 }
 @property --og-color-border-strong {
   syntax: "*";
   inherits: true;
-  initial-value: #555555;
+  initial-value: #4a4a4a;
 }
 @property --og-color-fg {
   syntax: "*";
   inherits: true;
-  initial-value: #e6e6e6;
+  initial-value: #f5f5f5;
 }
 @property --og-color-fg-label {
   syntax: "*";
   inherits: true;
-  initial-value: #d4d4d4;
+  initial-value: #e3e3e3;
 }
 @property --og-color-fg-muted {
   syntax: "*";
   inherits: true;
-  initial-value: #b8b8b8;
+  initial-value: #a6a6a6;
 }
 @property --og-color-fg-subtle {
   syntax: "*";
   inherits: true;
-  initial-value: #a3a3a3;
+  initial-value: #8c8c8c;
 }
 @property --og-color-accent {
   syntax: "*";
@@ -286,7 +286,7 @@
 @property --og-color-accent-fg {
   syntax: "*";
   inherits: true;
-  initial-value: #242424;
+  initial-value: #171717;
 }
 @property --og-color-link {
   syntax: "*";
@@ -296,27 +296,37 @@
 @property --og-color-primary {
   syntax: "*";
   inherits: true;
-  initial-value: #2b3432;
+  initial-value: #f2f2f2;
 }
 @property --og-color-primary-fg {
   syntax: "*";
   inherits: true;
-  initial-value: #eeeeee;
+  initial-value: #171717;
 }
 @property --og-color-primary-border {
   syntax: "*";
   inherits: true;
-  initial-value: #4e5e59;
+  initial-value: #f2f2f2;
 }
 @property --og-color-switch-track {
   syntax: "*";
   inherits: true;
-  initial-value: #454545;
+  initial-value: #3a3a3a;
 }
 @property --og-color-switch-thumb {
   syntax: "*";
   inherits: true;
-  initial-value: #a3a3a3;
+  initial-value: #a6a6a6;
+}
+@property --og-tile-lightness {
+  syntax: "*";
+  inherits: true;
+  initial-value: 0.8;
+}
+@property --og-tile-chroma {
+  syntax: "*";
+  inherits: true;
+  initial-value: 0.13;
 }
 @property --og-glow-teal {
   syntax: "*";
@@ -341,7 +351,7 @@
 @property --og-color-status-queued {
   syntax: "*";
   inherits: true;
-  initial-value: #a3a3a3;
+  initial-value: #8c8c8c;
 }
 @property --og-color-status-running {
   syntax: "*";
@@ -371,7 +381,7 @@
 @property --og-color-status-cancelled {
   syntax: "*";
   inherits: true;
-  initial-value: #a3a3a3;
+  initial-value: #8c8c8c;
 }
 @property --og-color-danger {
   syntax: "*";
@@ -792,10 +802,10 @@
     display: inline-block;
   }
 :where(.og-root).og-rail-glow,:where(.og-root) .og-rail-glow {
-    background: radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal), transparent 85%), radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach), transparent 85%), var(--og-color-bg);
+    background: var(--og-color-bg);
   }
 :where(.og-root).og-page-glow,:where(.og-root) .og-page-glow {
-    background: radial-gradient(ellipse 42% 70% at 0 20%, var(--og-glow-teal), transparent 95%), radial-gradient(ellipse 42% 65% at 0 100%, var(--og-glow-peach), transparent 95%), var(--og-color-canvas);
+    background: var(--og-color-canvas);
   }
 :where(.og-root).\@container\/access,:where(.og-root) .\@container\/access {
     container-type: inline-size;
@@ -1111,9 +1121,6 @@
   }
 :where(.og-root).isolate,:where(.og-root) .isolate {
     isolation: isolate;
-  }
-:where(.og-root).-z-10,:where(.og-root) .-z-10 {
-    z-index: calc(10 * -1);
   }
 :where(.og-root).z-0,:where(.og-root) .z-0 {
     z-index: 0;
@@ -2709,6 +2716,10 @@
 :where(.og-root).rotate-\[14deg\],:where(.og-root) .rotate-\[14deg\] {
     rotate: 14deg;
   }
+:where(.og-root).-skew-x-12,:where(.og-root) .-skew-x-12 {
+    --tw-skew-x: skewX(calc(12deg * -1));
+    transform: var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,);
+  }
 :where(.og-root).transform,:where(.og-root) .transform {
     transform: var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,);
   }
@@ -4142,6 +4153,12 @@
       background-color: color-mix(in oklab, var(--og-color-charge) 10%, transparent);
     }
   }
+:where(.og-root).bg-og-charge\/20,:where(.og-root) .bg-og-charge\/20 {
+    background-color: var(--og-color-charge);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-charge) 20%, transparent);
+    }
+  }
 :where(.og-root).bg-og-danger,:where(.og-root) .bg-og-danger {
     background-color: var(--og-color-danger);
   }
@@ -4679,32 +4696,18 @@
       background-color: color-mix(in oklab, var(--color-white) 10%, transparent);
     }
   }
-:where(.og-root).bg-gradient-to-r,:where(.og-root) .bg-gradient-to-r {
-    --tw-gradient-position: to right in oklab;
-    background-image: linear-gradient(var(--tw-gradient-stops));
+:where(.og-root).bg-white\/30,:where(.og-root) .bg-white\/30 {
+    background-color: color-mix(in srgb, #fff 30%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-white) 30%, transparent);
+    }
   }
 :where(.og-root).bg-gradient-to-t,:where(.og-root) .bg-gradient-to-t {
     --tw-gradient-position: to top in oklab;
     background-image: linear-gradient(var(--tw-gradient-stops));
   }
-:where(.og-root).bg-\[radial-gradient\(120\%_180\%_at_100\%_0\%\,color-mix\(in_oklch\,var\(--og-color-accent\)_8\%\,transparent\)\,transparent_70\%\)\],:where(.og-root) .bg-\[radial-gradient\(120\%_180\%_at_100\%_0\%\,color-mix\(in_oklch\,var\(--og-color-accent\)_8\%\,transparent\)\,transparent_70\%\)\] {
-    background-image: radial-gradient(120% 180% at 100% 0%,var(--og-color-accent),transparent 70%);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-image: radial-gradient(120% 180% at 100% 0%,color-mix(in oklch,var(--og-color-accent) 8%,transparent),transparent 70%);
-    }
-  }
-:where(.og-root).bg-\[radial-gradient\(ellipse_60\%_70\%_at_0\%_0\%\,var\(--og-glow-teal\)\,transparent_70\%\)\,radial-gradient\(ellipse_60\%_70\%_at_100\%_100\%\,var\(--og-glow-peach\)\,transparent_70\%\)\],:where(.og-root) .bg-\[radial-gradient\(ellipse_60\%_70\%_at_0\%_0\%\,var\(--og-glow-teal\)\,transparent_70\%\)\,radial-gradient\(ellipse_60\%_70\%_at_100\%_100\%\,var\(--og-glow-peach\)\,transparent_70\%\)\] {
-    background-image: radial-gradient(ellipse 60% 70% at 0% 0%,var(--og-glow-teal),transparent 70%),radial-gradient(ellipse 60% 70% at 100% 100%,var(--og-glow-peach),transparent 70%);
-  }
-:where(.og-root).bg-\[radial-gradient\(ellipse_80\%_90\%_at_0\%_0\%\,var\(--og-glow-teal\)\,transparent_70\%\)\,radial-gradient\(ellipse_80\%_90\%_at_100\%_100\%\,var\(--og-glow-peach\)\,transparent_70\%\)\],:where(.og-root) .bg-\[radial-gradient\(ellipse_80\%_90\%_at_0\%_0\%\,var\(--og-glow-teal\)\,transparent_70\%\)\,radial-gradient\(ellipse_80\%_90\%_at_100\%_100\%\,var\(--og-glow-peach\)\,transparent_70\%\)\] {
-    background-image: radial-gradient(ellipse 80% 90% at 0% 0%,var(--og-glow-teal),transparent 70%),radial-gradient(ellipse 80% 90% at 100% 100%,var(--og-glow-peach),transparent 70%);
-  }
 :where(.og-root).from-og-surface-2,:where(.og-root) .from-og-surface-2 {
     --tw-gradient-from: var(--og-color-surface-2);
-    --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
-  }
-:where(.og-root).from-transparent,:where(.og-root) .from-transparent {
-    --tw-gradient-from: transparent;
     --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
   }
 :where(.og-root).via-og-surface-2\/90,:where(.og-root) .via-og-surface-2\/90 {
@@ -4714,21 +4717,6 @@
     }
     --tw-gradient-via-stops: var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-via) var(--tw-gradient-via-position), var(--tw-gradient-to) var(--tw-gradient-to-position);
     --tw-gradient-stops: var(--tw-gradient-via-stops);
-  }
-:where(.og-root).via-white\/45,:where(.og-root) .via-white\/45 {
-    --tw-gradient-via: color-mix(in srgb, #fff 45%, transparent);
-    @supports (color: color-mix(in lab, red, red)) {
-      --tw-gradient-via: color-mix(in oklab, var(--color-white) 45%, transparent);
-    }
-    --tw-gradient-via-stops: var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-via) var(--tw-gradient-via-position), var(--tw-gradient-to) var(--tw-gradient-to-position);
-    --tw-gradient-stops: var(--tw-gradient-via-stops);
-  }
-:where(.og-root).to-og-charge\/30,:where(.og-root) .to-og-charge\/30 {
-    --tw-gradient-to: var(--og-color-charge);
-    @supports (color: color-mix(in lab, red, red)) {
-      --tw-gradient-to: color-mix(in oklab, var(--og-color-charge) 30%, transparent);
-    }
-    --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
   }
 :where(.og-root).to-transparent,:where(.og-root) .to-transparent {
     --tw-gradient-to: transparent;
@@ -5370,10 +5358,6 @@
     --tw-tracking: -0.01em;
     letter-spacing: -0.01em;
   }
-:where(.og-root).tracking-\[-0\.2px\],:where(.og-root) .tracking-\[-0\.2px\] {
-    --tw-tracking: -0.2px;
-    letter-spacing: -0.2px;
-  }
 :where(.og-root).tracking-\[-0\.005em\],:where(.og-root) .tracking-\[-0\.005em\] {
     --tw-tracking: -0.005em;
     letter-spacing: -0.005em;
@@ -5381,6 +5365,10 @@
 :where(.og-root).tracking-\[-0\.5px\],:where(.og-root) .tracking-\[-0\.5px\] {
     --tw-tracking: -0.5px;
     letter-spacing: -0.5px;
+  }
+:where(.og-root).tracking-\[-0\.012em\],:where(.og-root) .tracking-\[-0\.012em\] {
+    --tw-tracking: -0.012em;
+    letter-spacing: -0.012em;
   }
 :where(.og-root).tracking-\[-0\.015em\],:where(.og-root) .tracking-\[-0\.015em\] {
     --tw-tracking: -0.015em;
@@ -9232,33 +9220,6 @@
       background-color: var(--color-surface);
     }
   }
-:where(.og-root).aria-checked\:bg-linear-to-b,:where(.og-root) .aria-checked\:bg-linear-to-b {
-    &[aria-checked="true"] {
-      --tw-gradient-position: to bottom;
-      @supports (background-image: linear-gradient(in lab, red, red)) {
-        --tw-gradient-position: to bottom in oklab;
-      }
-      background-image: linear-gradient(var(--tw-gradient-stops));
-    }
-  }
-:where(.og-root).aria-checked\:from-brand-fg\/10,:where(.og-root) .aria-checked\:from-brand-fg\/10 {
-    &[aria-checked="true"] {
-      --tw-gradient-from: var(--color-brand-fg);
-      @supports (color: color-mix(in lab, red, red)) {
-        --tw-gradient-from: color-mix(in oklab, var(--color-brand-fg) 10%, transparent);
-      }
-      --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
-    }
-  }
-:where(.og-root).aria-checked\:to-brand-fg\/10,:where(.og-root) .aria-checked\:to-brand-fg\/10 {
-    &[aria-checked="true"] {
-      --tw-gradient-to: var(--color-brand-fg);
-      @supports (color: color-mix(in lab, red, red)) {
-        --tw-gradient-to: color-mix(in oklab, var(--color-brand-fg) 10%, transparent);
-      }
-      --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
-    }
-  }
 :where(.og-root).aria-checked\:text-brand,:where(.og-root) .aria-checked\:text-brand {
     &[aria-checked="true"] {
       color: var(--color-brand);
@@ -11778,14 +11739,12 @@
       background-color: transparent;
     }
   }
-:where(.og-root).dark\:via-white\/15,:where(.og-root) .dark\:via-white\/15 {
+:where(.og-root).dark\:bg-white\/10,:where(.og-root) .dark\:bg-white\/10 {
     &:where(.dark, .dark *) {
-      --tw-gradient-via: color-mix(in srgb, #fff 15%, transparent);
+      background-color: color-mix(in srgb, #fff 10%, transparent);
       @supports (color: color-mix(in lab, red, red)) {
-        --tw-gradient-via: color-mix(in oklab, var(--color-white) 15%, transparent);
+        background-color: color-mix(in oklab, var(--color-white) 10%, transparent);
       }
-      --tw-gradient-via-stops: var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-via) var(--tw-gradient-via-position), var(--tw-gradient-to) var(--tw-gradient-to-position);
-      --tw-gradient-stops: var(--tw-gradient-via-stops);
     }
   }
 :where(.og-root).dark\:text-\[color-mix\(in_oklab\,var\(--speaker-hue\)_62\%\,var\(--color-fg\)\)\],:where(.og-root) .dark\:text-\[color-mix\(in_oklab\,var\(--speaker-hue\)_62\%\,var\(--color-fg\)\)\] {
@@ -11823,6 +11782,13 @@
             background-color: color-mix(in oklab, var(--color-input) 50%, transparent);
           }
         }
+      }
+    }
+  }
+:where(.og-root).dark\:aria-checked\:bg-surface-3,:where(.og-root) .dark\:aria-checked\:bg-surface-3 {
+    &:where(.dark, .dark *) {
+      &[aria-checked="true"] {
+        background-color: var(--color-surface-3);
       }
     }
   }
@@ -13254,43 +13220,45 @@
   --og-realtime-menu-width: 15rem;
 }
 :where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
-  --og-color-bg: #f6f6f6;
+  --og-color-bg: #f7f7f7;
   --og-color-canvas: #ffffff;
   --og-color-surface-1: #ffffff;
-  --og-color-surface-2: #eeeeee;
-  --og-color-surface-3: #e5e5e5;
-  --og-color-selection: #e2e2e2;
-  --og-color-hover: rgb(36 36 36 / 0.06);
+  --og-color-surface-2: #f2f2f2;
+  --og-color-surface-3: #e9e9e9;
+  --og-color-selection: #e6e6e6;
+  --og-color-hover: rgb(23 23 23 / 0.06);
   --og-color-text-selection: #3884ff52;
-  --og-color-border: #dedede;
-  --og-color-border-strong: #bdbdbd;
-  --og-color-fg: #242424;
-  --og-color-fg-label: #3a3a3a;
-  --og-color-fg-muted: #5f5f5f;
-  --og-color-fg-subtle: #696969;
+  --og-color-border: #e4e4e4;
+  --og-color-border-strong: #c9c9c9;
+  --og-color-fg: #171717;
+  --og-color-fg-label: #2e2e2e;
+  --og-color-fg-muted: #525252;
+  --og-color-fg-subtle: #6b6b6b;
   --og-color-accent: #545454;
   --og-color-accent-strong: #383838;
   --og-color-accent-deep: #383838;
   --og-color-accent-fg: #ffffff;
   --og-color-link: #0b57d0;
   --og-color-accent-soft: var(--og-color-accent);
-  --og-color-primary: #ebf2f0;
-  --og-color-primary-fg: #292929;
-  --og-color-primary-border: #c4d5d0;
+  --og-color-primary: #171717;
+  --og-color-primary-fg: #ffffff;
+  --og-color-primary-border: #171717;
   --og-color-primary-hover: var(--og-color-primary);
-  --og-color-switch-track: #bdbdbd;
+  --og-color-switch-track: #c9c9c9;
   --og-color-switch-thumb: #ffffff;
+  --og-tile-lightness: 0.52;
+  --og-tile-chroma: 0.15;
   --og-glow-teal: #9fe3d359;
   --og-glow-peach: #ffb78752;
   --og-glow-teal-quiet: #9fe3d32b;
   --og-glow-peach-quiet: #ffb78729;
-  --og-color-status-queued: #696969;
+  --og-color-status-queued: #6b6b6b;
   --og-color-status-running: #716122;
   --og-color-charge: #b45f00;
   --og-color-status-idle: #237058;
   --og-color-status-waiting: #8c5524;
   --og-color-status-failed: oklch(0.5 0.19 22);
-  --og-color-status-cancelled: #696969;
+  --og-color-status-cancelled: #6b6b6b;
   --og-color-danger: oklch(0.52 0.2 22);
   --og-color-danger-fill: oklch(0.5 0.19 22);
   --og-color-danger-fg: #ffffff;
@@ -13435,6 +13403,10 @@
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child {
   padding-bottom: 16px;
+}
+:where(.og-root).og-session-capability-shell[data-state="pending"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="pending"] > .og-session-capability-copy:last-child {
+  padding-bottom: 16px;
+  color: var(--og-color-fg-muted);
 }
 :where(.og-root).og-session-capability-copy[data-clamp],:where(.og-root) .og-session-capability-copy[data-clamp] {
   display: -webkit-box;
@@ -13861,6 +13833,14 @@
 :where(.og-root).og-preview-loading canvas[data-painted="true"],:where(.og-root) .og-preview-loading canvas[data-painted="true"] {
   background-image: none;
 }
+:where(.og-root).og-preview-loading[data-fill],:where(.og-root) .og-preview-loading[data-fill] {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+}
+:where(.og-root).og-preview-loading[data-fill] canvas,:where(.og-root) .og-preview-loading[data-fill] canvas {
+  height: 100%;
+}
 :where(.og-root).og-preview-loading-label,:where(.og-root) .og-preview-loading-label {
   position: absolute;
   left: 16px;
@@ -14037,6 +14017,20 @@
   :where(.og-root).og-mh-draw,:where(.og-root) .og-mh-draw {
     animation: none;
     stroke-dasharray: none;
+  }
+}
+:where(.og-root).og-hued-tile,:where(.og-root) .og-hued-tile {
+  --_og-tile-ink: oklch(var(--og-tile-lightness, 0.52) var(--og-tile-chroma, 0.15) var(--og-tile-hue, 250));
+  color: var(--_og-tile-ink);
+  background-color: var(--_og-tile-ink);
+  @supports (color: color-mix(in lab, red, red)) {
+    background-color: color-mix(in oklch, var(--_og-tile-ink) 16%, transparent);
+  }
+}
+:where(.og-root).og-hued-tile::after,:where(.og-root) .og-hued-tile::after {
+  border-color: var(--_og-tile-ink);
+  @supports (color: color-mix(in lab, red, red)) {
+    border-color: color-mix(in oklch, var(--_og-tile-ink) 30%, transparent);
   }
 }
 :where(.og-root).og-shimmer-text,:where(.og-root) .og-shimmer-text {
@@ -14965,6 +14959,10 @@
 :where(.og-root).og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="complete"] > .og-session-capability-copy:last-child {
   padding-bottom: 16px;
 }
+:where(.og-root).og-session-capability-shell[data-state="pending"] > .og-session-capability-copy:last-child,:where(.og-root) .og-session-capability-shell[data-state="pending"] > .og-session-capability-copy:last-child {
+  padding-bottom: 16px;
+  color: var(--og-color-fg-muted);
+}
 :where(.og-root).og-session-capability-copy[data-clamp],:where(.og-root) .og-session-capability-copy[data-clamp] {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -15535,7 +15533,7 @@
   min-height: 76px;
   padding: 14px 12px;
   border: 0;
-  border-radius: var(--og-radius-lg,14px);
+  border-radius: var(--og-radius-md,10px);
   background: transparent;
   color: var(--og-color-fg,inherit);
   text-align: left;
@@ -15579,7 +15577,7 @@
 }
 :where(.og-root).og-capability-catalog-copy strong,:where(.og-root) .og-capability-catalog-copy strong {
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -15682,7 +15680,7 @@
 }
 :where(.og-root).og-connection-catalog-copy strong,:where(.og-root) .og-connection-catalog-copy strong {
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
 }
 :where(.og-root).og-connection-catalog-copy > span,:where(.og-root) .og-connection-catalog-copy > span {
   font-size: 12px;
@@ -16012,10 +16010,16 @@
   border: 0;
   background: transparent;
 }
+:where(.og-root).og-connection-catalog[data-columns="2"],:where(.og-root) .og-connection-catalog[data-columns="2"] {
+  padding: 8px;
+  border: 1px solid var(--og-color-border,#e4e4e4);
+  border-radius: var(--og-radius-lg,14px);
+  background: var(--og-color-surface-1,#fff);
+}
 @media (min-width: 720px) {
   :where(.og-root).og-connection-catalog[data-columns="2"],:where(.og-root) .og-connection-catalog[data-columns="2"] {
     grid-template-columns: repeat(2,minmax(0,1fr));
-    column-gap: 24px;
+    column-gap: 8px;
     align-items: start;
   }
 }

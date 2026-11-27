@@ -1321,6 +1321,7 @@ async fn saved_and_handed_off(agent: &Agent, id: Id, owner_epoch: u64) {
             id,
             owner_epoch,
             awake: false,
+            keep_memory: false,
         })
         .await
         .unwrap();

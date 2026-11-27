@@ -4,6 +4,7 @@ import { Link } from "../../lib/navigation";
 import { Button } from "../../../ui/button";
 import { Notice } from "../../../ui/notice";
 import { analyticsAction } from "../../../ui/analytics-actions";
+import { useShowPurchasePrompts } from "../../lib/purchase-presentation";
 
 /**
  * The person's own subscriptions (Codex, Claude, SuperGrok) need a paid plan.
@@ -79,6 +80,7 @@ export function ownSubscriptionPlanNotice({
  * still works, and using it waits for the plan.
  */
 export function OwnSubscriptionPlanNote({ plan }: { plan: OwnSubscriptionPlan }) {
+  if (!useShowPurchasePrompts()) return null;
   return (
     <Notice tone="info">
       <span data-testid="own-subscription-plan-note">{ownSubscriptionPlanSentence(plan)}</span>
@@ -106,6 +108,14 @@ export function OwnSubscriptionPlanNotice({
   /** The one-time heads-up hides for good; the notice for a chosen model has none. */
   onDismiss?: (() => void) | undefined;
 }) {
+  if (!useShowPurchasePrompts()) {
+    return onDismiss ? null : (
+      <Notice
+        tone="waiting"
+        title="This subscription isn't available on your organization's plan"
+      />
+    );
+  }
   const price = planMonthlyPrice(plan);
   return (
     <Notice
@@ -139,6 +149,7 @@ export function UpgradePlanButton({
   workspaceId: string;
   planLabel: string;
 }) {
+  if (!useShowPurchasePrompts()) return null;
   return (
     <Button asChild type="button" size="sm">
       <Link

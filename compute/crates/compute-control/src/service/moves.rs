@@ -5,8 +5,15 @@
 //! it stands, memory and all, ending its open connections. A resize is a
 //! move whose sandbox gets its new shape while nobody owns it
 //! ([ADR 27](../../../../docs/adr/0027-resizing-a-sandbox.md)).
+//!
+//! The leader's own drain, ahead of removing a host to shrink its group,
+//! keeps every sandbox's programs ([`Service::drain_keeping_programs`]):
+//! an idle sandbox would otherwise go with its files alone
+//! ([ADR 36](../../../../docs/adr/0036-idle-memory-stays-in-ram.md)), so
+//! it is first put to sleep with its memory, and handed off only once
+//! that copy is in the store. One in use is never forced.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use compute_fleet::{HostId, HostState, Next, Op, Outcome};
@@ -82,6 +89,40 @@ pub struct Drained {
     /// those too), or their host did not answer. Draining again tries
     /// them again.
     pub left: usize,
+}
+
+/// What a drain that keeps programs does next with one sandbox of the host
+/// it drains, by what its host reports of it ([`leaving`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leaving {
+    /// It stays for now: something holds it or it runs, a step is under
+    /// way, no copy of it can be trusted, or its host does not report it
+    /// under its owner's epoch (being created or taken up). A later pass
+    /// looks again; nothing forces it.
+    Stays,
+    /// Idle with its memory on the host: it is put to sleep with its
+    /// programs and archived, which an explicit sleep does whatever its
+    /// rules say, before it goes.
+    Sleeps,
+    /// Everything it keeps is in the store: it is handed off.
+    Goes,
+}
+
+/// What a drain that keeps programs does next with a sandbox its host
+/// reports as `status` (`None`: not reported under its owner's epoch).
+#[must_use]
+pub fn leaving(status: Option<&SandboxStatus>) -> Leaving {
+    let Some(status) = status else {
+        return Leaving::Stays;
+    };
+    if status.holds > 0 || status.step.is_some() || status.unsavable || status.broken {
+        return Leaving::Stays;
+    }
+    match status.level {
+        LevelName::Running => Leaving::Stays,
+        LevelName::Paused | LevelName::Compressed | LevelName::Saved => Leaving::Sleeps,
+        LevelName::Archived | LevelName::Remote => Leaving::Goes,
+    }
 }
 
 impl<S: Store> Service<S> {
@@ -315,6 +356,18 @@ impl<S: Store> Service<S> {
         host: HostId,
         awake: bool,
     ) -> Result<(), Failure> {
+        self.hand_off_keeping(row, host, awake, false).await
+    }
+
+    /// [`Self::hand_off`], keeping its memory even while it is idle with
+    /// `keep_memory`.
+    async fn hand_off_keeping(
+        &self,
+        row: &SandboxRow,
+        host: HostId,
+        awake: bool,
+        keep_memory: bool,
+    ) -> Result<(), Failure> {
         let epoch = row.ownership.epoch;
         let target = self
             .view
@@ -324,6 +377,7 @@ impl<S: Store> Service<S> {
             id: row.id,
             owner_epoch: epoch.0,
             awake,
+            keep_memory,
         };
         let answered = self
             .hosts
@@ -378,6 +432,135 @@ impl<S: Store> Service<S> {
             }
         }
         Ok(drained)
+    }
+
+    /// One pass of draining the host named `name` without costing any
+    /// sandbox its programs, for the leader's removal of a host: no new
+    /// sandbox goes there, each idle one still in its memory is put to
+    /// sleep with its programs and archived, and each whose copy is in the
+    /// store is handed off ([`leaving`]). One in use stays: nothing is
+    /// forced, so no connection ends. Passes are repeated until it owns
+    /// none; `moved` counts this pass's hand-offs and `left` the sandboxes
+    /// it still owns, so a pass that finds it owning none answers zero of
+    /// both.
+    ///
+    /// The store notes it as the leader's drain ([`Store::drain_to_remove`]);
+    /// a host someone else drains is drained only if `adopted`, and stays
+    /// theirs. A pass on a host that is not, or no longer, drained as it
+    /// should be (someone else drained or undrained it, or it was given up
+    /// on) fails, so nothing removes it.
+    pub async fn drain_keeping_programs(
+        &self,
+        name: &str,
+        adopted: bool,
+    ) -> Result<Drained, Failure> {
+        let known = self.view.named(name).ok_or(Failure::NotFound)?;
+        let host = known.target.host;
+        if known.state == HostState::Lost {
+            return Err(Failure::Invalid(format!("{name} was given up on")));
+        }
+        if adopted {
+            if known.state != HostState::Draining {
+                return Err(Failure::Invalid(format!("{name} is no longer draining")));
+            }
+        } else if !self.store.drain_to_remove(host, now_ms()).await? {
+            return Err(Failure::Invalid(format!(
+                "{name} is no longer the leader's to drain: someone else drained it, or it was given up on"
+            )));
+        }
+        let rows = self.store.owned_by(host).await?;
+        if rows.is_empty() {
+            return Ok(Drained::default());
+        }
+        let target = self
+            .view
+            .target(host)
+            .ok_or_else(|| Failure::Unavailable(self.unreachable(host)))?;
+        let answered = self
+            .hosts
+            .call(&target, None, &Request::Status, STATUS_WAIT)
+            .await
+            .map_err(|error| Failure::Unavailable(error.to_string()))?;
+        let Reply::Status(status) = &answered.answer.reply else {
+            return Err(host_failure(&answered));
+        };
+        let reported: HashMap<Id, &SandboxStatus> = status
+            .sandboxes
+            .iter()
+            .map(|sandbox| (sandbox.id, sandbox))
+            .collect();
+        let total = rows.len();
+        let outcomes: Vec<Result<bool, Failure>> = futures::stream::iter(rows)
+            .map(|row| {
+                let status = reported
+                    .get(&row.id)
+                    .copied()
+                    .filter(|status| status.owner_epoch == row.ownership.epoch.0);
+                let next = leaving(status);
+                let generation = status.map(|status| status.generation);
+                async move {
+                    match next {
+                        Leaving::Stays => Ok(false),
+                        Leaving::Sleeps => self
+                            .sleep_keeping_programs(&row, host, generation)
+                            .await
+                            .map(|()| false),
+                        // Asked to keep its memory, the host decides by
+                        // the sandbox as it is then: one that woke and
+                        // paused again since the status was read keeps
+                        // what it ran meanwhile.
+                        Leaving::Goes => self
+                            .hand_off_keeping(&row, host, false, true)
+                            .await
+                            .map(|()| true),
+                    }
+                }
+            })
+            .buffer_unordered(DRAIN_AT_ONCE)
+            .collect()
+            .await;
+        let mut drained = Drained::default();
+        for outcome in outcomes {
+            match outcome {
+                Ok(true) => drained.moved += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::info!(%error, host = name, "a sandbox stays on a host being removed");
+                }
+            }
+        }
+        drained.left = total - drained.moved;
+        Ok(drained)
+    }
+
+    /// Has `host`, the owner, put `row`'s sandbox to sleep with its
+    /// programs and archive it, while it is still at `generation` if one
+    /// is given. The host answers at once and does it in the background.
+    async fn sleep_keeping_programs(
+        &self,
+        row: &SandboxRow,
+        host: HostId,
+        generation: Option<u64>,
+    ) -> Result<(), Failure> {
+        let target = self
+            .view
+            .target(host)
+            .ok_or_else(|| Failure::Unavailable(self.unreachable(host)))?;
+        let request = Request::Sleep {
+            id: row.id,
+            generation,
+            level: LevelName::Archived,
+        };
+        let answered = self
+            .hosts
+            .call(&target, Some(row.ownership.epoch), &request, SLEEP_WAIT)
+            .await
+            .map_err(|error| Failure::Unavailable(error.to_string()))?;
+        if answered.outcome() == Outcome::Done {
+            Ok(())
+        } else {
+            Err(host_failure(&answered))
+        }
     }
 
     /// Declares the host named `name`, given up on, gone for good: each

@@ -37,6 +37,7 @@ const PAGES = new Set([
   "sites",
   "meetings",
   "get-started",
+  "enable",
 ]);
 // Top-level routes outside a workspace, by exact path shape. A concrete id in
 // the path is never reported for these; everything unlisted is "other".

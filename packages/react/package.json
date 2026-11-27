@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "6.41.0",
+  "version": "6.42.0",
   "description": "React hooks and styled components for Opengeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -324,6 +324,8 @@
     "dequal": "2.0.3",
     "katex": "^0.18.11",
     "lucide-react": "^1.8.0",
+    "mdast-util-from-markdown": "2.0.3",
+    "mdast-util-to-string": "4.0.0",
     "motion": "^12.0.0",
     "radix-ui": "^1.4.3",
     "react-markdown": "^10.1.0",
@@ -334,7 +336,8 @@
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0",
     "thinking-orbs": "^0.3.1",
-    "virtua": "^0.49.2"
+    "virtua": "^0.49.2",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@codemirror/lang-css": "^6.3.1",

@@ -1017,3 +1017,173 @@ run "rotation_uses_refreshed_count_three_state" {
     error_message = "Phase 2 must bind the rotation evidence to the refreshed live node-pool count."
   }
 }
+
+run "autoscaler_profile_untouched_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(azurerm_kubernetes_cluster.this.auto_scaler_profile) == 0
+    error_message = "Default composition must not manage the autoscaler profile."
+  }
+}
+
+run "autoscaler_scale_down_threshold_is_set_alone" {
+  command = plan
+
+  variables {
+    aks = {
+      node_count                       = 4
+      auto_scaling_enabled             = true
+      min_count                        = 2
+      max_count                        = 10
+      scale_down_utilization_threshold = 0.65
+    }
+  }
+
+  assert {
+    condition     = azurerm_kubernetes_cluster.this.auto_scaler_profile[0].scale_down_utilization_threshold == "0.65"
+    error_message = "The scale-down threshold must reach the autoscaler profile."
+  }
+}
+
+run "autoscaler_threshold_requires_autoscaling" {
+  command = plan
+
+  variables {
+    aks = {
+      scale_down_utilization_threshold = 0.65
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "autoscaler_threshold_rejects_out_of_range" {
+  command = plan
+
+  variables {
+    aks = {
+      node_count                       = 4
+      auto_scaling_enabled             = true
+      min_count                        = 2
+      max_count                        = 10
+      scale_down_utilization_threshold = 1.5
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "node_os_maintenance_window_is_absent_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(azurerm_kubernetes_cluster.this.maintenance_window_node_os) == 0
+    error_message = "Without a configured window the module must not set a node OS window."
+  }
+}
+
+run "node_os_maintenance_window_is_set_weekly" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
+        start_time     = "02:00"
+        duration_hours = 4
+        start_date     = "2026-10-04T00:00:00Z"
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].frequency == "Weekly" &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].interval == 1 &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].day_of_week == "Tuesday" &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].start_time == "02:00" &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].duration == 4 &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].utc_offset == "+00:00" &&
+      azurerm_kubernetes_cluster.this.maintenance_window_node_os[0].start_date == "2026-10-04T00:00:00Z"
+    )
+    error_message = "The node OS maintenance window must reach the cluster as configured."
+  }
+}
+
+run "node_os_maintenance_window_rejects_short_duration" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
+        start_time     = "02:00"
+        duration_hours = 2
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "node_os_maintenance_window_rejects_bad_day" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tue"
+        start_time     = "02:00"
+        duration_hours = 4
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "node_os_maintenance_window_rejects_bad_start_time" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
+        start_time     = "2:00"
+        duration_hours = 4
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}
+
+run "node_os_maintenance_window_rejects_fractional_interval" {
+  command = plan
+
+  variables {
+    aks = {
+      node_os_maintenance_window = {
+        day_of_week    = "Tuesday"
+        start_time     = "02:00"
+        duration_hours = 4
+        interval_weeks = 1.5
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks,
+  ]
+}

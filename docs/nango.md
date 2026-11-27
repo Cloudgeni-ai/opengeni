@@ -175,8 +175,10 @@ grant per OAuth client and account, so revoking it would also end every
 other connection that Google account has through Nango's client (its other
 Nango integrations, and any other connection still standing for it).
 Deleting the Nango connection stops our access and billing. Native Google
-connections keep revoking at Google on disconnect (#7692), since that client
-is our own.
+connections revoke at Google on disconnect (#7692), since that client is our
+own, but only when no other live connection anywhere in the deployment may
+hold the same grant (see "Shared provider grants" in
+[Remote MCP credentials](remote-mcp-credentials.md)).
 
 ### Automatic cleanup
 

@@ -1,5 +1,10 @@
 import { version as sdkVersion } from "../package.json";
 import type {
+  AiProcessingConsentResponse,
+  GrantAiProcessingConsentRequest,
+  AccountDeletionPreview,
+  StartAccountDeletionRequest,
+  StartAccountDeletionResponse,
   DecisionQuestion,
   ModelDecisionRequest,
   ModelDecisionResponse,
@@ -116,6 +121,11 @@ import type {
   CreateAgentFromTemplateRequest,
   AgentTemplate,
   ListAgentTemplatesResponse,
+  SetupReadiness,
+  SetupReadinessResponse,
+  SetupConnectionRequest,
+  SetupConnectionRequestResponse,
+  AgentReadinessListResponse,
   DeleteAgentResponse,
   ListAgentChatsResponse,
   ListAgentRevisionsResponse,
@@ -1602,6 +1612,20 @@ export class OpenGeniClient {
   /** Dynamic typed tool facade backed by the canonical workspace gateway. */
   readonly tools: OpenGeniToolsFacade;
 
+  getAiProcessingConsent(): Promise<AiProcessingConsentResponse> {
+    return this.requestJson("GET", "/v1/me/ai-processing-consent");
+  }
+
+  grantAiProcessingConsent(
+    request: GrantAiProcessingConsentRequest,
+  ): Promise<AiProcessingConsentResponse> {
+    return this.requestJson("POST", "/v1/me/ai-processing-consent", request);
+  }
+
+  withdrawAiProcessingConsent(): Promise<AiProcessingConsentResponse> {
+    return this.requestJson("DELETE", "/v1/me/ai-processing-consent");
+  }
+
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
@@ -1684,6 +1708,18 @@ export class OpenGeniClient {
       });
     }
     return body;
+  }
+
+  /** Preview deletion for the signed-in person. API keys cannot call this. */
+  async getAccountDeletion(options?: OpenGeniRequestOptions): Promise<AccountDeletionPreview> {
+    return this.requestJson("GET", "/v1/me/account-deletion", undefined, {}, options);
+  }
+
+  /** Request erasure and immediately revoke the signed-in person's sessions. */
+  async requestAccountDeletion(
+    request: StartAccountDeletionRequest,
+  ): Promise<StartAccountDeletionResponse> {
+    return this.requestJson("POST", "/v1/me/account-deletion", request);
   }
 
   /** Typed stateless judgments using the deployment's configured decision model. */
@@ -8896,6 +8932,64 @@ export class OpenGeniClient {
       request,
     );
     return response.agent;
+  }
+
+  /**
+   * Readiness of a ready-made agent before it is added: each connection it
+   * uses, whether the caller already has it on, whether they may connect it,
+   * and what keeps it off, in words. `trigger` names the suggested trigger
+   * that will be turned on (default: its first); a trigger on GitHub events
+   * needs the workspace's GitHub App.
+   */
+  async getAgentTemplateReadiness(
+    workspaceId: string,
+    templateKey: string,
+    options: { trigger?: string | undefined } = {},
+  ): Promise<SetupReadiness> {
+    const query = options.trigger ? `?trigger=${encodeURIComponent(options.trigger)}` : "";
+    const response = await this.requestJson<SetupReadinessResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-templates/${encodeURIComponent(templateKey)}/readiness${query}`,
+    );
+    return response.readiness;
+  }
+
+  /**
+   * Readiness of an agent for the caller. An agent added from a ready-made one
+   * needs its required connections before a trigger can be turned on.
+   */
+  async getAgentReadiness(workspaceId: string, agentId: string): Promise<SetupReadiness> {
+    const response = await this.requestJson<SetupReadinessResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/readiness`,
+    );
+    return response.readiness;
+  }
+
+  /**
+   * Asks the workspace's admins, in their inbox, to connect something a setup
+   * needs ("Ask an admin" on the Enable page). `returnPath` is the Enable step
+   * they open. Asking again never asks twice; `unavailable` means no admin
+   * could be asked here, so share a link instead.
+   */
+  async requestSetupConnection(
+    workspaceId: string,
+    request: SetupConnectionRequest,
+  ): Promise<SetupConnectionRequestResponse> {
+    return await this.requestJson<SetupConnectionRequestResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/setup-connection-requests`,
+      request,
+    );
+  }
+
+  /** Readiness of every agent the caller can see, read in one request (the Agents list). */
+  async listAgentReadiness(workspaceId: string): Promise<AgentReadinessListResponse["agents"]> {
+    const response = await this.requestJson<AgentReadinessListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/readiness`,
+    );
+    return response.agents;
   }
 
   /** Deletes the agent. Its chats stay and continue as ordinary chats. */

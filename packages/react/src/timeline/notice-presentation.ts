@@ -5,11 +5,26 @@ import { durationBetween } from "./work-presentation";
 import { type OpenGeniText } from "../messages/runtime";
 import { toolActionTitle } from "../tool-action-wording";
 
-/** An approval notice the person has since answered. */
+/** An approval notice that no longer waits, answered or not. */
 export function noticeIsResolvedApproval(
   item: Pick<NoticeItem, "approval" | "resolvedAt">,
 ): boolean {
   return Boolean(item.resolvedAt && item.approval);
+}
+
+/**
+ * A resolved approval wait with a recorded answer. One that ended without
+ * any (the turn moved on before it was answered) is resolved but not
+ * answered, and never reads as the person's response.
+ */
+export function noticeApprovalAnswered(
+  item: Pick<NoticeItem, "approval" | "resolvedAt" | "approvalActions" | "unmatchedDecision">,
+): boolean {
+  return (
+    noticeIsResolvedApproval(item) &&
+    (item.unmatchedDecision !== undefined ||
+      (item.approvalActions ?? []).some((action) => action.decision !== undefined))
+  );
 }
 
 /**
@@ -54,19 +69,30 @@ function tellingFact(action: ApprovalAction, alike: ApprovalAction[]): string | 
  * A resolved approval notice reads as history, saying what the person
  * decided for each action whose answer is known, one line each: "You
  * approved “Remove the Gmail connection for anna@example.com”." Actions it
- * asked about but never got an answer for here (a later wait asked again)
- * are left out. Two that would read the same get the first fact that tells
- * them apart: "(Added: 2 Oct 2026, 10:12 UTC)".
+ * asked about without a recorded answer are left out; with none answered it
+ * reads "Not answered.". Two that would read the same get the first fact that
+ * tells them apart: "(Added: 2 Oct 2026, 10:12 UTC)".
  */
 export function noticeDisplayText(
   t: OpenGeniText,
-  item: Pick<NoticeItem, "text" | "approval" | "resolvedAt" | "approvalActions">,
+  item: Pick<
+    NoticeItem,
+    "text" | "approval" | "resolvedAt" | "approvalActions" | "unmatchedDecision"
+  >,
 ): string {
   if (!noticeIsResolvedApproval(item)) return item.text;
   const actions = item.approvalActions ?? [];
   const decided = actions.filter((action) => action.decision !== undefined);
-  // Without any answer (an older replay), say only that it was answered.
-  if (decided.length === 0) return t("timeline.noticePresentation.youRespondedToThisApproval");
+  if (decided.length === 0) {
+    // Answered by a decision that named none of its actions (an older
+    // request): say only that it was answered, and by whom.
+    if (item.unmatchedDecision === "automatic")
+      return t("timeline.noticePresentation.declinedAutomatically");
+    if (item.unmatchedDecision === "person")
+      return t("timeline.noticePresentation.youRespondedToThisApproval");
+    // No answer was recorded (the turn moved on without one).
+    return t("timeline.noticePresentation.notAnswered");
+  }
   // Each answered action, by what it asked, in the host's words when it named the action.
   const titleOf = (action: ApprovalAction) =>
     toolActionTitle(t, action.toolName) ?? action.title ?? undefined;

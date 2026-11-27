@@ -1,4 +1,5 @@
 import { createKnowledgeIndexingActivities } from "./activities/knowledge-indexing";
+import { createAccountDeletionActivities } from "./activities/account-deletion";
 import { createSharedActivityServices } from "./activity-services";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
 import { createBrowserStateArtifactMaintenanceActivities } from "./activities/browser-state-artifact-reaper";
@@ -35,6 +36,7 @@ export function createControlActivitiesFromServices(
   resolveDocumentServices?: () => Promise<import("@opengeni/documents").DocumentServices>,
 ) {
   return {
+    ...createAccountDeletionActivities(services),
     ...createDocumentActivities(services, resolveDocumentServices),
     ...createKnowledgeIndexingActivities(services, resolveDocumentServices),
     ...createSessionStateActivities(services),

@@ -594,7 +594,12 @@ export function useSandboxWorkspaceTabs(
   // invalidation so the one machine chip cannot remain "Offline" beside a live
   // browser/computer (or remain "Live" after the final interaction holder ends).
   // This is a read-only negotiation: it never acquires a holder or wakes a box.
+  // The event already held when the dock mounts is older than the dock's own
+  // first negotiation, so only a later one re-reads.
+  const seenInteractionEvent = useRef(workspaceInteractionEvent);
   useEffect(() => {
+    if (seenInteractionEvent.current === workspaceInteractionEvent) return;
+    seenInteractionEvent.current = workspaceInteractionEvent;
     if (workspaceInteractionEvent?.workspaceId !== workspaceId) return;
     renegotiate();
   }, [workspaceId, workspaceInteractionEvent, renegotiate]);

@@ -352,7 +352,7 @@ export function DetailHeader({
           {leading ? <LogoTileSizeProvider size="lg">{leading}</LogoTileSizeProvider> : null}
           <div className={cn("min-w-0 flex-1", leading && "pt-1.5")}>
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-              <Title className="min-w-0 text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg">
+              <Title className="min-w-0 text-xl leading-7 font-semibold tracking-[-0.012em] break-words text-fg">
                 {title}
               </Title>
               {status}
@@ -430,7 +430,7 @@ export function DetailHeader({
       ) : null}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <Title className="min-w-0 text-lg leading-6.5 font-semibold tracking-[-0.25px] break-words text-fg">
+          <Title className="min-w-0 text-lg leading-6.5 font-semibold tracking-[-0.012em] break-words text-fg">
             {title}
           </Title>
           {status}

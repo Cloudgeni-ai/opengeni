@@ -91,13 +91,21 @@ describe("GitHub configured-token browser handoff", () => {
     });
   });
 
-  test("accepts only same-workspace session return paths", () => {
+  test("accepts only same-workspace session and setup-page return paths", () => {
     const valid = `/workspaces/${grant.workspaceId}/sessions/session-id?capability_auth=api%3Agithub-app`;
     expect(githubSessionReturnPath(valid, grant.workspaceId)).toBe(valid);
+    for (const setupPage of [
+      `/workspaces/${grant.workspaceId}/enable?agent=pr-reviewer&step=connect`,
+      `/workspaces/${grant.workspaceId}/get-started?setup=pr-reviews&step=connect`,
+    ]) {
+      expect(githubSessionReturnPath(setupPage, grant.workspaceId)).toBe(setupPage);
+    }
     for (const rejected of [
       "https://attacker.example/session",
       "//attacker.example/session",
       `/workspaces/another-workspace/sessions/session-id`,
+      `/workspaces/another-workspace/enable?agent=pr-reviewer`,
+      `/workspaces/${grant.workspaceId}/enable-other`,
       `/workspaces/${grant.workspaceId}/capabilities`,
       `/workspaces/${grant.workspaceId}/sessions`,
     ]) {

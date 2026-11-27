@@ -14,6 +14,7 @@ import {
   capabilityReconnectPlan,
   connectionHealth,
   loadConnectionHealthAccounts,
+  loadWorkspaceCapabilities,
 } from "../lib/capabilities";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { usePage } from "../lib/navigation";
@@ -110,120 +111,124 @@ export function WorkspaceComposerPlus(
         : null;
   const deniedMessage =
     "Your workspace access doesn't allow connection discovery. Ask a workspace admin for connection access.";
-  const reload = useCallback(async () => {
-    const request = ++lifecycle.revision;
-    const generation = lifecycle.generation;
-    const liveScope = () =>
-      scope.current.client === client &&
-      scope.current.workspaceId === workspaceId &&
-      lifecycle.generation === generation;
-    const live = () => liveScope() && lifecycle.revision === request;
-    setLoading(true);
-    let denied = false;
-    try {
-      const connectionLoad = (
-        canReadConnections === true
-          ? // Health reads the account inventory the tool runtime resolves.
-            loadConnectionHealthAccounts(client, workspaceId).then(
-              (connections) => ({ connections, denied: false }),
-              (failure: unknown) => ({
-                connections: null,
-                denied: isWorkspacePermissionDenied(failure),
-              }),
-            )
-          : Promise.resolve({ connections: null, denied: canReadConnections === false })
-      ).then((result) => {
-        if (
-          liveScope() &&
-          result.denied &&
-          request > lifecycle.successfulConnectionsRevision &&
-          request > lifecycle.deniedConnectionsRevision
-        ) {
-          lifecycle.deniedConnectionsRevision = request;
-          denied = true;
-          cacheConnectorCatalog(client, workspaceId, null);
-          // A failed catalog refresh must not leave the prior account rows visible.
-          setCatalog((previous) =>
-            previous?.client === client &&
-            previous.workspaceId === workspaceId &&
-            previous.epoch === generation
-              ? { ...previous, connections: null }
-              : previous,
-          );
-          setError(deniedMessage);
-        } else if (
-          liveScope() &&
-          result.connections !== null &&
-          request > lifecycle.deniedConnectionsRevision &&
-          request > lifecycle.successfulConnectionsRevision
-        ) {
-          lifecycle.successfulConnectionsRevision = request;
-          setCatalog((previous) =>
-            previous?.client === client &&
-            previous.workspaceId === workspaceId &&
-            previous.epoch === generation
-              ? { ...previous, connections: result.connections }
-              : previous,
-          );
-          setError((previous) => (previous === deniedMessage ? null : previous));
-        }
-        return result;
-      });
-      const [result, connectionResult] = await Promise.all([
-        client.listCapabilities(workspaceId),
-        connectionLoad,
-      ]);
-      if (!live()) return;
-      const accessDenied =
-        lifecycle.deniedConnectionsRevision > lifecycle.successfulConnectionsRevision;
-      setCatalog((previous) => {
-        const next = {
-          client,
-          workspaceId,
-          epoch: generation,
-          items: result.items,
-          connections: accessDenied
-            ? null
-            : (connectionResult.connections ??
-              (previous?.client === client &&
+  const reload = useCallback(
+    async (reuseRecent = false) => {
+      const request = ++lifecycle.revision;
+      const generation = lifecycle.generation;
+      const liveScope = () =>
+        scope.current.client === client &&
+        scope.current.workspaceId === workspaceId &&
+        lifecycle.generation === generation;
+      const live = () => liveScope() && lifecycle.revision === request;
+      setLoading(true);
+      let denied = false;
+      try {
+        const connectionLoad = (
+          canReadConnections === true
+            ? // Health reads the account inventory the tool runtime resolves.
+              loadConnectionHealthAccounts(client, workspaceId, { reuseRecent }).then(
+                (connections) => ({ connections, denied: false }),
+                (failure: unknown) => ({
+                  connections: null,
+                  denied: isWorkspacePermissionDenied(failure),
+                }),
+              )
+            : Promise.resolve({ connections: null, denied: canReadConnections === false })
+        ).then((result) => {
+          if (
+            liveScope() &&
+            result.denied &&
+            request > lifecycle.successfulConnectionsRevision &&
+            request > lifecycle.deniedConnectionsRevision
+          ) {
+            lifecycle.deniedConnectionsRevision = request;
+            denied = true;
+            cacheConnectorCatalog(client, workspaceId, null);
+            // A failed catalog refresh must not leave the prior account rows visible.
+            setCatalog((previous) =>
+              previous?.client === client &&
               previous.workspaceId === workspaceId &&
               previous.epoch === generation
-                ? previous.connections
-                : null)),
-        };
-        cacheConnectorCatalog(
-          client,
-          workspaceId,
-          accessDenied || canReadConnections !== true
-            ? null
-            : { items: next.items, connections: next.connections },
-        );
-        return next;
-      });
-      setError(
-        accessDenied
-          ? deniedMessage
-          : canReadConnections === null
-            ? null
-            : connectionResult.connections === null
-              ? "Connection status couldn't be checked. Open Capabilities to check the connection."
-              : null,
-      );
-    } catch (failure) {
-      if (live())
+                ? { ...previous, connections: null }
+                : previous,
+            );
+            setError(deniedMessage);
+          } else if (
+            liveScope() &&
+            result.connections !== null &&
+            request > lifecycle.deniedConnectionsRevision &&
+            request > lifecycle.successfulConnectionsRevision
+          ) {
+            lifecycle.successfulConnectionsRevision = request;
+            setCatalog((previous) =>
+              previous?.client === client &&
+              previous.workspaceId === workspaceId &&
+              previous.epoch === generation
+                ? { ...previous, connections: result.connections }
+                : previous,
+            );
+            setError((previous) => (previous === deniedMessage ? null : previous));
+          }
+          return result;
+        });
+        const [result, connectionResult] = await Promise.all([
+          loadWorkspaceCapabilities(client, workspaceId, { reuseRecent }),
+          connectionLoad,
+        ]);
+        if (!live()) return;
+        const accessDenied =
+          lifecycle.deniedConnectionsRevision > lifecycle.successfulConnectionsRevision;
+        setCatalog((previous) => {
+          const next = {
+            client,
+            workspaceId,
+            epoch: generation,
+            items: result.items,
+            connections: accessDenied
+              ? null
+              : (connectionResult.connections ??
+                (previous?.client === client &&
+                previous.workspaceId === workspaceId &&
+                previous.epoch === generation
+                  ? previous.connections
+                  : null)),
+          };
+          cacheConnectorCatalog(
+            client,
+            workspaceId,
+            accessDenied || canReadConnections !== true
+              ? null
+              : { items: next.items, connections: next.connections },
+          );
+          return next;
+        });
         setError(
-          denied || lifecycle.deniedConnectionsRevision > lifecycle.successfulConnectionsRevision
+          accessDenied
             ? deniedMessage
-            : `Couldn't load connectors. ${userErrorText(failure, "Try again.")}`,
+            : canReadConnections === null
+              ? null
+              : connectionResult.connections === null
+                ? "Connection status couldn't be checked. Open Capabilities to check the connection."
+                : null,
         );
-    } finally {
-      if (live()) setLoading(false);
-    }
-  }, [client, workspaceId, lifecycle, canReadConnections]);
+      } catch (failure) {
+        if (live())
+          setError(
+            denied || lifecycle.deniedConnectionsRevision > lifecycle.successfulConnectionsRevision
+              ? deniedMessage
+              : `Couldn't load connectors. ${userErrorText(failure, "Try again.")}`,
+          );
+      } finally {
+        if (live()) setLoading(false);
+      }
+    },
+    [client, workspaceId, lifecycle, canReadConnections],
+  );
   useEffect(() => {
     setError(null);
     setBusyId(null);
-    void reload();
+    // On mount, the workspace tool list's catalog read a moment ago will do.
+    void reload(true);
     const onFocus = () => {
       void reload();
       void refreshRuntime.current(workspaceId);

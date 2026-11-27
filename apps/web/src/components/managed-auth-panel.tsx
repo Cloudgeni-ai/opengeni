@@ -11,6 +11,7 @@ import { Notice } from "@opengeni/react/ui/notice";
 import {
   ManagedAuthDivider,
   ManagedSocialAuthButtons,
+  SOCIAL_PROVIDER_LABELS,
   type ManagedSocialProvider,
 } from "@/components/managed-social-auth-buttons";
 import {
@@ -89,6 +90,8 @@ export function ManagedAuthPanel(props: {
    */
   newSignupsEnabled?: boolean;
   signupChallengeSiteKey?: string;
+  /** Email sign-in also needs the challenge (the deployment's `signInChallengeRequired`). */
+  signInChallengeRequired?: boolean;
   /** Heedeo signup scoring's script, loaded on this page while scoring is on. */
   heedeo?: HeedeoClientConfig | undefined;
   /** An expired or invalid email-verification link returned the person here. */
@@ -195,8 +198,11 @@ export function ManagedAuthPanel(props: {
   }, [heedeoScript, heedeoKey]);
   const [signupChallengeToken, setSignupChallengeToken] = useState<string>();
   const [challengeReset, setChallengeReset] = useState(0);
+  // Email sign-in carries the same challenge as sign-up while it is enabled.
   const challengeRequired =
-    mode === "signup" && !emailOnlyMode && Boolean(props.signupChallengeSiteKey);
+    !emailOnlyMode &&
+    Boolean(props.signupChallengeSiteKey) &&
+    (mode === "signup" || props.signInChallengeRequired === true);
   // Google or GitHub may sign someone in or create their account, so a click
   // on either tab carries a challenge token while new accounts are open.
   const socialChallenge = useSocialSignupChallenge(
@@ -273,7 +279,11 @@ export function ManagedAuthPanel(props: {
     setVerificationEmail(null);
     if (Object.keys(validationErrors).length > 0) return;
     if (challengeRequired && !signupChallengeToken) {
-      setFormError("Complete the signup verification.");
+      setFormError(
+        mode === "signin"
+          ? "Complete the verification to sign in."
+          : "Complete the signup verification.",
+      );
       return;
     }
     setBusy(true);
@@ -382,7 +392,7 @@ export function ManagedAuthPanel(props: {
     setFormError(null);
     setFormActionMode(null);
     setSuccessMessage(null);
-    // The Sign up tab may already hold a solved token; it is used up here.
+    // The email form's visible widget may already hold a solved token; it is used up here.
     let token = challengeRequired ? signupChallengeToken : undefined;
     if (token) {
       setSignupChallengeToken(undefined);
@@ -399,9 +409,7 @@ export function ManagedAuthPanel(props: {
     try {
       await props.onSocialSubmit(provider, token);
     } catch {
-      setFormError(
-        `Couldn't continue with ${provider === "google" ? "Google" : "GitHub"}. Try again.`,
-      );
+      setFormError(`Couldn't continue with ${SOCIAL_PROVIDER_LABELS[provider]}. Try again.`);
       setFormActionMode(null);
       setSocialBusy(null);
     }

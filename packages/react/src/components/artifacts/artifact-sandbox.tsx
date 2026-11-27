@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -19,6 +20,7 @@ import type { SiteViewer } from "@opengeni/sdk";
 import { cn } from "../../lib/cn";
 import { useWindowLayerOpen } from "../../lib/window-layer";
 import { PortalContainerProvider, usePortalContainer } from "../../ui/portal-container";
+import { PreviewLoading } from "../preview-loading";
 import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
 import {
   PublishedHtmlArtifactFrame,
@@ -42,6 +44,13 @@ export type ArtifactSandboxProps = {
   autoHeight?: boolean | undefined;
   /** Upper bound for `autoHeight`, in CSS pixels; taller content scrolls inside. */
   maxAutoHeight?: number | undefined;
+  /**
+   * Cover the frame with the "Preparing preview…" surface until its document
+   * can paint, so slow page loads (render-blocking fonts or scripts, the frame
+   * host) never show as an empty box. A frame that cannot be delivered shows
+   * an error with Retry.
+   */
+  loadingUntilPainted?: boolean | undefined;
   theme?: "light" | "dark" | undefined;
   headerControls?: ReactNode | undefined;
   /**
@@ -166,6 +175,36 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
   const reload = () => {
     setReloadKey((value) => value + 1);
   };
+  const frameKey = `${reloadKey}:${props.reloadToken ?? 0}:${props.frameKey ?? ""}`;
+  // New HTML is a new page: count it, rather than keying on the HTML itself.
+  const pageRef = useRef({ html: props.html, page: 0 });
+  if (pageRef.current.html !== props.html) {
+    pageRef.current = { html: props.html, page: pageRef.current.page + 1 };
+  }
+  const frame = (gate?: FrameGate) => (
+    <PublishedHtmlArtifactFrame
+      // The loading slot keys itself; without it the frame keys on frameKey.
+      key={gate ? undefined : frameKey}
+      title={props.title}
+      html={props.html}
+      autoHeight={Boolean(props.autoHeight && !focused)}
+      {...(props.maxAutoHeight ? { maxAutoHeight: props.maxAutoHeight } : {})}
+      {...(gate ? { onPainted: gate.onPainted, onFailed: gate.onFailed } : {})}
+      {...(props.theme ? { theme: props.theme } : {})}
+      {...(!focused && props.height ? { style: { height: props.height } } : {})}
+      {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
+      {...(props.viewer ? { viewer: props.viewer } : {})}
+      location={siteLocation}
+      onLocationChange={onSiteLocationChange}
+      className={cn(
+        // Until the app paints, the frame is Opengeni's own canvas (no white flash in dark).
+        "block h-[clamp(30rem,62vh,48rem)] w-full border-0",
+        props.theme === "dark" ? "bg-canvas" : "bg-white",
+        props.fill && "h-0 min-h-0 flex-1",
+        focused && "min-h-0 flex-1",
+      )}
+    />
+  );
   return (
     <dialog
       ref={attachFrame}
@@ -306,27 +345,87 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
           ) : null}
         </div>
       </div>
-      <PublishedHtmlArtifactFrame
-        key={`${reloadKey}:${props.reloadToken ?? 0}:${props.frameKey ?? ""}`}
-        title={props.title}
-        html={props.html}
-        autoHeight={Boolean(props.autoHeight && !focused)}
-        {...(props.maxAutoHeight ? { maxAutoHeight: props.maxAutoHeight } : {})}
-        {...(props.theme ? { theme: props.theme } : {})}
-        {...(!focused && props.height ? { style: { height: props.height } } : {})}
-        {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
-        {...(props.viewer ? { viewer: props.viewer } : {})}
-        location={siteLocation}
-        onLocationChange={onSiteLocationChange}
-        className={cn(
-          // Until the app paints, the frame is Opengeni's own canvas (no white flash in dark).
-          "block h-[clamp(30rem,62vh,48rem)] w-full border-0",
-          props.theme === "dark" ? "bg-canvas" : "bg-white",
-          props.fill && "h-0 min-h-0 flex-1",
-          focused && "min-h-0 flex-1",
-        )}
-      />
+      {props.loadingUntilPainted ? (
+        <LoadingFrameSlot
+          // A reload or new HTML is a new page: loading again.
+          key={`${frameKey}:${pageRef.current.page}`}
+          className={cn((props.fill || focused) && "flex min-h-0 flex-1 flex-col")}
+          theme={props.theme}
+          onRetry={reload}
+        >
+          {frame}
+        </LoadingFrameSlot>
+      ) : (
+        frame()
+      )}
     </dialog>
+  );
+}
+
+type FrameGate = { onPainted: () => void; onFailed: () => void };
+
+/**
+ * Past this, the frame is shown whatever it has drawn: a resource that never
+ * finishes (a hung CDN) must not hold the loading surface forever. A frame
+ * that later turns out undeliverable still shows its error.
+ */
+export const FRAME_PAINT_TIMEOUT_MS = 15_000;
+
+/** One page in the frame: loading until it paints, or an error with Retry. */
+function LoadingFrameSlot({
+  className,
+  theme,
+  onRetry,
+  children,
+}: {
+  className?: string | undefined;
+  theme?: "light" | "dark" | undefined;
+  onRetry: () => void;
+  children: (gate: FrameGate) => ReactNode;
+}) {
+  const labels = useArtifactLabels();
+  const [state, setState] = useState<"loading" | "revealed" | "painted" | "failed">("loading");
+  const loading = state === "loading";
+  useEffect(() => {
+    if (!loading) return;
+    const timer = setTimeout(() => setState("revealed"), FRAME_PAINT_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [loading]);
+  // The status region mounts empty and then says it is loading, so screen
+  // readers announce it (text present at mount is usually not read).
+  const [announce, setAnnounce] = useState(false);
+  useEffect(() => setAnnounce(true), []);
+  const gate = useRef<FrameGate>({
+    onPainted: () =>
+      setState((current) =>
+        current === "loading" || current === "revealed" ? "painted" : current,
+      ),
+    onFailed: () =>
+      setState((current) => (current === "loading" || current === "revealed" ? "failed" : current)),
+  }).current;
+  return (
+    <div data-artifact-frame-slot="" aria-busy={loading} className={cn("relative", className)}>
+      {children(gate)}
+      <span role="status" className="sr-only">
+        {loading && announce ? labels.preparingPreview : ""}
+      </span>
+      {loading ? (
+        <div aria-hidden="true" data-og-theme={theme} className="absolute inset-0">
+          <PreviewLoading fill />
+        </div>
+      ) : null}
+      {state === "failed" ? (
+        <div
+          role="alert"
+          className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface p-4 text-center text-sm text-fg-muted"
+        >
+          {labels.previewLoadFailed}
+          <ArtifactButton size="sm" onClick={onRetry}>
+            {labels.retry}
+          </ArtifactButton>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

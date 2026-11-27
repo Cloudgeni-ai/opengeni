@@ -6,6 +6,7 @@ import {
   ManagedPasskeyRemoveMutation,
   ManagedSignInMethods,
   ManagedSignInPasswordMutation,
+  ManagedSignInProvider,
   ManagedSignInProviderMutation,
   ManagedSignInMutationResponse,
 } from "@opengeni/contracts/managed-sign-in-methods";
@@ -56,11 +57,12 @@ import {
 import { admitManagedPasskeyAttempt, managedPasskeySignInOffered } from "./managed-passkeys";
 import { scrubManagedAuthProviderResponse } from "./managed-auth-session-sets";
 import { parseRequestBody } from "../http/request-body";
+import { managedSocialClientId } from "../auth/apple-sign-in";
 
 const ConnectState = z.object({
   opengeniSignInMethod: z.object({
     intentId: z.string().uuid(),
-    provider: z.enum(["google", "github"]),
+    provider: ManagedSignInProvider,
   }),
   link: z.object({ userId: z.string().min(1), email: z.string().email() }),
   callbackURL: z.string().url(),
@@ -153,7 +155,9 @@ export async function admitManagedSignInMutation(context: Context, deps: ApiRout
   }
 }
 
-type MethodProvider = "credential" | "google" | "github" | "passkey";
+type MethodProvider = "credential" | ManagedSignInProvider | "passkey";
+const ACCOUNT_METHODS = ["credential", "google", "github", "apple"] as const;
+const ALL_METHODS = [...ACCOUNT_METHODS, "passkey"] as const;
 
 /**
  * Whether the deployment offers a sign-in method to this account. An account
@@ -164,22 +168,11 @@ type MethodProvider = "credential" | "google" | "github" | "passkey";
 function configured(deps: ApiRouteDeps, provider: MethodProvider, passkeyOnly = false) {
   if (provider === "passkey") return managedPasskeySignInOffered(deps);
   if (passkeyOnly) return false;
-  return (
-    provider === "credential" ||
-    (provider === "google"
-      ? Boolean(
-          deps.settings.managedAuthGoogleClientId && deps.settings.managedAuthGoogleClientSecret,
-        )
-      : Boolean(
-          deps.settings.managedAuthGithubClientId && deps.settings.managedAuthGithubClientSecret,
-        ))
-  );
+  return provider === "credential" || Boolean(managedSocialClientId(deps.settings, provider));
 }
 
 function usableProviders(deps: ApiRouteDeps, passkeyOnly: boolean): MethodProvider[] {
-  return (["credential", "google", "github", "passkey"] as const).filter((p) =>
-    configured(deps, p, passkeyOnly),
-  );
+  return ALL_METHODS.filter((p) => configured(deps, p, passkeyOnly));
 }
 
 function mutationError(context: Context, error: unknown): Response {
@@ -248,7 +241,7 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
       accounts.some((a) => a.provider === provider && a.usable) &&
       (provider !== "passkey" || passkeys.length > 0) &&
       projection.loginBindings.some((b) => b.providerId === provider && b.status === "active");
-    const count = (["credential", "google", "github", "passkey"] as const).filter(
+    const count = ALL_METHODS.filter(
       (p) => connected(p) && configured(deps, p, passkeyOnly),
     ).length;
     const passkeysAvailable = configured(deps, "passkey");
@@ -258,7 +251,9 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
         identityId: projection.activeIdentity.id,
         identityRevision: projection.activeIdentity.identityRevision,
         freshAuthenticationRequired: !user.fresh,
-        methods: (["credential", "google", "github"] as const).map((provider) => ({
+        methods: ACCOUNT_METHODS.filter(
+          (provider) => provider !== "apple" || configured(deps, provider) || connected(provider),
+        ).map((provider) => ({
           provider,
           connected: connected(provider),
           available: configured(deps, provider, passkeyOnly),
@@ -622,7 +617,8 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
 export async function handleManagedSignInConnectCallback(
   context: Context,
   deps: ApiRouteDeps,
-  provider: "google" | "github",
+  provider: ManagedSignInProvider,
+  providerRequest: Request = context.req.raw,
 ): Promise<Response | null> {
   const state = context.req.query("state");
   if (!state || !deps.managedAuth) return null;
@@ -683,7 +679,7 @@ export async function handleManagedSignInConnectCallback(
     throw new HTTPException(403);
   if (value.link?.userId !== request.authUserId || value.link?.email === undefined)
     throw new HTTPException(403);
-  const isolated = await isolatedManagedAuthOAuthCallbackRequest(deps.managedAuth, context.req.raw);
+  const isolated = await isolatedManagedAuthOAuthCallbackRequest(deps.managedAuth, providerRequest);
   const response = await runManagedSignInConnect(proof.intentId, () =>
     deps.managedAuth!.handler(isolated.request),
   );

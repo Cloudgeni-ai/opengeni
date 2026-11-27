@@ -1390,6 +1390,8 @@ provider require boundaries without requiring a full runtime dependency tree.
 ### 4.1 Request and event path
 
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
+   iOS app inference admission checks the signed-in person's current
+   [AI processing consent](product-integration.md#native-app-ai-processing-consent).
 2. Routes call `@opengeni/core`; validated state/events/queue/control/audit/wake
    intent commit in Postgres.
 3. Child spans time creation; fanout/wake start post-commit, detached from
@@ -3499,6 +3501,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Advisory work discovery or durable work claims | `packages/contracts/src/work-claims.ts`, `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, `apps/api/src/` | [`work-discovery.md`](work-discovery.md), [`agent-session-authority.md`](agent-session-authority.md) |
 | Schema, repository, RLS, or migration | `packages/db/src/`, `packages/db/drizzle/` | [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) |
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |
+| Human account deletion | `apps/api/src/routes/account-deletion.ts`, `apps/worker/src/workflows/account-deletion.ts`, `packages/db/src/account-deletion.ts` | [`account-deletion.md`](account-deletion.md) |
 | Opengeni Console review, managed workspaces, review level or audit log | `packages/contracts/src/console.ts`, `packages/db/src/console.ts`, `apps/api/src/routes/console.ts`, the web app's `/console` routes | [`opengeni-console.md`](opengeni-console.md) |
 | Organization API-key policies, presets, or shared-workspace scope | `packages/contracts/src/organization-access.ts`, `packages/core/src/access/`, `apps/api/src/routes/api-keys.ts` | [`product-integration.md`](product-integration.md#explicit-organization-key-policies) |
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |

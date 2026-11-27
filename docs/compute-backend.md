@@ -300,6 +300,21 @@ skips sandbox enrollments, and machine routes list machines only.
   keeps memory and disk; Opengeni never drains a compute lease for being idle
   (migration 0859 and the drain points in `packages/db/src/index.ts`). The
   next turn finds the same sandbox and its first request wakes it.
+  Compute's own rules release the memory of a sleeping box: it stays paused
+  in host RAM until the host needs that memory, or until three idle days
+  pass (`evict_after_ms`); then its machine ends and only its files are
+  kept, so the next request boots it from them. When the compute leader removes a spare
+  host it first sleeps that host's idle sandboxes with their programs and
+  moves them off (compute ADR 45); they wake on another host.
+  Its lease stays warm while it sleeps, so every box count that bounds new
+  boxes (the organization and person running-box limits, viewer-only limits,
+  the unpaid fleet cap and fleet pressure) leaves out a compute lease with
+  `compute_asleep_since` set that no turn holds (migration 1574); it counts
+  again once the gateway records it awake. A box a turn holds always counts,
+  napping or not. Waking a sleeping box no turn holds is admitted like
+  starting a new box: while the organization is at its running-box limit, a
+  turn that would wake it parks as `organization_sandbox_capacity` and a
+  viewer or operation is refused.
 - **Group end**: deleting the chat or workspace marks the lease
   (`group_end_requested_at`, migration 0861) and drains it at once. The reaper
   then deletes the sandbox through the control service without a tar capture and revokes its

@@ -13,11 +13,14 @@ const PREINSTALLED = [
   "pandas",
   "psycopg",
   "psycopg-binary",
+  "pypdf",
   "pytest",
   "python-docx",
   "python-pptx",
+  "reportlab",
   "requests",
 ];
+const OFFICE_SMOKE = "docker/office-export-smoke.py";
 
 async function readDockerfiles() {
   const [sandbox, desktop] = await Promise.all([
@@ -129,8 +132,28 @@ describe("sandbox Python toolchain", () => {
       "python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}",
     );
     expect(block).toContain(
-      `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests, openpyxl, docx, pptx'`,
+      `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'`,
     );
+  });
+
+  test("builds both images only if they can write and read back DOCX, XLSX, PPTX and PDF", async () => {
+    const { sandbox, desktop } = await readDockerfiles();
+    for (const dockerfile of [sandbox, desktop]) {
+      const block = toolchainBlock(dockerfile);
+      expect(block).toContain(
+        `RUN --mount=type=bind,source=${OFFICE_SMOKE},target=/tmp/office-export-smoke.py \\\n    set -eux;`,
+      );
+      // After the install, so the smoke proves the installed closure.
+      expect(block.indexOf("python3 /tmp/office-export-smoke.py;")).toBeGreaterThan(
+        block.indexOf("${OPENGENI_PYTHON_PACKAGES};"),
+      );
+    }
+    const smoke = await readFile(resolve(root, OFFICE_SMOKE), "utf8");
+    for (const library of ["docx", "openpyxl", "pptx", "pypdf", "reportlab"]) {
+      expect(smoke).toMatch(new RegExp(`^(?:import|from) ${library}\\b`, "mu"));
+    }
+    for (const format of ["docx", "xlsx", "pptx", "pdf"])
+      expect(smoke).toContain(`"smoke.${format}"`);
   });
 
   test("verifies the pinned uv release for every supported architecture", async () => {

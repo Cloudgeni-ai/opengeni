@@ -16,6 +16,7 @@ import {
   agentTriggerSecretIssue,
   agentTriggerSourceStep,
   agentTriggerSaveError,
+  agentTriggerOnError,
   agentTriggerWithSources,
   agentTriggerRepositoryEvents,
   addAgentSuggestedTrigger,
@@ -33,7 +34,7 @@ import {
   type EventSourceChoice,
 } from "../src/components/automations/event-source-model";
 import { createOpenGeniText } from "../src/messages";
-import type { AgentTemplateTrigger, EventSource } from "@opengeni/sdk";
+import { OpenGeniApiError, type AgentTemplateTrigger, type EventSource } from "@opengeni/sdk";
 
 const t = createOpenGeniText();
 const NOW = new Date("2026-11-21T10:00:00.000Z");
@@ -448,6 +449,25 @@ test("a refused shared trigger says who can add one", () => {
   expect(agentTriggerSaveError(forbidden, "private")).not.toBe(AGENT_TRIGGER_SHARED_DENIED);
 });
 
+test("a ready-made agent missing a connection says what to connect, not a generic error", () => {
+  const incomplete = new OpenGeniApiError(
+    409,
+    JSON.stringify({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: "Connect GitHub to turn this on.",
+        details: {
+          code: "agent_setup_incomplete",
+          missing: [{ kind: "connection", provider: "github.com", name: "GitHub" }],
+        },
+      },
+    }),
+  );
+  expect(agentTriggerOnError(incomplete)).toBe("Connect GitHub to turn this on.");
+  expect(agentTriggerSaveError(incomplete, "workspace")).toBe("Connect GitHub to turn this on.");
+});
+
 test("chosen repositories narrow only GitHub triggers; none chosen covers every repository", () => {
   const github = { ...newEventTriggerDraft("github-source"), eventTypes: ["pull_request.opened"] };
   const slack = { ...newEventTriggerDraft("slack-source"), eventTypes: ["message"] };
@@ -501,7 +521,6 @@ test("offers put the agent's own suggestions first, skip what they cover or what
   expect(offers.map((offer) => offer.suggestion.name)).toEqual([
     "Review when mentioned on a PR",
     "When a pull request opens",
-    "Every weekday morning",
   ]);
   expect(offers[0]!.templateIndex).toBe(0);
   expect(offers[1]!.common).toBe("pull_request_opened");
@@ -518,13 +537,13 @@ test("offers put the agent's own suggestions first, skip what they cover or what
         } as never,
       ],
     }).map((offer) => offer.suggestion.name),
-  ).toEqual([
-    "When an issue is labelled bug",
-    "When a pull request opens",
-    "Every weekday morning",
-  ]);
+  ).toEqual(["When an issue is labelled bug", "When a pull request opens"]);
   expect(
-    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, tasks: null }),
+    agentTriggerOffers({
+      templateSuggestions: [SUGGESTION, SUGGESTION, mention],
+      usesGitHub: true,
+      tasks: null,
+    }),
   ).toHaveLength(AGENT_TRIGGER_OFFERS_MAX);
 });
 
@@ -540,7 +559,7 @@ test("a common trigger isn't offered again when an automation already listens to
     agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, tasks: [task] }).map(
       (offer) => offer.common,
     ),
-  ).toEqual(["mentioned_on_pull_request", "weekday_morning"]);
+  ).toEqual(["mentioned_on_pull_request"]);
 });
 
 test("named for an agent, a PR mention must also say its name", () => {
@@ -579,23 +598,23 @@ test("after a rename, the PR mention for the new name is offered again", () => {
   expect(offered("Critic")).toContain("mentioned_on_pull_request");
 });
 
-test("only the same calendar hides the weekday offer", () => {
-  const offered = (schedule: unknown) =>
-    agentTriggerOffers({
-      templateSuggestions: [],
-      usesGitHub: false,
-      tasks: [{ name: "Report", schedule, events: null } as never],
-    }).map((offer) => offer.common);
-  expect(offered({ type: "calendar", hour: 9, minute: 0, daysOfMonth: [1] })).toContain(
-    "weekday_morning",
-  );
+test("a schedule isn't offered to every agent; Add trigger's On a schedule sets one up", () => {
+  const offered = (usesGitHub: boolean) =>
+    agentTriggerOffers({ templateSuggestions: [], usesGitHub, tasks: [] }).map(
+      (offer) => offer.common,
+    );
+  expect(offered(false)).toEqual([]);
+  expect(offered(true)).not.toContain("weekday_morning");
+  // An agent's own scheduled suggestion is still offered.
+  const weekly: AgentTemplateTrigger = {
+    name: "Every Monday",
+    instructions: "Update dependencies.",
+    schedule: { type: "calendar", hour: 9, minute: 0, daysOfWeek: ["MONDAY"] },
+    triggers: [],
+  } as never;
   expect(
-    offered({
-      type: "calendar",
-      hour: 9,
-      minute: 0,
-      daysOfWeek: ["FRIDAY", "MONDAY", "THURSDAY", "TUESDAY", "WEDNESDAY"],
-      timeZone: "Europe/Oslo",
-    }),
-  ).not.toContain("weekday_morning");
+    agentTriggerOffers({ templateSuggestions: [weekly], usesGitHub: false, tasks: [] }).map(
+      (offer) => offer.suggestion.name,
+    ),
+  ).toEqual(["Every Monday"]);
 });

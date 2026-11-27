@@ -1,11 +1,5 @@
 import { Link, useNavigate, type NavigateOptions } from "@tanstack/react-router";
-import {
-  ArrowLeftIcon,
-  ChevronDownIcon,
-  ChevronUpIcon,
-  MenuIcon,
-  type LucideIcon,
-} from "lucide-react";
+import { ArrowLeftIcon, ChevronDownIcon, MenuIcon, type LucideIcon } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -57,6 +51,7 @@ import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-inter
 import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 import { searchSettings, settingsSearchEntries, type SettingsSearchEntry } from "./settings-search";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 
 /**
  * The settings shell for workspace, organization and personal settings.
@@ -98,8 +93,6 @@ export interface SettingsRailItem {
   link: ReactElement;
   /** A purple dot for "needs you". */
   attention?: boolean;
-  /** One button that moves the entry under More or back to the top (docs/sidebar-layout.md, `settingsMore`). */
-  place?: { label: string; toMore: boolean; run: () => void } | undefined;
 }
 
 export interface SettingsRailGroup {
@@ -125,9 +118,9 @@ export interface SettingsRailSection {
    * the words people type for them. The rail doesn't list them.
    */
   searchOnly?: (SettingsRailItem & { keywords?: readonly string[] })[];
-  /** Folded under its label until opened (the More section); open while it holds the current page. */
+  /** Folded under its label until opened (the Advanced section); open while it holds the current page. */
   collapsible?: boolean;
-  /** Every page went under More: kept for search only, not shown in the rail. */
+  /** Every page went under Advanced: kept for search only, not shown in the rail. */
   searchOnlySection?: boolean;
 }
 
@@ -216,47 +209,13 @@ function LinkShell({
   );
 }
 
-/**
- * A rail row, with its one quiet button when the person can move it under
- * More or back. With a mouse the button names what it does ("Move to More")
- * when the row is hovered or focused; on touch, where it always shows, it
- * stays a small arrow so every row isn't crowded with words.
- */
+/** A rail row. */
 function SettingsRailItemView({ item, active }: { item: SettingsRailItem; active: boolean }) {
   const Icon = item.icon;
-  const row = (
-    <NavItem
-      asChild
-      label={item.label}
-      icon={<Icon />}
-      active={active}
-      attention={item.attention}
-      className={item.place ? "pr-8 pointer-fine:group-hover/row:pr-24" : undefined}
-    >
+  return (
+    <NavItem asChild label={item.label} icon={<Icon />} active={active} attention={item.attention}>
       {item.link}
     </NavItem>
-  );
-  if (!item.place) return row;
-  const place = item.place;
-  return (
-    <div className="group/row relative">
-      {row}
-      <button
-        type="button"
-        aria-label={`${place.label}: ${item.label}`}
-        onClick={place.run}
-        className="absolute top-1/2 right-1 flex h-6 min-w-6 -translate-y-1/2 items-center justify-center rounded-md text-xs text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:bg-surface-3 focus-visible:opacity-100 group-hover/row:opacity-100 pointer-fine:px-1.5 pointer-coarse:opacity-100"
-      >
-        <span aria-hidden="true" className="whitespace-nowrap not-pointer-fine:hidden">
-          {place.label}
-        </span>
-        {place.toMore ? (
-          <ChevronDownIcon aria-hidden="true" className="size-3.5 pointer-fine:hidden" />
-        ) : (
-          <ChevronUpIcon aria-hidden="true" className="size-3.5 pointer-fine:hidden" />
-        )}
-      </button>
-    </div>
   );
 }
 
@@ -336,7 +295,11 @@ function SettingsRail({
   const ref = useRef<HTMLElement>(null);
   const { productName } = useSimplifiedInterface();
   const [query, setQuery] = useState("");
-  const entries = useMemo(() => settingsSearchEntries(sections), [sections]);
+  const showPurchasePrompts = useShowPurchasePrompts();
+  const entries = useMemo(
+    () => settingsSearchEntries(sections, showPurchasePrompts),
+    [sections, showPurchasePrompts],
+  );
   const results = useMemo(() => searchSettings(entries, query), [entries, query]);
   const searching = query.trim().length > 0;
   const resultsId = useId();

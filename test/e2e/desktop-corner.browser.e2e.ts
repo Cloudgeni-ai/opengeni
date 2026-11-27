@@ -156,7 +156,9 @@ describe("the desktop window bar", () => {
         expect(rail.hairline).toBe(transparent);
         expect({ frame: rail.frame }).toEqual({ frame: [] });
       } else {
-        expect(rail.surface).toContain("radial-gradient");
+        // A solid surface, never a decorative gradient.
+        expect(rail.surface).not.toContain("gradient");
+        expect(rail.surface).not.toBe(`${transparent} none`);
       }
       expect(errors).toEqual([]);
       await page.close();

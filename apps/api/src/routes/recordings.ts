@@ -99,6 +99,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
+import { aiProcessingConsentRefusal, requireAiProcessingConsent } from "./ai-processing-consent";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import {
   createSpeechToTextDeployment,
@@ -1368,14 +1369,17 @@ export function registerRecordingRoutes(
     );
     let finalized = false;
     try {
-      // Capture always ends here. A transcript the payer can't pay for is stored
-      // failed with the refusal's code, so the meeting says what to fix and can
-      // be transcribed again once it is fixed, instead of staying unfinished.
-      const { refused, ...transcription } = await versionChoice(
-        actor,
-        current,
-        current.transcription,
-      );
+      // Finish saving captured audio even when we cannot process it. Do not
+      // select a provider or bill for a transcription the person hasn't allowed.
+      const consentRefusal = await aiProcessingConsentRefusal(c, deps);
+      const { refused, ...transcription } = consentRefusal
+        ? {
+            providerId: current.transcription.providerId ?? "not_selected",
+            model: current.transcription.model ?? "not_selected",
+            options: storedTranscription(current.transcription),
+            refused: consentRefusal,
+          }
+        : await versionChoice(actor, current, current.transcription);
       const result = await guard(() =>
         finalizeRecording(db, {
           ...actor,
@@ -1388,7 +1392,10 @@ export function registerRecordingRoutes(
         }),
       );
       // Finalizing again restarts a lost start; a running workflow is left alone.
-      if (result.version.state === "queued" || result.version.state === "processing") {
+      if (
+        !consentRefusal &&
+        (result.version.state === "queued" || result.version.state === "processing")
+      ) {
         await startTranscript(actor.accountId, result.recording, result.version.id);
       }
       // A live charge whose debit failed is paid now rather than on the
@@ -1500,6 +1507,7 @@ export function registerRecordingRoutes(
   });
 
   app.post(`${base}/:recordingId/transcripts`, async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingTranscriptRequest);
@@ -1898,6 +1906,7 @@ export function registerRecordingRoutes(
    * single-use credential, never the workspace's key.
    */
   app.post(`${base}/:recordingId/live-session`, async (c) => {
+    await requireAiProcessingConsent(c, deps);
     const actor = await actorFor(c, "sessions:create");
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);

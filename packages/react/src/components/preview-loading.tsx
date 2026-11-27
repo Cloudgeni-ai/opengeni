@@ -3,7 +3,7 @@ import { paintPreviewLoading } from "../preview-loading-paint";
 import { useOpenGeniText } from "../messages/runtime";
 
 /** Private loading surface: never receives or executes the unfinished fence. */
-export function PreviewLoading() {
+export function PreviewLoading({ fill = false }: { fill?: boolean } = {}) {
   const t = useOpenGeniText();
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -103,7 +103,7 @@ export function PreviewLoading() {
   }, []);
 
   return (
-    <div className="og-preview-loading">
+    <div className="og-preview-loading" data-fill={fill || undefined}>
       <canvas ref={ref} aria-hidden="true" />
       <span className="og-preview-loading-label">{t("previewLoading.preparingPreview")}</span>
     </div>

@@ -47,6 +47,10 @@ export type SidebarLayoutOptions = {
   hiddenNavEntries?: SidebarNavEntry[];
   /** Settings rail entry ids moved under More; the rest stay at the top (default none). */
   settingsMore?: string[];
+  /** Built-in rail entries in order at the top (`new_session`, `inbox`, ..., `setup` for the folded group). */
+  navOrder?: string[];
+  /** Built-in rail entries inside the folded group, in order. */
+  navSetup?: string[];
 };
 
 /** The navigation options in effect for this person. */
@@ -58,6 +62,9 @@ export type ResolvedSidebarLayoutOptions = {
   hiddenNavEntries: string[];
   /** Null: no settings entry is under More. */
   settingsMore: string[] | null;
+  /** Null: the rail's own order. Absent from servers from before it. */
+  navOrder?: string[] | null;
+  navSetup?: string[] | null;
 };
 
 /** A link to an app, optionally one of its pages. */
@@ -225,6 +232,8 @@ export type SidebarLayoutChange =
       appsPlacement?: SidebarAppsPlacement | null;
       hiddenNavEntries?: SidebarNavEntry[] | null;
       settingsMore?: string[] | null;
+      navOrder?: string[] | null;
+      navSetup?: string[] | null;
     };
 
 export type UpdateSidebarLayoutRequest = {

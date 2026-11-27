@@ -1,4 +1,11 @@
 export type {
+  AccountDeletionRequest,
+  AccountDeletionBlocker,
+  AccountDeletionPreview,
+  StartAccountDeletionRequest,
+  StartAccountDeletionResponse,
+} from "@opengeni/contracts";
+export type {
   AppPackage,
   AppPackageExportRequest,
   AppPackageExportResponse,
@@ -68,6 +75,14 @@ export type {
   AgentToolPermissionRule,
   CreateAgentFromTemplateRequest,
   ListAgentTemplatesResponse,
+  ReadyMadeSetup,
+  SetupConnection,
+  SetupGuardrail,
+  SetupConnectionState,
+  SetupMissing,
+  SetupReadiness,
+  SetupReadinessResponse,
+  AgentReadinessListResponse,
   AgentViewerAccess,
   AgentVisibility,
   CreateAgentRequest,

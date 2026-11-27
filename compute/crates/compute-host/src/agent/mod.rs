@@ -288,6 +288,7 @@ enum Command {
         id: Id,
         owner: OwnerEpoch,
         awake: bool,
+        keep_memory: bool,
         reply: Reply<()>,
     },
     /// The control service's rulings on the sandboxes the host listed when

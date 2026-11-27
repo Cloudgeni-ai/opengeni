@@ -1,5 +1,6 @@
 import {
   failureOrigin,
+  isCustomerEndpointMetricProvider,
   isCustomerManagedMetricProvider,
   type FailureOrigin,
 } from "@opengeni/observability";
@@ -239,7 +240,14 @@ export function runtimeMetricsHooksForObservability(
   observability: Observability,
 ): RuntimeMetricsHooks {
   return {
-    onModelCall: ({ provider, outcome, durationSeconds, httpStatus, providerAccountRefusal }) => {
+    onModelCall: ({
+      provider,
+      outcome,
+      durationSeconds,
+      httpStatus,
+      providerAccountRefusal,
+      transportFailure,
+    }) => {
       completedOperationSpan(observability, "worker.model.call", durationSeconds, {
         provider,
         outcome,
@@ -252,9 +260,11 @@ export function runtimeMetricsHooksForObservability(
           outcome,
           failure_origin: failureOrigin({
             customerManaged: isCustomerManagedMetricProvider(provider),
+            customerEndpoint: isCustomerEndpointMetricProvider(provider),
             outcome,
             ...(httpStatus !== undefined ? { httpStatus } : {}),
             ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
+            ...(transportFailure ? { transportFailure } : {}),
           }),
         },
       });
@@ -603,6 +613,12 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
     name: "opengeni_turns_total",
     help: "Total agent turns by terminal outcome.",
     labels: { outcome: "failed", failure_origin: "customer_provider" },
+    amount: 0,
+  });
+  observability.incrementCounter({
+    name: "opengeni_turns_total",
+    help: "Total agent turns by terminal outcome.",
+    labels: { outcome: "failed", failure_origin: "customer_plan" },
     amount: 0,
   });
   for (const outcome of WORKER_DEATH_RECOVERY_OUTCOMES) {
@@ -1543,6 +1559,43 @@ export function recordCreditBalanceGauges(
 }
 
 /**
+ * The latest sampled consistency check of the per-account ledger totals that
+ * balance reads use: how many sampled accounts differ from a recount of their
+ * ledger. Anything above zero is drift and is also logged with the accounts.
+ */
+export function recordCreditLedgerTotalsCheck(
+  observability: Observability,
+  check: { checked: number; mismatchedAccountIds: string[] },
+): void {
+  observability.setGauge({
+    name: "opengeni_credit_ledger_totals_mismatched_accounts",
+    help: "Sampled accounts whose kept credit ledger totals differ from a ledger recount.",
+    value: check.mismatchedAccountIds.length,
+  });
+  if (check.mismatchedAccountIds.length > 0) {
+    observability.warn("credit ledger totals differ from the ledger", {
+      checked: check.checked,
+      accountIds: check.mismatchedAccountIds.join(","),
+    });
+  }
+}
+
+/** Up to `count` distinct ids chosen uniformly at random (partial Fisher-Yates). */
+export function sampleAccountIds(
+  accountIds: readonly string[],
+  count: number,
+  random: () => number = Math.random,
+): string[] {
+  const pool = [...accountIds];
+  const size = Math.min(count, pool.length);
+  for (let index = 0; index < size; index += 1) {
+    const pick = index + Math.floor(random() * (pool.length - index));
+    [pool[index], pool[pick]] = [pool[pick]!, pool[index]!];
+  }
+  return pool.slice(0, size);
+}
+
+/**
  * Distinct managed people with authenticated browser activity in each fixed
  * window (migration 0565 presence). Every control worker publishes the same
  * global value, so dashboards must aggregate with `max()` across pods, never
@@ -1902,6 +1955,20 @@ export function recordSandboxProviderMissingBeforeCapture(
   observability.incrementCounter({
     name: "opengeni_sandbox_provider_missing_before_capture_total",
     help: "Exact sandbox cold commits after definitive provider disappearance before workspace capture.",
+    labels: { backend: safeBackend },
+  });
+}
+
+/** Only call after the exact draining->cold commit reports wentCold: the box
+ * was already gone when a drain resumed its saved (or discarded) teardown. */
+export function recordSandboxProviderGoneAfterSave(
+  observability: Observability,
+  backend: string,
+): void {
+  const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+  observability.incrementCounter({
+    name: "opengeni_sandbox_provider_gone_after_save_total",
+    help: "Exact sandbox cold commits whose provider box was already gone after its workspace save, before the drain stopped it.",
     labels: { backend: safeBackend },
   });
 }

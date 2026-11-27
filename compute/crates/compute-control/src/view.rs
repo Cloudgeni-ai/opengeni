@@ -124,6 +124,9 @@ pub struct Known {
     /// Times its agent started again, as the store counts the runs it
     /// told of ([`HostRow::restarts`]).
     pub restarts: u64,
+    /// When the leader drained it to remove it, while it does
+    /// ([`HostRow::leader_drained_ms`]).
+    pub leader_drained_ms: Option<u64>,
     /// What this replica counted of it while it held it.
     pub tally: Tally,
 }
@@ -435,6 +438,7 @@ impl View {
                     state: row.state,
                     capacity: row.capacity.clone(),
                     restarts: row.restarts,
+                    leader_drained_ms: row.leader_drained_ms,
                     tally,
                 },
             );
@@ -706,6 +710,10 @@ impl View {
                         .capacity
                         .memory_free_mib
                         .saturating_add(known.capacity.memory_reclaimable_mib),
+                    unreclaimed_free_mib: known.capacity.memory_free_mib,
+                    sandboxes: known.capacity.sandboxes,
+                    leader_drained_ms: known.leader_drained_ms,
+                    keeps_memory: known.info.keeps_memory,
                     cpu_millis: known.capacity.cpu_millis,
                     free_cpu_millis: known.capacity.cpu_free_millis,
                     registered_cpu_millis: known.info.cpu_millis,
@@ -726,6 +734,17 @@ pub struct GroupHost {
     /// Memory in MiB it can still promise, counting what it frees at once
     /// for a wake by ending idle VM processes whose state is saved.
     pub free_memory_mib: u64,
+    /// Memory in MiB it has free without ending any VM process: what is
+    /// left once each sandbox it holds in memory, idle or not, has gone.
+    pub unreclaimed_free_mib: u64,
+    /// Sandboxes it holds, as it last said.
+    pub sandboxes: u32,
+    /// When the leader drained it to remove it, by the service's clock in
+    /// milliseconds, while it does.
+    pub leader_drained_ms: Option<u64>,
+    /// Whether it keeps an idle sandbox's memory in a hand-off that asks it
+    /// to ([`compute_protocol::fleet::HostInfo::keeps_memory`]).
+    pub keeps_memory: bool,
     /// Processor time in millicores it guarantees sandboxes now.
     pub cpu_millis: u64,
     /// Processor time in millicores it can still promise.
@@ -812,6 +831,7 @@ mod tests {
                 disk_mib: 100 * 1024,
                 offers: Vec::new(),
                 boot: None,
+                keeps_memory: false,
             },
             epoch: HostEpoch(1),
             state: HostState::Live,
@@ -828,6 +848,7 @@ mod tests {
             run: None,
             restarts: 0,
             changed: renewals,
+            leader_drained_ms: None,
         }
     }
 

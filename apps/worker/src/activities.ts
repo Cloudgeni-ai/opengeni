@@ -114,6 +114,8 @@ export const expireSessionInteractionIntervention =
 export const expireScheduledRunHumanWait = defaultControlActivities.expireScheduledRunHumanWait;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
+export const recordScheduledTaskDispatchFailure =
+  defaultControlActivities.recordScheduledTaskDispatchFailure;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
@@ -129,6 +131,7 @@ export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandbo
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
 export const deleteTransientObjects = defaultControlActivities.deleteTransientObjects;
+export const advanceAccountDeletion = defaultControlActivities.advanceAccountDeletion;
 export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
 export const stopArchivedSessionWork = defaultControlActivities.stopArchivedSessionWork;

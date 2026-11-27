@@ -42,14 +42,14 @@ const CONNECTION_PROVIDER_CLASSES = [
 /** Each fact type and the fixed values its `attribute` may carry. */
 export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
   /** A managed account was created. Attribute: first sign-in method. */
-  "auth.sign_up": ["email", "google", "github", "other"],
+  "auth.sign_up": ["email", "google", "github", "apple", "other"],
   /**
    * The account email became verified: by the verification link, or at
    * creation when a social provider already verified it.
    */
   "auth.email_verified": [],
   /** A live sign-in session was created. Attribute: method of that session. */
-  "auth.sign_in": ["email", "google", "github", "other"],
+  "auth.sign_in": ["email", "google", "github", "apple", "other"],
   /** An organization was created by self-service setup or as an additional one. */
   "organization.setup": ["created", "additional"],
   /** A model subscription or organization model provider was connected. */

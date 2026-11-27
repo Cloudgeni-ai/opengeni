@@ -56,7 +56,7 @@ import {
   type EventTriggersDraft,
 } from "../../../components/automations/event-trigger-model";
 import type { OpenGeniText } from "../../../messages/runtime";
-import { apiErrorFacts, userErrorText } from "../../../ui/api-error";
+import { apiErrorFacts, serverRefusalText, userErrorText } from "../../../ui/api-error";
 
 /**
  * What a run says when the person adds no note: the event (which every event
@@ -188,10 +188,13 @@ export function agentTriggerOffers(input: {
   const covered = new Set(
     fromTemplate.map((offer) => eventTypes(offer.suggestion)).filter((s) => s !== ""),
   );
+  // A schedule isn't offered to every agent: Add trigger's "On a schedule"
+  // sets one up, with its time and repository.
   const common: AgentTriggerOffer[] = availableCommonTriggers({
     usesGitHub: input.usesGitHub,
     agentName: input.agentName,
   })
+    .filter((entry) => entry.trigger.schedule === null)
     .filter((entry) => !covered.has(eventTypes(entry.trigger)))
     .map((entry) => ({ key: `common-${entry.key}`, suggestion: entry.trigger, common: entry.key }));
   return (
@@ -629,7 +632,17 @@ export function agentTriggerCreateRequest(
 }
 
 /** Why a save was refused, in words; a shared trigger the person may not add says so. */
+/**
+ * Why turning a trigger on failed: a ready-made agent missing a required
+ * connection gets the server's reason in words ("Connect GitHub to turn this on.").
+ */
+export function agentTriggerOnError(error: unknown): string {
+  return serverRefusalText(error, ["agent_setup_incomplete"]) ?? userErrorText(error);
+}
+
 export function agentTriggerSaveError(error: unknown, visibility: "private" | "workspace"): string {
+  const setup = serverRefusalText(error, ["agent_setup_incomplete"]);
+  if (setup) return setup;
   if (apiErrorFacts(error).status === 403 && visibility !== "private")
     return AGENT_TRIGGER_SHARED_DENIED;
   return userErrorText(error);

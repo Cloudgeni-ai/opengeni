@@ -1722,8 +1722,38 @@ export async function restoreArchivedSessionContent(
         for (const table of SESSION_ARCHIVE_RESTORE_TABLES) {
           counts[table] = await restoreTableRows(tx, scope, table, input.rows(table));
         }
+        await copyRestoredUpdateAuthority(tx, scope);
         return { status: "restored" as const, rows: counts };
       }),
+  );
+}
+
+/**
+ * A restored inbox update is inserted again, so it carries accepted
+ * subscription authority like a new one: the purge deleted its compatibility
+ * record with it (the record cascades), and the deferred check refuses the
+ * commit until the record is copied again from the update's source, as when
+ * the update was first accepted (the same copy
+ * copySubscriptionAuthorityCompatInTransaction makes). The record is derived
+ * from the source as it is now, never read from the bundle, so it grants no
+ * more than a newly accepted update would get. Only rows this transaction
+ * inserted; rows still in the database kept theirs. One statement for every
+ * restored update and provider, so a large chat costs no extra round trips.
+ */
+async function copyRestoredUpdateAuthority(
+  tx: Database,
+  scope: SessionArchiveScope,
+): Promise<void> {
+  await rawRows(
+    tx,
+    sql`select opengeni_private.copy_subscription_authority_compat(
+          listed.provider, 'session_system_update', carrier.workspace_id, carrier.id, null::bigint
+        ) as copied
+      from session_system_updates carrier
+      cross join unnest(opengeni_private.subscription_authority_compat_providers()) listed(provider)
+      where carrier.workspace_id = ${scope.workspaceId}::uuid
+        and carrier.session_id = ${scope.sessionId}::uuid
+        and carrier.authority_inserted_at = pg_catalog.transaction_timestamp()`,
   );
 }
 

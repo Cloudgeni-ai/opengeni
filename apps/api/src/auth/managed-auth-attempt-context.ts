@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { ManagedSignInProvider } from "@opengeni/contracts/managed-sign-in-methods";
 
 /** The sign-in method behind a provider session; a passkey is its own method. */
-export type ManagedAuthProviderId = "credential" | "google" | "github" | "passkey";
+export type ManagedAuthProviderId = "credential" | ManagedSignInProvider | "passkey";
 
 type ManagedAuthAttemptContext =
   | {

@@ -3,8 +3,9 @@ import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 export const ManagedSignInProvider = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["google", "github"]),
+  z.enum(["google", "github", "apple"]),
 );
+export type ManagedSignInProvider = z.infer<typeof ManagedSignInProvider>;
 
 export {
   accountContactEmail,
@@ -149,7 +150,7 @@ export const ManagedSignInMethods = /* @__PURE__ */ defineSchema(() =>
     freshAuthenticationRequired: primitives.boolean,
     methods: z.array(
       z.object({
-        provider: z.enum(["credential", "google", "github"]),
+        provider: z.enum(["credential", "google", "github", "apple"]),
         connected: primitives.boolean,
         available: primitives.boolean,
         canDisconnect: primitives.boolean,

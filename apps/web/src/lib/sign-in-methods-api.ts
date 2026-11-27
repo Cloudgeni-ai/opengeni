@@ -39,7 +39,7 @@ export type SignInMethods = {
   identityRevision: number;
   freshAuthenticationRequired: boolean;
   methods: Array<{
-    provider: "credential" | "google" | "github";
+    provider: "credential" | "google" | "github" | "apple";
     connected: boolean;
     available: boolean;
     canDisconnect: boolean;
@@ -68,7 +68,7 @@ export type SignInCommand = {
   operationId: string;
   expectedIdentityRevision: number;
 } & (
-  | { provider: "google" | "github" }
+  | { provider: "google" | "github" | "apple" }
   | { newPassword: string; currentPassword?: string }
   | { challengeId: string; response: RegistrationResponseJSON; name?: string }
   | { passkeyId: string }

@@ -89,7 +89,7 @@ function productionRoute() {
       siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
       SITE_FRAME_HEADER, hasPermission, siteViewConversationContext, withoutFileResources,
       defaultAgentChatVisibility, prepareAgentChatCreate, compactSessionResponse,
-      withoutOrgAgentFieldsForPreflight } = ports;
+      withoutOrgAgentFieldsForPreflight, requireAiProcessingConsent } = ports;
     ${code}
     return handler;
   `,
@@ -135,6 +135,7 @@ function routeFixture() {
       calls.push({ name: "authorization", args });
       return hold.authorization.promise;
     },
+    requireAiProcessingConsent: async () => {},
     CreateSessionRequest: {
       parse: (value: unknown) => {
         calls.push({ name: "validation", args: [value] });

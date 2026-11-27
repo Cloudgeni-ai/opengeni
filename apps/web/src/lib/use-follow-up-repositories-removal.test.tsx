@@ -48,7 +48,8 @@ const cleanStatus: Status = {
   revision: 1,
 };
 
-let gitStatus: (path: string) => Promise<Status> = async () => cleanStatus;
+let gitStatus: (path: string, options?: { signal?: AbortSignal }) => Promise<Status> = async () =>
+  cleanStatus;
 const gitStatusCalls: unknown[] = [];
 const removeCalls: unknown[] = [];
 let sessionUpdates: unknown[] = [];
@@ -70,9 +71,14 @@ const context = {
     ],
   },
   client: {
-    gitStatus: async (_workspaceId: string, _sessionId: string, request: { path: string }) => {
+    gitStatus: async (
+      _workspaceId: string,
+      _sessionId: string,
+      request: { path: string },
+      options?: { signal?: AbortSignal },
+    ) => {
       gitStatusCalls.push(request);
-      return await gitStatus(request.path);
+      return await gitStatus(request.path, options);
     },
     removeSessionResources: async (workspaceId: string, sessionId: string, request: unknown) => {
       removeCalls.push({ workspaceId, sessionId, request });
@@ -235,16 +241,36 @@ describe("removing a mounted repository from a chat", () => {
     await rendered.unmount();
   });
 
-  test("keeps Remove disabled until the check settles", async () => {
+  test("Remove works at once, while the folder check is still running", async () => {
     let release: (status: Status) => void = () => {};
     gitStatus = () => new Promise<Status>((resolve) => (release = resolve));
     const rendered = await renderComponent(createElement(Harness, { session: session() }));
     await actRun(() => mountedSwitch()?.click());
-    expect(button("Remove")?.disabled).toBe(true);
+    expect(button("Remove")?.disabled).toBe(false);
+    // The check answers while the dialog is open: the copy follows it.
     await actRun(() => release({ ...cleanStatus, ahead: 2 }));
     await settle();
-    expect(button("Remove")?.disabled).toBe(false);
     expect(dialog()?.textContent).toContain("It has unsaved changes.");
+    await rendered.unmount();
+  });
+
+  test("removing before the check answers closes the dialog on the server's answer", async () => {
+    let checkAborted = false;
+    gitStatus = (_path, options) =>
+      new Promise<Status>((_resolve, reject) =>
+        options?.signal?.addEventListener("abort", () => {
+          checkAborted = true;
+          reject(new Error("aborted"));
+        }),
+      );
+    const rendered = await renderComponent(createElement(Harness, { session: session() }));
+    await actRun(() => mountedSwitch()?.click());
+    await actRun(() => button("Remove")?.click());
+    await settle();
+    expect(removeCalls).toHaveLength(1);
+    expect(checkAborted).toBe(true);
+    expect(dialog()).toBeNull();
+    expect(mountedSwitch()).toBeNull();
     await rendered.unmount();
   });
 

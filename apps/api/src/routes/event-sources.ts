@@ -46,6 +46,7 @@ import { githubAppWebhookPort } from "../github-access";
 import { handleVerifiedGitHubAppDelivery } from "../github-installation-sync";
 import { integrationBaseUrl } from "../integrations/oauth-client";
 import { parseRequestBody, parseRequestJson, readBoundedRawBody } from "../http/request-body";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 
 /**
  * Event sources: webhook endpoints and connected apps that deliver events into
@@ -217,6 +218,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/event-sources/:sourceId/test", async (c) => {
     const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
+    await requireAiProcessingConsent(c, deps);
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "manage");
     const body = await c.req.json().catch(() => ({}));
     const request = parseRequestBody(SendTestEventRequest, body ?? {}, {
@@ -240,6 +242,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/workspaces/:workspaceId/event-sources/:sourceId/deliveries/:deliveryId/replay",
     async (c) => {
       const { grant, viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:manage");
+      await requireAiProcessingConsent(c, deps);
       const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "manage");
       const deliveryId = c.req.param("deliveryId");
       if (!z.string().uuid().safeParse(deliveryId).success) {

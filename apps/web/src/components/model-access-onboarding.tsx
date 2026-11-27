@@ -1,4 +1,5 @@
 import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-interface";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ChatClient } from "@opengeni/sdk";
 import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
@@ -152,7 +153,7 @@ export function ModelAccessOnboardingPanel({
   organizationId,
   organizationName,
   workspaceId,
-  billingMode = "disabled",
+  billingMode: configuredBillingMode = "disabled",
   codexEnabled = false,
   supergrokEnabled = false,
   includedModel = null,
@@ -180,6 +181,8 @@ export function ModelAccessOnboardingPanel({
   footer?: ReactNode;
   onComplete: () => void;
 }) {
+  const showPurchasePrompts = useShowPurchasePrompts();
+  const billingMode = showPurchasePrompts ? configuredBillingMode : "disabled";
   const { simplified, productName } = useSimplifiedInterface();
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<DevicePending | null>(null);
@@ -609,7 +612,9 @@ export function ModelAccessOnboardingPanel({
           {
             id: "codex" as const,
             title: "Codex",
-            summary: providerPaymentSummary("codex", "Codex"),
+            summary: showPurchasePrompts
+              ? providerPaymentSummary("codex", "Codex")
+              : "Connect your existing ChatGPT plan",
             note: everyone,
           },
         ]
@@ -619,7 +624,9 @@ export function ModelAccessOnboardingPanel({
           {
             id: "supergrok" as const,
             title: "SuperGrok",
-            summary: providerPaymentSummary("supergrok", "SuperGrok"),
+            summary: showPurchasePrompts
+              ? providerPaymentSummary("supergrok", "SuperGrok")
+              : "Connect your existing SuperGrok plan",
             note: everyone,
           },
         ]
@@ -637,7 +644,9 @@ export function ModelAccessOnboardingPanel({
     ).map(([id, title]) => ({
       id,
       title,
-      summary: providerPaymentSummary(id, title),
+      summary: showPurchasePrompts
+        ? providerPaymentSummary(id, title)
+        : `Connect your ${title} account`,
     })),
     // Connected for the organization, so every workspace in it can use it.
     { id: "openai_compatible", ...COMPATIBLE_ENDPOINT_CHOICE },
@@ -657,11 +666,13 @@ export function ModelAccessOnboardingPanel({
       return (
         <div className="grid gap-3">
           <p className="m-0 text-xs leading-relaxed text-fg-muted">
-            {kind === "codex"
-              ? "Sign in with the ChatGPT account whose plan should pay for new chats."
-              : "Sign in with the xAI account whose SuperGrok plan should pay for Grok models."}
+            {showPurchasePrompts
+              ? kind === "codex"
+                ? "Sign in with the ChatGPT account whose plan should pay for new chats."
+                : "Sign in with the xAI account whose SuperGrok plan should pay for Grok models."
+              : `Sign in with the ${name} account you want to use.`}
           </p>
-          {ownSubscriptionPlan ? (
+          {showPurchasePrompts && ownSubscriptionPlan ? (
             <p
               className="m-0 text-xs leading-relaxed text-fg"
               data-testid="own-subscription-plan-note"
@@ -814,7 +825,7 @@ export function ModelAccessOnboardingPanel({
     />
   ) : (
     <ProviderConnectList
-      label="Ways to pay"
+      label={showPurchasePrompts ? "Ways to pay" : "Existing accounts"}
       choices={subscriptionChoices}
       expanded={open === "credits" ? null : open}
       panel={providerPanel}

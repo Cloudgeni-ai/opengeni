@@ -43,6 +43,7 @@ import {
   writeAccountToken,
 } from "@/account-store";
 import { planAccountPick, wayBackWhenLeaving } from "@/account-switching";
+import { noteAiConsentRefused, watchAiConsentRefusals } from "@/ai-consent-gate";
 import { openLinkFromApp } from "@/app-link-registry";
 import { recordingRequests } from "@/feedback/recent-errors";
 import { forgetVoiceCommands } from "@/voice-commands";
@@ -108,8 +109,12 @@ const AccountContext = createContext<AccountState | null>(null);
 function newClient(baseUrl: string, token?: string | null): ChatClient<OpenGeniClient> {
   return new OpenGeniClient({
     baseUrl,
-    // The latest requests are remembered (in memory) so a feedback report can show them.
-    fetch: recordingRequests(expoStreamingFetch),
+    // The latest requests are remembered (in memory) so a feedback report can
+    // show them, and a request the server refuses for want of the person's AI
+    // provider permission asks for it again (see ai-consent.tsx).
+    fetch: watchAiConsentRefusals(recordingRequests(expoStreamingFetch), () =>
+      noteAiConsentRefused(baseUrl),
+    ),
     ...(token ? { apiKey: token } : {}),
   }).withSessionResponse("chat");
 }
@@ -590,6 +595,23 @@ export function useAccount(): AccountState {
   const value = useContext(AccountContext);
   if (!value) throw new Error("useAccount must be used inside AccountProvider");
   return value;
+}
+
+/**
+ * Labs only: the screens below see these fields in place of the real
+ * account's, so a screen that needs a signed-in account can be drawn with
+ * example data. Nothing is signed in or saved.
+ */
+export function AccountLabOverride({
+  patch,
+  children,
+}: {
+  patch: Partial<AccountState>;
+  children: ReactNode;
+}) {
+  const real = useAccount();
+  const value = useMemo(() => ({ ...real, ...patch }), [real, patch]);
+  return <AccountContext.Provider value={value}>{children}</AccountContext.Provider>;
 }
 
 /**

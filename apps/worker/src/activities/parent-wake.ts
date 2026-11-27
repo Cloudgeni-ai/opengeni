@@ -396,6 +396,15 @@ export async function repairMissedSessionWorkflowWakes(
         registered: quiescenceInventory.registered,
         failed: quiescenceInventory.failed,
       });
+      // Content-free per row: class name and SQLSTATE only, never IDs or the
+      // error message, which can quote row values.
+      for (const failure of quiescenceInventory.failures) {
+        svc.observability.error("Missing quiescence-receipt wake repair row failed", {
+          errorName: failure.errorName,
+          sqlState: failure.sqlState,
+          sqlStateClass: failure.sqlStateClass,
+        });
+      }
     }
   } catch (error) {
     svc.observability.error("Missing quiescence-receipt wake repair failed", {

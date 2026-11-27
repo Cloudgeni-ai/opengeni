@@ -4,6 +4,7 @@ import { router, usePathname } from "expo-router";
 import { useEffect, useRef } from "react";
 import { useAccount } from "@/account";
 import { openInBrowser, setAppLinkHandler } from "@/app-link-registry";
+import { markHostedUrl } from "@/web-links";
 import { accountForAppLink, appSessionPath, parseAppLink, type AppLink } from "@/app-links";
 import { dismissToHome } from "@/navigation";
 
@@ -54,6 +55,14 @@ interface OpenContext {
   currentPath(): string;
 }
 
+/**
+ * A page on a deployment the person is signed in to that the app can't show
+ * (settings, a workspace it doesn't know): the browser, as the app's own page.
+ */
+function openSignedInPage(link: AppLink): void {
+  openInBrowser(markHostedUrl(link.webUrl));
+}
+
 /** Open a link in the account already in use. */
 async function openHere(link: AppLink, context: OpenContext): Promise<void> {
   const known = (id: string) => context.workspaces.some((workspace) => workspace.id === id);
@@ -69,7 +78,7 @@ async function openHere(link: AppLink, context: OpenContext): Promise<void> {
               context.workspaces,
               context.workspaceId,
             );
-    if (!workspaceId) return openInBrowser(link.webUrl);
+    if (!workspaceId) return openSignedInPage(link);
     // Already in that conversation, for example back from a sign-in it
     // started: stay on it rather than stacking a second copy.
     if (!link.at && context.currentPath() === `/session/${encodeURIComponent(link.sessionId)}`)
@@ -83,7 +92,7 @@ async function openHere(link: AppLink, context: OpenContext): Promise<void> {
     dismissToHome();
     return;
   }
-  openInBrowser(link.webUrl);
+  openSignedInPage(link);
 }
 
 /**
@@ -136,7 +145,7 @@ export function AppLinkRouting() {
         pendingLink = { accountId: owner.id, link };
         return;
       }
-      void openHere(link, contextRef.current).catch(() => openInBrowser(link.webUrl));
+      void openHere(link, contextRef.current).catch(() => openSignedInPage(link));
     });
     return () => setAppLinkHandler(null);
   }, [account?.id, accounts, ready, switchAccount]);
@@ -145,7 +154,7 @@ export function AppLinkRouting() {
     const target = pendingLink;
     if (!target || !ready || account?.id !== target.accountId) return;
     pendingLink = null;
-    void openHere(target.link, contextRef.current).catch(() => openInBrowser(target.link.webUrl));
+    void openHere(target.link, contextRef.current).catch(() => openSignedInPage(target.link));
   }, [account?.id, ready]);
 
   return null;

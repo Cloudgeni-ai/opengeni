@@ -1,7 +1,9 @@
 import { observedSdkVersion } from "./http/sdk-version";
 import {
+  emailSignInChallengeRequired,
   oauthSignupChallengeVerified,
   runWithSignupChallenge,
+  verifyEmailSignInChallenge,
   verifySignupChallenge,
   verifySocialSignupChallenge,
 } from "./auth/signup-challenge";
@@ -202,6 +204,7 @@ import {
   insufficientCreditsHttpError,
   DATABASE_CONTENTION_ERROR_DETAIL_CODE,
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
+  apiErrorRetryAfterSeconds,
   databaseContentionHttpError,
   databaseUnavailableHttpError,
   modelPolicyRefusedHttpError,
@@ -216,6 +219,10 @@ import {
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
 } from "./http/api-error";
+import {
+  isNativeIosRequest,
+  neutralPurchaseRefusalMessage,
+} from "./http/native-purchase-presentation";
 import {
   isRequestBodyValidationError,
   parseRequestBody,
@@ -232,7 +239,12 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
-import { createGitHubSkillSourceClient, readSkillRepository } from "@opengeni/core";
+import {
+  createGitHubSkillSourceClient,
+  readSkillRepository,
+  setSetupReadinessMetricsSink,
+  setGitHubAppBindingReader,
+} from "@opengeni/core";
 import {
   eventTriggersEnabled,
   PersonalWorkspacesOffError,
@@ -508,12 +520,23 @@ import {
   registerManagedSignInMethodRoutes,
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
+import { ManagedSignInProvider } from "@opengeni/contracts/managed-sign-in-methods";
+import {
+  appleCallbackProviderRequest,
+  managedSocialClientId,
+  redirectAppleFormPost,
+} from "./auth/apple-sign-in";
 import {
   managedPasskeySignInOffered,
   managedPasskeySignUpOffered,
   registerManagedPasskeyRoutes,
 } from "./routes/managed-passkeys";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
+import {
+  registerAiProcessingConsentRoutes,
+  requireAiProcessingConsent,
+} from "./routes/ai-processing-consent";
+import { registerAccountDeletionRoutes } from "./routes/account-deletion";
 import { registerConsoleSignInRoutes } from "./routes/console-sign-in";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
@@ -532,6 +555,7 @@ import { createFfmpegTranscriptionSegmenter } from "@opengeni/core/transcription
 import { registerTeamsBotRoutes } from "./integrations/teams-bot";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
 import { resolveSignedStateSecret } from "./signed-state-secret";
+import { githubAppBoundReader } from "./github-access";
 
 export { allowedCorsOrigin } from "./http/cors";
 
@@ -654,6 +678,8 @@ export function createAppComposition(
   setConnectAttemptTransitionObserver((transition) =>
     observeConnectAttemptTransition(observability, transition),
   );
+  // Readiness checks that couldn't run (and so didn't hold a trigger back).
+  setSetupReadinessMetricsSink(observability);
   const managedAuthNewSignupsGate = createManagedAuthNewSignupsGate({
     db: deps.db,
     settings: deps.settings,
@@ -854,6 +880,9 @@ export function createAppComposition(
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
+  // Every readiness check (routes, Opengeni's own tools, app sync, an admin's
+  // resume) reads the GitHub App as the GitHub integration page does.
+  setGitHubAppBindingReader(routeDeps.db, githubAppBoundReader(routeDeps));
   const app = new Hono();
   // Body/auth middleware may replace c.req.raw. The Hono context remains the
   // same for the response, diagnostic and completion log of this request.
@@ -1412,11 +1441,17 @@ export function createAppComposition(
   registerManagedSignInMethodRoutes(app, routeDeps);
   registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
+  registerAiProcessingConsentRoutes(app, routeDeps);
+  registerAccountDeletionRoutes(app, routeDeps);
   registerConsoleSignInRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      if (oauthCallbackProvider === "apple" && c.req.method === "POST") {
+        if (!managedSocialClientId(deps.settings, "apple")) return c.notFound();
+        return redirectAppleFormPost(managedAuth, c.req.raw);
+      }
       let signupChallengeVerified = false;
       // The browser's Heedeo token for this attempt (docs/signup-abuse-protection.md,
       // "Heedeo shadow scoring"); only the user-create hook sends it.
@@ -1467,7 +1502,24 @@ export function createAppComposition(
           .catch(() => null);
         heedeoSignupToken = heedeoToken(input?.heedeoToken);
       }
-      let signupProviderRequest = c.req.raw;
+      if (
+        emailSignInChallengeRequired(deps.settings) &&
+        pathname === "/v1/auth/sign-in/email" &&
+        c.req.method === "POST"
+      ) {
+        // Credential stuffing guesses passwords here; the sign-in form sends
+        // the same challenge token as sign-up. A sign-in creates no account,
+        // so it never grants the sign-up proof.
+        const input = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        await verifyEmailSignInChallenge(deps.settings, input?.signupChallengeToken);
+      }
+      let signupProviderRequest =
+        oauthCallbackProvider === "apple"
+          ? await appleCallbackProviderRequest(managedAuth, c.req.raw)
+          : c.req.raw;
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
         const body = await c.req.raw
           .clone()
@@ -1475,7 +1527,7 @@ export function createAppComposition(
           .catch(() => null);
         if (
           !body ||
-          !["google", "github"].includes(body.provider) ||
+          !ManagedSignInProvider.safeParse(body.provider).success ||
           Object.prototype.hasOwnProperty.call(body, "idToken")
         ) {
           return c.json(
@@ -1519,6 +1571,7 @@ export function createAppComposition(
           c,
           routeDeps,
           oauthCallbackProvider,
+          signupProviderRequest,
         );
         if (connectResponse) return connectResponse;
       }
@@ -1570,7 +1623,10 @@ export function createAppComposition(
         if (!attempt || !authority || attempt.authorityHash !== managedAuthSha256(authority)) {
           throw new HTTPException(409, { message: "provider_route_blocked" });
         }
-        const isolated = await isolatedManagedAuthOAuthCallbackRequest(managedAuth, c.req.raw);
+        const isolated = await isolatedManagedAuthOAuthCallbackRequest(
+          managedAuth,
+          signupProviderRequest,
+        );
         preserveCookieNames = [isolated.stateCookieName];
         const handled = await runManagedAuthAttempt(
           attempt.transactionId,
@@ -2540,6 +2596,7 @@ export function createAppComposition(
         workspaceId,
         "workspace:read",
       );
+      if (operation === "invoke") await requireAiProcessingConsent(c, routeDeps);
       let fence: TargetAuthorityFence | undefined;
       const options = {
         signal: c.req.raw.signal,
@@ -2726,6 +2783,7 @@ export function createAppComposition(
       workspaceId,
       "workspace:read",
     );
+    await requireAiProcessingConsent(c, routeDeps);
     const parsed = parseRequestBody(ToolGatewayCallRequest, await c.req.json().catch(() => null), {
       status: 400,
       message: "Invalid tool gateway call",
@@ -3053,7 +3111,7 @@ export function createAppComposition(
     );
   });
 
-  app.onError((rawError, c) => {
+  app.onError(async (rawError, c) => {
     const requestId = correlationIds.get(c) ?? crypto.randomUUID();
     c.header(OPENGENI_CORRELATION_HEADER, requestId);
     if (new URL(c.req.url).pathname.startsWith("/v1/")) {
@@ -3121,19 +3179,38 @@ export function createAppComposition(
     ) {
       c.header("retry-after", "1");
     }
+    // A refusal that names when to retry (a sandbox limit, a rate limit)
+    // says so in the standard header too, for clients that honor it.
+    const retryAfterSeconds = apiErrorRetryAfterSeconds(apiError);
+    if (retryAfterSeconds !== null) c.header("retry-after", String(retryAfterSeconds));
+    const purchaseCode = apiError?.details?.code;
+    const nativePurchaseMessage =
+      apiError && typeof purchaseCode === "string"
+        ? neutralPurchaseRefusalMessage(
+            purchaseCode,
+            apiError.message,
+            /\/recordings(?:\/|$)/u.test(c.req.path) ? "transcription" : "model",
+          )
+        : null;
+    const hidePurchase = nativePurchaseMessage !== null && (await isNativeIosRequest(c, routeDeps));
+    const details =
+      hidePurchase && apiError?.details
+        ? Object.fromEntries(Object.entries(apiError.details).filter(([key]) => key !== "action"))
+        : apiError?.details;
     const envelope = ErrorEnvelope.parse({
       error: {
         status,
         code,
         message: apiError
-          ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
+          ? (boundedPublicMessage(hidePurchase ? nativePurchaseMessage : apiError.message) ??
+            "Request failed.")
           : publicErrorMessage(error, status),
         retryable: apiError?.retryable ?? retryableHttpStatus(status),
         ...((apiError?.outcomeUnknown ?? mutationOutcomeUnknown(error, c.req.method))
           ? { outcomeUnknown: true }
           : {}),
         requestId,
-        ...(apiError?.details ? { details: apiError.details } : {}),
+        ...(details ? { details } : {}),
       },
     });
     return c.json(envelope, status as ContentfulStatusCode);
@@ -3159,9 +3236,9 @@ function rejectionLogAttributes(rejection: HttpRejectionFacts) {
   };
 }
 
-function managedAuthOAuthCallbackProvider(pathname: string): "google" | "github" | null {
-  const match = pathname.match(/^\/v1\/auth\/callback\/(google|github)$/u);
-  return match?.[1] === "google" || match?.[1] === "github" ? match[1] : null;
+function managedAuthOAuthCallbackProvider(pathname: string): ManagedSignInProvider | null {
+  const match = pathname.match(/^\/v1\/auth\/callback\/([a-z]+)$/u);
+  return ManagedSignInProvider.safeParse(match?.[1]).data ?? null;
 }
 
 function mutationOutcomeUnknown(error: unknown, method: string): boolean {
@@ -3352,15 +3429,11 @@ function clientAuthConfig(
       ...(settings.signupChallengeEnabled
         ? { signupChallengeSiteKey: settings.signupChallengeSiteKey }
         : {}),
+      ...(emailSignInChallengeRequired(settings) ? { signInChallengeRequired: true } : {}),
       ...(heedeo ? { heedeo } : {}),
-      socialProviders: [
-        ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
-          ? (["google"] as const)
-          : []),
-        ...(settings.managedAuthGithubClientId && settings.managedAuthGithubClientSecret
-          ? (["github"] as const)
-          : []),
-      ],
+      socialProviders: ManagedSignInProvider.options.filter((provider) =>
+        managedSocialClientId(settings, provider),
+      ),
     };
   }
   if (settings.productAccessMode === "configured") {

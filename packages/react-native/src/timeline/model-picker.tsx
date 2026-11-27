@@ -13,6 +13,7 @@ import {
   type PickerBillingClass,
 } from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { Icon, type NativeIconName } from "./icon";
@@ -73,8 +74,9 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts() && props.showPurchasePrompts !== false;
   const [query, setQuery] = useState("");
-  const view = modelPickerMenuView(t, props, query);
+  const view = modelPickerMenuView(t, { ...props, showPurchasePrompts }, query);
   const { messages, groups, thinking } = view;
   const selectedSpeed =
     thinking?.speeds?.find((speed) => speed.id === props.latencyMode) ?? thinking?.speeds?.[0];
@@ -252,8 +254,9 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
                 {group.rows.map((row) => {
                   const active = row.selectable && row.id === props.model;
                   const enabled = row.selectable && !props.disabled;
-                  // Why it can't be picked, else the plan it needs ("Needs Pro").
-                  const hint = row.unavailableReason ?? requiredPlanHint(t, row.catalog);
+                  const hint =
+                    row.unavailableReason ??
+                    (!showPurchasePrompts ? row.fundingHint : requiredPlanHint(t, row.catalog));
                   return (
                     <Pressable
                       key={row.id}

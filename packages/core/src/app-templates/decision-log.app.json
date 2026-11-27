@@ -3,6 +3,14 @@
   "name": "Decision log",
   "description": "Record what the team decided, why, and who owns it.",
   "team": "Product",
+  "setup": {
+    "connections": [],
+    "repository": null,
+    "worksWellWith": null,
+    "wontDoWithoutAsking": [],
+    "firstMessage": null,
+    "firstJob": "Log the last decision your team made."
+  },
   "package": {
     "format": "opengeni.app-package",
     "version": 1,

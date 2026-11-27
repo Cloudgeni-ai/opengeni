@@ -8,6 +8,7 @@ import {
   remainingPendingApprovalsFromSuffix,
   remainingRunStatePendingApprovalsFromSuffix,
   resolveOpenSuffixResumeTarget,
+  resolveOpenSuffixTriggerTarget,
   resultItemForOpenSuffixMember,
 } from "../src/activities/open-suffix-resume";
 import { interruptedToolCallResult, type OpenSuffixPendingToolCall } from "@opengeni/db";
@@ -116,6 +117,60 @@ describe("open suffix resume helpers", () => {
     expect(resolveOpenSuffixResumeTarget(rows, "call_a")?.callId).toBe("call_a");
     expect(resolveOpenSuffixResumeTarget(rows, "call_b")?.resultItem).toBeNull();
     expect(resolveOpenSuffixResumeTarget(rows, "call_missing")).toBeNull();
+  });
+
+  test("a trigger targets only an open call of the kind it answers", () => {
+    const row = (callId: string, interruptionKind: OpenSuffixPendingToolCall["interruptionKind"]) =>
+      ({
+        callId,
+        callType: "function_call",
+        callItem: { type: "function_call", callId, name: "tool", arguments: "{}" },
+        interruptionKind,
+        tiedReasoningItems: [],
+        resultItem: null,
+        modelToolOutputTruncationTokens: null,
+      }) satisfies OpenSuffixPendingToolCall;
+    const rows = [
+      row("call_approval", "approval"),
+      row("call_handoff", "interaction_intervention"),
+      row("call_question", "human_input"),
+    ];
+    const decision = { type: "user.approvalDecision" } as const;
+    const answer = { type: "user.humanInputResponse" } as const;
+    expect(resolveOpenSuffixTriggerTarget(rows, decision, "call_approval")?.callId).toBe(
+      "call_approval",
+    );
+    expect(resolveOpenSuffixTriggerTarget(rows, decision, "call_handoff")?.callId).toBe(
+      "call_handoff",
+    );
+    // A decision never settles a question, and an answer never settles an approval.
+    expect(resolveOpenSuffixTriggerTarget(rows, decision, "call_question")).toBeNull();
+    expect(resolveOpenSuffixTriggerTarget(rows, answer, "call_approval")).toBeNull();
+    expect(resolveOpenSuffixTriggerTarget(rows, answer, "call_question")?.callId).toBe(
+      "call_question",
+    );
+    // A stale answer (another pause's call) targets nothing.
+    expect(resolveOpenSuffixTriggerTarget(rows, decision, "call_other_turn")).toBeNull();
+    expect(resolveOpenSuffixTriggerTarget(rows, decision, null)).toBeNull();
+  });
+
+  test("a question call stays open until its own answer arrives", async () => {
+    const row = {
+      callId: "call_question",
+      callType: "function_call",
+      callItem: { type: "function_call", callId: "call_question", name: "ask", arguments: "{}" },
+      interruptionKind: "human_input",
+      tiedReasoningItems: [],
+      resultItem: null,
+      modelToolOutputTruncationTokens: null,
+    } satisfies OpenSuffixPendingToolCall;
+    const outcome = await resultItemForOpenSuffixMember({
+      agent: new Agent({ name: "unused" }),
+      row,
+      trigger: { type: "user.approvalDecision", payload: { approvalId: "call_question" } },
+      humanInputResume: null,
+    });
+    expect(outcome).toEqual({ open: true });
   });
 
   test("detects a durable call/result pair and ignores a result-only history", () => {
@@ -237,7 +292,7 @@ describe("open suffix approval results", () => {
   }
 
   function finished(result: Awaited<ReturnType<typeof resultItemForOpenSuffixMember>>) {
-    if ("asked" in result) throw new Error("expected a finished call");
+    if ("asked" in result || "open" in result) throw new Error("expected a finished call");
     return result;
   }
 

@@ -509,6 +509,18 @@ diagnostic UUID. Inspect the protected cause location before treating a warning
 as a persistent defect: a concurrent owner may already have settled the process.
 This instrumentation neither releases claims nor changes retry or settlement.
 
+Retained-command settlement failures use `sandbox_retained_processes.settlement`
+(`retained_process_fenced`, a database code, or `retained_process_settlement_failed`),
+and per-sandbox drain failures use `sandbox_leases.drain` (`sandbox_drain_failed` or
+a database code). Their public warnings (`errorClass` `SandboxReaperOperationError`)
+carry the diagnostic UUID as `correlationId`, the hashed `sandboxLeaseKey`, lease
+epoch and backend, the cause's reviewed `causeName`, `causeFenceCode` (the closed
+`SandboxWorkspaceMutationFencedError` code) and `causeSqlState`, and `causeFingerprint`,
+a one-way hash of the cause message that `bun run scripts/resolve-rejection-fingerprint.ts`
+maps back to the source literal (a database cause has `causeSqlState` instead). A
+message built from a template literal does not resolve; follow `correlationId` to
+the protected diagnostic instead. Never message text or raw identifiers.
+
 Original causes are inspected before generic public error projection. At most
 four causes and 32 frames per cause are retained. **Raw stack text and messages
 are not retained**: even filenames/functions may contain secrets. Frames retain
@@ -543,8 +555,16 @@ retain only their value kind.
 
 `opengeni_turns_total`, `opengeni_model_calls_total`, and the canonical startup
 milestone histogram carry bounded `failure_origin` values: `none`, `platform`,
-and `customer_provider`. Platform includes unclassified failures: missing
+and `customer_provider`; the turn and startup milestone series also carry
+`customer_plan`.
+Platform includes unclassified failures: missing
 labels from older workers also remain in platform alerts during rolling updates.
+
+`customer_plan` is a turn that failed because the organization's own plan
+refused a sandbox (`sandbox_compute_unavailable` or `sandbox_card_required`:
+no paid plan or credit, a card to verify, or the Free plan's daily box time
+spent), whoever pays for the model. Shared unpaid capacity
+(`sandbox_capacity_unpaid_busy`) stays platform.
 
 Turn attribution uses the accepted execution policy's upstream payer identity
 and the typed failure committed by the winning settlement. It never infers
@@ -574,9 +594,10 @@ body that does not arrive within five seconds is counted as an unclassified 404.
 does not change retries, copy, billing, history or session outcomes.
 
 The canonical turn-failure, model-call-failure and first-byte-availability alerts
-exclude `failure_origin="customer_provider"` from both sides of their ratios
-and their traffic gates. Runtime Failures keeps all outcomes and a separate
-customer-provider failure series. Customer connection problems still belong in
+exclude `failure_origin` values `customer_provider` and `customer_plan` from
+both sides of their ratios and their traffic gates.
+Runtime Failures keeps all outcomes and a separate customer provider or plan
+failure series. Customer connection problems still belong in
 the session and connection UI; they are not proof of a platform outage.
 
 Custom dashboards and locally installed alert rules must adopt the same filter

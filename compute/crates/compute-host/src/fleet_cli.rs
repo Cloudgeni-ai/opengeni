@@ -126,6 +126,7 @@ impl FleetArgs {
                 disk_mib: stat.f_blocks.saturating_mul(stat.f_frsize) >> 20,
                 offers: host.offers.clone(),
                 boot: None,
+                keeps_memory: true,
             },
             image: self.image.clone(),
             guest: host.guest.clone(),

@@ -170,6 +170,7 @@ export * from "./domain/automation-templates";
 export * from "./domain/agents";
 export * from "./agent-templates";
 export * from "./app-templates";
+export * from "./domain/ready-made-setup-readiness";
 export * from "./domain/org-agent-config";
 export * from "./domain/org-agents";
 export * from "./domain/org-agent-runs-on";

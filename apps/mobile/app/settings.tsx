@@ -4,6 +4,8 @@ import Constants from "expo-constants";
 import { Stack, router } from "expo-router";
 import { Alert, Platform } from "react-native";
 import { useAccount, usePickAccount } from "@/account";
+import { useAiConsent, useAiConsentSnapshot } from "@/ai-consent";
+import { aiProvidersRow } from "@/ai-consent-settings";
 import { setAppearance, useAppearancePreference, type AppearancePreference } from "@/appearance";
 import { serverLabel } from "@/account-store";
 import {
@@ -21,6 +23,7 @@ import type { SettingsSection } from "@/settings-model";
 import { dismissToHome } from "@/navigation";
 import { startFeedback } from "@/feedback/draft";
 import { setShakeToSendFeedback, useShakeToSendFeedback } from "@/feedback/preference";
+import { isPublicIosApp, openOpengeniPrivacyPolicy } from "@/store-review";
 import { AppThemeProvider } from "@/theme";
 import { useVoiceCommands } from "@/voice-commands";
 import { callAssistantName, voiceCommandRequest } from "@/wake-phrase";
@@ -50,6 +53,9 @@ function Settings() {
   const inboxSettings = inboxSettingsSections(inbox);
   const org = organizations.find((each) => each.accountId === workspace?.accountId);
   const multipleServers = new Set(accounts.map((each) => each.baseUrl)).size > 1;
+  const aiProviders = aiProvidersRow(useAiConsentSnapshot(useAiConsent()), () =>
+    router.push("/ai-providers"),
+  );
 
   const confirmSignOut = () => {
     if (!account) return;
@@ -118,7 +124,7 @@ function Settings() {
                 kind: "external" as const,
                 id: "organization-settings",
                 title: "Organization settings",
-                subtitle: "Members, billing, models and plugins",
+                subtitle: "Members, models and plugins",
                 symbol: "building.2" as const,
                 onPress: () =>
                   openOnWeb(account.baseUrl, webPaths.organizationSettings(workspace.id)),
@@ -274,12 +280,41 @@ function Settings() {
           symbol: "key",
           onPress: () => openOnWeb(account.baseUrl, webPaths.security()),
         },
+        ...(aiProviders ? [aiProviders] : []),
         {
           kind: "destructive",
           id: "sign-out",
           title: "Sign out",
           symbol: "rectangle.portrait.and.arrow.right",
           onPress: confirmSignOut,
+        },
+      ],
+    });
+    sections.push({
+      id: "delete-account",
+      rows: [
+        {
+          kind: "destructive",
+          id: "delete-account",
+          title: "Delete account",
+          symbol: "trash",
+          onPress: () => router.push("/delete-account"),
+        },
+      ],
+    });
+  }
+
+  if (isPublicIosApp()) {
+    sections.push({
+      id: "about",
+      title: "About Opengeni",
+      rows: [
+        {
+          kind: "external",
+          id: "privacy-policy",
+          title: "Privacy policy",
+          symbol: "hand.raised",
+          onPress: openOpengeniPrivacyPolicy,
         },
       ],
     });

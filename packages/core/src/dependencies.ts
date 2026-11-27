@@ -109,6 +109,7 @@ export type SessionWorkflowClient = {
     objectKeys: string[];
     deleteAfter: Date;
   }) => Promise<void>;
+  startAccountDeletion?: (requestId: string) => Promise<void>;
   /**
    * Durably runs the step after an Archive's undo window (stopping the chat's
    * remaining work so it can be stored) at `runAt`. Repeating one Archive is a
@@ -196,6 +197,7 @@ export type ManagedEmailMessage = {
     | "password_reset"
     | "organization_user_setup"
     | "sign_in_method_changed"
+    | "account_deletion_completed"
     | "billing_credit_notification"
     | "site_abuse_notice";
   from: string;

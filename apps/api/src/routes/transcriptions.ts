@@ -14,12 +14,15 @@ import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { Hono } from "hono";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
+import { isNativeIosRequest } from "../http/native-purchase-presentation";
 import { voiceInputRegionRestricted } from "../transcription/region";
+import { requireAiProcessingConsent } from "./ai-processing-consent";
 
 export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/transcriptions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    await requireAiProcessingConsent(c, deps);
     const workspace = await getWorkspace(deps.db, workspaceId);
     if (!workspace) return c.json({ code: "not_found" }, 404);
     if (resolveWorkspaceVoiceInputEnabled(workspace.settings) === false) {
@@ -77,7 +80,12 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
         return c.json({ code: error.code }, error.status as never);
       }
       if (error instanceof TranscriptionBillingRefusedError) {
-        return transcriptionBillingRefusal(c, error);
+        return transcriptionBillingRefusal(
+          c,
+          error,
+          "voice input",
+          await isNativeIosRequest(c, deps),
+        );
       }
       if (error instanceof InferenceRegionRestrictedError) {
         return c.json({ code: "region_restricted" }, 422);

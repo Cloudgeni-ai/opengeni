@@ -518,6 +518,8 @@ test("during a rolling deploy, this version's writes keep what a newer replica s
     appsPlacement: "sessions",
     hiddenNavEntries: [],
     settingsMore: ["workspace:usage"],
+    navOrder: null,
+    navSetup: null,
   });
 });
 

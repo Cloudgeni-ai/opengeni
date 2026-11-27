@@ -428,7 +428,7 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Platform failures, customer provider failures and recoveries",
+      "title": "Platform failures, customer provider or plan failures and recoveries",
       "description": "Platform failure ratio excludes proven customer-managed quota, billing and upstream availability failures from numerator and denominator. Unknown failures still count as platform failures. Customer provider failures remain visible separately; historical unlabeled series remain unclassified.",
       "datasource": {
         "type": "prometheus",
@@ -456,7 +456,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(rate(opengeni_turns_total{failure_origin!=\"customer_provider\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{failure_origin!=\"customer_provider\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "expr": "(sum(rate(opengeni_turns_total{failure_origin!~\"customer_provider|customer_plan\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{failure_origin!~\"customer_provider|customer_plan\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
           "legendFormat": "platform / unclassified failures",
           "editorMode": "code",
           "range": true
@@ -470,8 +470,8 @@
         },
         {
           "refId": "C",
-          "expr": "(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\",failure_origin=\"customer_provider\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
-          "legendFormat": "customer provider failures (all outcomes denominator)",
+          "expr": "(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\",failure_origin=~\"customer_provider|customer_plan\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "legendFormat": "customer provider or plan failures (all outcomes denominator)",
           "editorMode": "code",
           "range": true
         }
