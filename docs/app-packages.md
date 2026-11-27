@@ -315,11 +315,17 @@ The rail's **Apps** page lists the apps here, with their version and
 **Customized** or **Update available**, and below them the ready-made apps not
 added yet. Header actions: **Install from file** (for people who can publish)
 and **New app**. Nothing installs on a click: choosing a ready-made app or a
-file opens one dialog first. For a ready-made app it shows the app's
-description and a [preview](#preview) of the app; then, for either, it says
-installing adds the app and its Skills for agents, names each Skill with its
-one line, lists automations (added off), offers demo data when the package
-has some, and has one **Install** button. The new app opens.
+file opens one page or dialog first. A ready-made app opens its Enable page
+(`/workspaces/<id>/enable?app=<key>`, docs/agents.md#enable), the one place it
+is added, also from Get started and the first-run sidebar: the app's
+description and a [preview](#preview), what it adds (the app, each Skill with
+its one line, automations added off), demo data when the package has some,
+and **Turn on**, which installs it with `installAppPackage` under the
+ready-made key. A host that embeds the Apps page without Enable (no
+`onChooseReadyMade`) gets the install dialog instead. A file opens the install
+dialog: installing adds the app and its Skills for agents, names each Skill,
+lists automations (added off), offers demo data, and has one **Install**
+button. The new app opens.
 
 An app's "…" menu on the Apps page has **Update to x** and **Restore previous
 version** when they apply; its settings' More has **Export**, **Upgrade**
@@ -365,7 +371,7 @@ later, with app server code.
 
 ### Preview
 
-Before installing, the dialog shows the ready-made app's own page running on
+Before installing, Enable (or the dialog) shows the ready-made app's own page running on
 its template's `preview.records` (sample records per collection; `{{today}}`
 or `{{today-N}}` in a string is that day's date). It runs in the usual
 sandboxed app frame, drawn scaled down and inert (no clicks or focus), with a

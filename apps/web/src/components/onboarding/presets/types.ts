@@ -12,7 +12,7 @@ export type PersonaPreset = {
   /** One setup on Get started, if any. */
   setup: { key: string; label: string } | null;
   /** Ready-made apps by template key. */
-  apps: readonly { key: string; label: string; icon: "megaphone" | "list-checks" }[];
+  apps: readonly { key: string; label: string; icon: "megaphone" | "list-checks" | "file-text" }[];
   /** Connections to suggest, by name, in one Connect link. */
   connections: readonly string[];
   /**

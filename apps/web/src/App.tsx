@@ -180,6 +180,7 @@ import {
   type ReadyMadeKind,
 } from "@/components/capabilities/capabilities-section";
 import {
+  enableHref,
   enableStepOf,
   parseEnableSearch,
   type EnableSearch,
@@ -2096,7 +2097,17 @@ function Artifacts() {
 function Apps() {
   const { workspaceId } = workspaceAppsRoute.useParams();
   const { fromSession } = workspaceAppsRoute.useSearch();
-  return <LazyAppsRoute workspaceId={workspaceId} fromSession={fromSession} />;
+  const navigate = workspaceAppsRoute.useNavigate();
+  // A ready-made app is added on its Enable page, the one place to add it.
+  return (
+    <LazyAppsRoute
+      workspaceId={workspaceId}
+      fromSession={fromSession}
+      onChooseReadyMade={(templateKey) =>
+        void navigate({ href: enableHref(workspaceId, { kind: "app", templateKey }) })
+      }
+    />
+  );
 }
 function IdentityLink() {
   const { linkId } = identityLinkRoute.useParams();

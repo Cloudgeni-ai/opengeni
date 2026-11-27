@@ -59,6 +59,7 @@ const { ReadyMadeAgentPreview } =
 const { AvailableApps, availableTemplates } =
   await import("../src/app/components/artifacts/available-apps");
 const { installReadyMadeApp } = await import("../src/app/lib/ready-made-apps");
+const { logoTileHue } = await import("../src/ui/logo-tile");
 const {
   NewAgentPage,
   EditAgentPage,
@@ -2445,6 +2446,35 @@ test("Installing a ready-made app names its Skills and automations, then opens i
   ]);
   // The app opens on its own page.
   expect(path.startsWith(`/workspaces/${WORKSPACE_ID}/apps/app-9`)).toBe(true);
+});
+
+test("in the Opengeni app, choosing a ready-made app opens its Enable page, the one place to add it", async () => {
+  const installer = appInstaller([{ id: "app-9", status: "active", replayed: false }]);
+  const client = Object.assign(fakeAgentsClient([]), installer, {
+    async listAppTemplates() {
+      return [APP_TEMPLATE];
+    },
+  });
+  const chosen: string[] = [];
+  const container = await render(
+    <AgentsTestHost context={canCreate(client)}>
+      <AvailableApps
+        workspaceId={WORKSPACE_ID}
+        installed={[]}
+        onChoose={(templateKey) => chosen.push(templateKey)}
+      />
+    </AgentsTestHost>,
+  );
+  const row = container.querySelector<HTMLButtonElement>("[data-ready-made-app='issue-tracker']")!;
+  // Each ready-made app has its own hue, from its key.
+  expect(
+    row.querySelector<HTMLElement>("[data-hued]")?.style.getPropertyValue("--og-tile-hue"),
+  ).toBe(String(logoTileHue("issue-tracker")));
+  await act(async () => row.click());
+  await flush();
+  expect(chosen).toEqual(["issue-tracker"]);
+  expect(document.querySelector("[role='dialog']")).toBeNull();
+  expect(installer.requests).toEqual([]);
 });
 
 async function chooseOutcome(dialog: HTMLElement, title: string) {

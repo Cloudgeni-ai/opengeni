@@ -33,13 +33,21 @@ import { StatusBadge } from "../../ui/status-badge";
 export function AppsRoute({
   workspaceId,
   fromSession,
+  onChooseReadyMade,
 }: {
   workspaceId: string;
   fromSession?: string | undefined;
+  /** Opens a ready-made app's Enable page; without it, Available opens the install dialog. */
+  onChooseReadyMade?: ((templateKey: string) => void) | undefined;
 }) {
   return (
     <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
-      <AppsPage key={workspaceId} workspaceId={workspaceId} fromSession={fromSession} />
+      <AppsPage
+        key={workspaceId}
+        workspaceId={workspaceId}
+        fromSession={fromSession}
+        onChooseReadyMade={onChooseReadyMade}
+      />
     </ArtifactSessionPage>
   );
 }
@@ -103,9 +111,11 @@ export function appPackageExtras(
 function AppsPage({
   workspaceId,
   fromSession,
+  onChooseReadyMade,
 }: {
   workspaceId: string;
   fromSession?: string | undefined;
+  onChooseReadyMade?: ((templateKey: string) => void) | undefined;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
@@ -212,7 +222,11 @@ function AppsPage({
           }
         />
         {showAvailable ? (
-          <AvailableApps workspaceId={workspaceId} installed={[...status.apps.values()]} />
+          <AvailableApps
+            workspaceId={workspaceId}
+            installed={[...status.apps.values()]}
+            onChoose={onChooseReadyMade}
+          />
         ) : null}
       </div>
       {packageActions?.element}

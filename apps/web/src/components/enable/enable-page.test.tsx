@@ -4,6 +4,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { SetupConnectionState, SetupReadiness } from "@opengeni/sdk";
+import workSummary from "../../../../../packages/core/src/app-templates/work-summary.app.json";
 
 /* ----------------------------------------------------------------------------
    Enable against a mocked client: what it shows with nothing, some and
@@ -91,7 +92,14 @@ const client = {
   createSession: mock(async () => ({ id: "session-1" })),
   getGitHubApp: mock(async () => ({ status: "unbound", configured: true, linkUrl: null })),
   requestSetupConnection: mock(async () => ({ status: "requested", adminsAsked: 2 })),
+  listAppTemplates: mock(async () => appTemplates),
+  installAppPackage: mock(async (_workspaceId: string, _request: Record<string, unknown>) => ({
+    app: { id: "app-1", status: "active", title: "Work summary" },
+    replayed: false,
+    notInstalled: [],
+  })),
 };
+let appTemplates: unknown[] = [];
 const connectPersonalGitHub = mock(async (_workspaceId: string) => undefined);
 const context: Record<string, unknown> = {
   client,
@@ -161,17 +169,17 @@ async function settle() {
   }
 }
 
-async function render() {
+async function render(
+  subject: { kind: "agent" | "app"; templateKey: string } = {
+    kind: "agent",
+    templateKey: "dependency-updater",
+  },
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(
-      <EnablePage
-        workspaceId="workspace-a"
-        subject={{ kind: "agent", templateKey: "dependency-updater" }}
-      />,
-    );
+    root.render(<EnablePage workspaceId="workspace-a" subject={subject} />);
   });
   await settle();
   return { container, root };
@@ -445,5 +453,38 @@ test("someone who can't add agents sees why Turn on is off", async () => {
   context.accessContext = {
     workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["sessions:create"] }],
   };
+  root.unmount();
+});
+
+test("a ready-made app: its preview, its demo data choice, and Turn on installs its package", async () => {
+  const withDemo = {
+    ...workSummary,
+    package: { ...workSummary.package, demoData: { sqlRows: { entries: [{ title: "Shipped" }] } } },
+  };
+  appTemplates = [withDemo];
+  context.accessContext = {
+    workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["artifacts:publish"] }],
+  };
+  client.installAppPackage.mockClear();
+  const { container, root } = await render({ kind: "app", templateKey: "work-summary" });
+  // How it looks before anything is added, and what it adds.
+  expect(container.querySelector("[data-app-template-preview] iframe")).not.toBeNull();
+  expect(container.textContent).toContain("Adds Work summary to Apps.");
+  expect(client.installAppPackage).not.toHaveBeenCalled();
+  const demo = container.querySelector<HTMLButtonElement>("[aria-label='Include demo data']")!;
+  await act(async () => demo.click());
+  await act(async () => turnOnButton(container).click());
+  await settle();
+  // One install path: the ready-made app's own key, demo data as chosen.
+  expect(client.installAppPackage).toHaveBeenCalledTimes(1);
+  expect(client.installAppPackage.mock.calls[0]?.[1]).toMatchObject({
+    idempotencyKey: "ready-made:work-summary",
+    demoData: false,
+  });
+  expect(container.textContent).toContain("Work summary is ready.");
+  context.accessContext = {
+    workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["sessions:create"] }],
+  };
+  appTemplates = [];
   root.unmount();
 });

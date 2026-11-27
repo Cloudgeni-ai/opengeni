@@ -1,9 +1,10 @@
 /**
  * The Apps page's Available list: ready-made apps not added here yet
- * (packages/core/src/app-templates). Choosing one never installs it: it opens
- * the install dialog with what the app is, a preview of it on sample records,
- * the Skills it turns on and the automations it adds; Install there installs
- * and opens it.
+ * (packages/core/src/app-templates). Choosing one never installs it. In the
+ * Opengeni app it opens the app's Enable page (`onChoose`), the one place a
+ * ready-made app is added; a host without Enable gets the install dialog,
+ * with what the app is, a preview of it on sample records, the Skills it
+ * turns on and the automations it adds.
  */
 import { useEffect, useState } from "react";
 import { compareAppPackageVersions } from "@opengeni/contracts";
@@ -60,9 +61,12 @@ export function availableTemplates(
 export function AvailableApps({
   workspaceId,
   installed,
+  onChoose,
 }: {
   workspaceId: string;
   installed: readonly AppPackageStatus[];
+  /** Opens a ready-made app's own setup page (Enable) instead of the install dialog. */
+  onChoose?: ((templateKey: string) => void) | undefined;
 }) {
   const { client } = useAppContext();
   const [templates, setTemplates] = useState<AppTemplate[] | null>(null);
@@ -84,6 +88,10 @@ export function AvailableApps({
   const shown = templates ? availableTemplates(templates, installed) : [];
   if (shown.length === 0) return null;
   const choose = (template: AppTemplate) => {
+    if (onChoose) {
+      onChoose(template.key);
+      return;
+    }
     try {
       setChosen({ template, app: chosenAppPackage(template.package) });
     } catch (error) {
@@ -100,28 +108,30 @@ export function AvailableApps({
             name={template.name}
             description={template.description}
             title={template.description}
-            icon={<ArtifactKindTile kind="site" />}
+            icon={<ArtifactKindTile kind="site" seed={template.key} />}
             status="available"
             statusLabel={`Preview ${template.name}`}
             onOpen={() => choose(template)}
           />
         ))}
       </div>
-      <InstallAppDialog
-        workspaceId={workspaceId}
-        chosen={chosen?.app ?? null}
-        about={chosen?.template.description}
-        preview={
-          chosen ? <AppTemplatePreview template={chosen.template} html={chosen.app.html} /> : null
-        }
-        onOpenChange={(open) => {
-          if (!open) setChosen(null);
-        }}
-        install={(_app, demoData) =>
-          installReadyMadeApp(client, workspaceId, chosen!.template, demoData)
-        }
-        onInstalled={onInstalled}
-      />
+      {onChoose ? null : (
+        <InstallAppDialog
+          workspaceId={workspaceId}
+          chosen={chosen?.app ?? null}
+          about={chosen?.template.description}
+          preview={
+            chosen ? <AppTemplatePreview template={chosen.template} html={chosen.app.html} /> : null
+          }
+          onOpenChange={(open) => {
+            if (!open) setChosen(null);
+          }}
+          install={(_app, demoData) =>
+            installReadyMadeApp(client, workspaceId, chosen!.template, demoData)
+          }
+          onInstalled={onInstalled}
+        />
+      )}
     </DetailSection>
   );
 }
