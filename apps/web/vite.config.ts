@@ -696,7 +696,10 @@ export default defineConfig({
               // otherwise folds them in beside the session's archive helpers, so
               // a direct session downloads them for nothing.
               name: "meetings-model",
-              test: /packages[\\/]react[\\/]src[\\/](?:recordings-model|meetings[\\/]meeting-on-screen)\.tsx?$/,
+              // meeting-languages too: left to grouping it can land beside
+              // eager sandbox-target helpers and drag this chunk into a direct
+              // session load.
+              test: /packages[\\/]react[\\/]src[\\/](?:recordings-model|meetings[\\/](?:meeting-on-screen|meeting-languages))\.tsx?$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
