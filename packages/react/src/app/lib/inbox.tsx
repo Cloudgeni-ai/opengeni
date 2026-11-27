@@ -17,6 +17,7 @@ import { useAppContext, type AppContextValue } from "../app-context";
 import { userErrorText } from "../../ui/api-error";
 import { inboxBillingAccountIds } from "./inbox-billing";
 import { MOUNT_READ_REUSE_MS } from "../../lib/mount-read-reuse";
+import { appViewerKey } from "./viewer-key";
 
 /**
  * The inbox as the app shows it: items from chats and notices about something
@@ -60,7 +61,8 @@ export function hasInbox(context: Parameters<typeof accessContextHasInbox>[0]): 
 export class InboxStore {
   private state: InboxState = EMPTY;
   private listeners = new Set<() => void>();
-  private inFlight: Promise<void> | null = null;
+  /** The read in flight; it resolves to its items as the API listed them, or null when it failed. */
+  private inFlight: Promise<readonly InboxEntry[] | null> | null = null;
   private generation = 0;
   private active = true;
   /** When the shown list was read (epoch ms), or null before the first good read. */
@@ -85,31 +87,38 @@ export class InboxStore {
   }
 
   refresh = async (): Promise<void> => {
-    if (!this.active) return;
-    if (this.inFlight) return await this.inFlight;
+    await this.read();
+  };
+
+  private read(): Promise<readonly InboxEntry[] | null> {
+    if (!this.active) return Promise.resolve(null);
+    if (this.inFlight) return this.inFlight;
     const request = ++this.generation;
-    this.inFlight = this.client
+    const read: Promise<readonly InboxEntry[] | null> = this.client
       .listInbox()
-      .then((data) => {
-        if (request !== this.generation) return;
+      .then((data): readonly InboxEntry[] | null => {
+        if (request !== this.generation) return null;
         // A body without an item list is not an inbox (a proxy or stub answered);
         // treat it like a failed load rather than let the rail badge crash the app.
         if (!Array.isArray(data?.items)) {
           this.set({ error: new Error("The inbox response had no items."), loading: false });
-          return;
+          return null;
         }
         this.set({ data: this.withBillingReads(inboxView(data)), error: null, loading: false });
         this.loadedAt = Date.now();
+        return data.items;
       })
       .catch((error: unknown) => {
         // Keep the last good list on a transient failure; the page says so.
         if (request === this.generation) this.set({ error, loading: false });
+        return null;
       })
       .finally(() => {
-        this.inFlight = null;
+        if (this.inFlight === read) this.inFlight = null;
       });
-    return await this.inFlight;
-  };
+    this.inFlight = read;
+    return read;
+  }
 
   /**
    * A reader's first read on mount: the rail entry and the Inbox page mount
@@ -119,6 +128,19 @@ export class InboxStore {
   refreshUnlessRecent = async (maxAgeMs: number): Promise<void> => {
     if (this.loadedAt !== null && this.state.data && Date.now() - this.loadedAt < maxAgeMs) return;
     return await this.refresh();
+  };
+
+  /**
+   * The items of the read in flight now, or else of a read started now (which
+   * the rail then shows), as the API listed them; `failed` when that read
+   * failed, null when the viewer retired (read without the store). Never a
+   * list read earlier, so a reply that arrived since then is in it.
+   */
+  currentItems = async (): Promise<readonly InboxEntry[] | "failed" | null> => {
+    if (!this.active) return null;
+    const items = await this.read();
+    if (!this.active) return null;
+    return items ?? "failed";
   };
 
   /** Retire the old viewer's cache and pending responses before exposing a new viewer. */
@@ -186,10 +208,11 @@ const stores = new WeakMap<InboxClient, { identity: string; store: InboxStore }>
 export function inboxStoreFor(
   context: Pick<AppContextValue, "client" | "accessContext" | "accessKeyVersion" | "authSession">,
 ): InboxStore {
-  const { client, accessContext, accessKeyVersion, authSession } = context;
-  // The SDK client can outlive a cookie/key change. Include live grants so a
-  // demotion cannot keep showing the previous owner's billing information.
-  const identity = JSON.stringify([accessKeyVersion, authSession?.user.id, accessContext]);
+  const { client } = context;
+  // The SDK client can outlive a cookie/key change; the viewer key includes
+  // live grants so a demotion cannot keep showing the previous owner's billing
+  // information.
+  const identity = appViewerKey(context);
   let current = stores.get(client);
   if (!current || current.identity !== identity) {
     current?.store.retire();
@@ -316,9 +339,15 @@ export function useReadSessionInbox(sessionId: string) {
   const store = inboxStoreFor(context);
   useEffect(() => {
     if (!personal) return;
-    const read = async () => {
-      const data = await client.listInbox().catch(() => null);
-      const unread = (data?.items ?? []).filter(
+    // Opening the chat reads through the rail's store (joining its read in
+    // flight), so a deep link's rail read and this one are one request;
+    // leaving always reads anew.
+    const read = async (opening: boolean) => {
+      const current = opening ? await store.currentItems() : null;
+      if (current === "failed") return;
+      const listed: readonly InboxEntry[] | undefined =
+        current ?? (await client.listInbox().catch(() => null))?.items;
+      const unread = (listed ?? []).filter(
         (item) =>
           item.sessionId === sessionId &&
           item.unread &&
@@ -336,8 +365,8 @@ export function useReadSessionInbox(sessionId: string) {
         ),
       );
     };
-    void read();
-    return () => void read();
+    void read(true);
+    return () => void read(false);
   }, [client, personal, sessionId, store]);
 }
 

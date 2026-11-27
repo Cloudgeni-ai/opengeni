@@ -5,7 +5,8 @@ import type {
   SessionLineageResponse as FullSessionLineageResponse,
   OpenGeniClient,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { MOUNT_READ_REUSE_MS } from "../lib/mount-read-reuse";
 import {
   useEmbeddedSessionLineage,
   type EmbeddedSessionLineageClientOverride,
@@ -26,6 +27,12 @@ export type UseSessionLineageOptions<Client extends ChatClient = OpenGeniClient>
     enabled?: boolean | undefined;
     /** Optional shared causal clock invoked when each network read starts. */
     beginRead?: (() => number) | undefined;
+    /**
+     * Who is reading (an identity key). Readers mounted together with the same
+     * client, viewer, workspace and session take one another's latest read
+     * for their first read; without it every reader reads its own.
+     */
+    viewer?: string | undefined;
   };
 
 export type UseSessionLineageResult<L extends SessionLineageResponse = FullSessionLineageResponse> =
@@ -73,6 +80,102 @@ function isSessionCreateToolCallCreated(event: SessionEvent): boolean {
   return name === "session_create" || name.endsWith("__session_create");
 }
 
+type LineageRead = {
+  lineage: SessionLineageResponse;
+  readGeneration: number;
+};
+
+type PublishedLineageRead = {
+  /** Resolves null when the read failed or was not stamped by the shared clock. */
+  read: Promise<LineageRead | null>;
+  /** When the read settled (epoch ms), or null while it is in flight. */
+  settledAt: number | null;
+};
+
+type LineageReaders = {
+  /** The mounted readers (hook instances) of this viewer's session lineage. */
+  readers: Set<object>;
+  /** The latest read any of them started, in flight or settled. */
+  latest: PublishedLineageRead | null;
+};
+
+// The chat page, the session rail and the mobile header each read the open
+// chat's lineage; the rail and the header learn the chat moments after the
+// page's read started. While readers of one viewer's session are mounted
+// together, a reader's first read takes the latest read any of them started
+// (joining it in flight) instead of sending another. Nothing outlives its
+// readers: the last one unmounting drops the entry. Only reads stamped by the
+// client's shared read clock are taken, so a reader orders one exactly as if
+// it had joined that read in flight.
+const lineageReaders = new WeakMap<object, Map<string, LineageReaders>>();
+
+function lineageReadersKey(viewer: string, workspaceId: string, sessionId: string): string {
+  return JSON.stringify([viewer, workspaceId, sessionId]);
+}
+
+function registerLineageReader(client: object, key: string, reader: object): () => void {
+  let entries = lineageReaders.get(client);
+  if (!entries) {
+    entries = new Map();
+    lineageReaders.set(client, entries);
+  }
+  let entry = entries.get(key);
+  if (!entry) {
+    entry = { readers: new Set(), latest: null };
+    entries.set(key, entry);
+  }
+  const registered = entry;
+  registered.readers.add(reader);
+  return () => {
+    registered.readers.delete(reader);
+    if (registered.readers.size === 0 && entries.get(key) === registered) entries.delete(key);
+  };
+}
+
+/** The latest read another mounted reader started, joined until it settles; null to read anew. */
+async function joinLineageRead(
+  client: object,
+  key: string,
+  reader: object,
+): Promise<LineageRead | null> {
+  const entry = lineageReaders.get(client)?.get(key);
+  if (!entry?.readers.has(reader) || entry.readers.size < 2) return null;
+  let joined = entry.latest;
+  if (
+    !joined ||
+    (joined.settledAt !== null && Date.now() - joined.settledAt >= MOUNT_READ_REUSE_MS)
+  ) {
+    return null;
+  }
+  for (;;) {
+    const result = await joined.read;
+    // A newer read started meanwhile (a refresh): take that one instead.
+    const newest: PublishedLineageRead | null = entry.latest;
+    if (newest && newest !== joined) {
+      joined = newest;
+      continue;
+    }
+    return entry.readers.has(reader) ? result : null;
+  }
+}
+
+function publishLineageRead(
+  client: object,
+  key: string,
+  reader: object,
+  read: Promise<LineageRead | null>,
+): void {
+  const entry = lineageReaders.get(client)?.get(key);
+  if (!entry?.readers.has(reader)) return;
+  const published: PublishedLineageRead = { read, settledAt: null };
+  entry.latest = published;
+  void read.then((result) => {
+    if (entry.latest !== published) return;
+    if (result) published.settledAt = Date.now();
+    else entry.latest = null;
+  });
+}
+
 /** Read the ancestors + descendant tree for one session. Data-only; no UI state. */
 export function useSessionLineage(
   sessionId: string | null | undefined,
@@ -91,28 +194,63 @@ export function useSessionLineage(
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const nextReadGeneration = useRef(0);
   const beginRead = options.beginRead;
-  const load = useCallback(
-    async (signal?: AbortSignal) => {
+  const viewer = options.viewer;
+  const reader = useRef<object>({}).current;
+  const readersKey =
+    enabled && viewer !== undefined && sessionId
+      ? lineageReadersKey(viewer, workspaceId, sessionId)
+      : null;
+  // Registered in the layout phase, so a reader is mounted before any reader's
+  // first read starts in the same commit.
+  useLayoutEffect(() => {
+    if (readersKey === null) return;
+    return registerLineageReader(client, readersKey, reader);
+  }, [client, reader, readersKey]);
+  const load = useMemo(() => {
+    // A reader's first read for this session (on mount or when it learns the
+    // session) takes the latest read of another mounted reader; every later
+    // read (refreshes, polls, live events, the page shown again) reads anew.
+    let first = true;
+    return async (signal?: AbortSignal) => {
       if (!sessionId) {
         return {
           lineage: { ancestors: [], children: [], truncated: false },
           readGeneration: 0,
         };
       }
+      const mayReuse = first;
+      first = false;
+      if (readersKey !== null && mayReuse) {
+        const joined = await joinLineageRead(client, readersKey, reader);
+        if (joined) return joined;
+      }
       let readGeneration = 0;
-      const lineage = await client.getSessionLineage(workspaceId, sessionId, {
+      let shared = false;
+      const request = client.getSessionLineage(workspaceId, sessionId, {
         signal,
         onRequestStart: (sharedReadGeneration) => {
+          shared = sharedReadGeneration !== undefined;
           readGeneration = sharedReadGeneration ?? beginRead?.() ?? ++nextReadGeneration.current;
         },
       });
+      if (readersKey !== null) {
+        publishLineageRead(
+          client,
+          readersKey,
+          reader,
+          request.then(
+            (lineage) => (shared ? { lineage, readGeneration } : null),
+            () => null,
+          ),
+        );
+      }
+      const lineage = await request;
       return {
         lineage,
         readGeneration,
       };
-    },
-    [beginRead, client, workspaceId, sessionId],
-  );
+    };
+  }, [beginRead, client, reader, readersKey, workspaceId, sessionId]);
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });
   const refresh = state.refresh;
   useEffect(() => {

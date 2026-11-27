@@ -34,6 +34,7 @@ import {
 import { turnRatingsFromFeedback } from "../../session-feedback-model";
 import { PersonalResourceAttachmentSurface } from "../components/personal-resource-attachment-surface";
 import { useReadSessionInbox } from "../lib/inbox";
+import { appViewerKey } from "../lib/viewer-key";
 import { useWorkspaceMachines } from "../lib/use-workspace-machines";
 import {
   useSessionComposerDelivery,
@@ -1603,6 +1604,7 @@ export function SessionRoute({
   const lineage = useSessionLineage(sessionId, {
     events,
     pollIntervalMs: lineagePoll.pollIntervalMs,
+    viewer: appViewerKey(context),
   });
   const agentNodes = useMemo(() => lineage.lineage?.children ?? [], [lineage.lineage]);
   const observeLineageTree = lineagePoll.observeTree;

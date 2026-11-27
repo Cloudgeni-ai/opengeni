@@ -5,6 +5,7 @@ import { archiveActionLabel, requestSessionArchive } from "../../lib/archive-ses
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
 import { t } from "../../lib/console-text";
+import { appViewerKey } from "../../lib/viewer-key";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
 import { useSiteOpenedListener } from "../../lib/site-opened";
 import { SessionShellSlotsContext } from "./session-shell-slots";
@@ -1022,6 +1023,7 @@ export function SessionList() {
   const activeLineage = useSessionLineage(context.session?.id ?? null, {
     pollIntervalMs: listHintsAvailable ? undefined : 30_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
+    viewer: appViewerKey(context),
   });
   const lineageDirtyRevision = Math.max(
     dirtyScopes.all,
