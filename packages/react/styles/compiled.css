@@ -3604,6 +3604,12 @@
       border-color: color-mix(in oklab, var(--og-color-border) 50%, transparent);
     }
   }
+:where(.og-root).border-og-border\/60,:where(.og-root) .border-og-border\/60 {
+    border-color: var(--og-color-border);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--og-color-border) 60%, transparent);
+    }
+  }
 :where(.og-root).border-og-border\/70,:where(.og-root) .border-og-border\/70 {
     border-color: var(--og-color-border);
     @supports (color: color-mix(in lab, red, red)) {
