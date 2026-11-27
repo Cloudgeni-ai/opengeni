@@ -79,7 +79,12 @@ import {
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
 import { Icon } from "./icon";
-import { ActivityDisclosure, ReleaseFollowProvider, withAlpha } from "./primitives";
+import {
+  ActivityDisclosure,
+  ReleaseFollowProvider,
+  useReleaseFollow,
+  withAlpha,
+} from "./primitives";
 import { NativeAuthNeededRow } from "./in-chat-connect";
 import {
   NativeAllowanceExhaustedRow,
@@ -1596,6 +1601,7 @@ function UserMessageVoiceMarker({
 function UserMessageVoiceContext({ context }: { context: string }) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
+  const releaseFollow = useReleaseFollow();
   const c = theme.colors;
   const [open, setOpen] = useState(false);
   return (
@@ -1611,7 +1617,11 @@ function UserMessageVoiceContext({ context }: { context: string }) {
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        onPress={() => setOpen((value) => !value)}
+        onPress={() => {
+          // Opening it must not pull the reader to the newest message.
+          releaseFollow();
+          setOpen((value) => !value);
+        }}
         hitSlop={8}
         style={{ flexDirection: "row", alignItems: "center", gap: 4 }}
       >
