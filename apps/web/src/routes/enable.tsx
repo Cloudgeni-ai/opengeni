@@ -19,9 +19,9 @@ export function EnableRoute({
 }) {
   const navigate = useNavigate();
   const subject = enableSubjectOf(search);
-  const backTo = subject?.kind === "app" ? "plugins" : "agents";
+  const backTo = subject?.kind === "app" ? "apps" : "agents";
   const back = {
-    label: subject?.kind === "app" ? "Capabilities" : "Agents",
+    label: subject?.kind === "app" ? "Apps" : "Agents",
     onClick: () =>
       void navigate({ href: `/workspaces/${encodeURIComponent(workspaceId)}/${backTo}` }),
   };
