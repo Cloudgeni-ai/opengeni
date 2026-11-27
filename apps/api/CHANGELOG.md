@@ -1,5 +1,43 @@
 # @opengeni/api-router
 
+## 6.42.1
+
+### Patch Changes
+
+- d13b53d: Disconnecting a Google connection (Gmail, Drive, Calendar or a Google Integration) no longer cuts off the same Google account's other connections in other workspaces or organizations. Google ends the whole grant of one account and OAuth client when any one of its tokens is revoked, so a disconnect now ends the grant at the provider only when a deployment-wide check (migration 1611) finds no other live connection that may hold it: same provider, the same or an unknown client, and not provably another account. Otherwise, or while that check is not yet granted to the runtime, the disconnect only destroys Opengeni's stored tokens. The rule is generic for any provider registered as revoking on disconnect, and the check returns only yes or no.
+
+  When a refresh of such a provider is refused with `invalid_grant`, every other active connection that may hold the same grant (same token endpoint, the same known client and the same account) is refreshed with its own token in the background; one the provider refuses too moves to `needs_reauth` through the normal path and its owner is told once, so dead siblings stop showing as connected while ones that still work stay connected. A connection whose account or client can't be matched is left alone. Both checks are created withheld from the runtime role, as new definers must be; a later migration grants them.
+
+- Updated dependencies [a28280a]
+- Updated dependencies [7508c74]
+- Updated dependencies [d13b53d]
+- Updated dependencies [335184d]
+  - @opengeni/db@6.42.1
+  - @opengeni/core@6.42.1
+  - @opengeni/documents@6.42.1
+  - @opengeni/events@6.42.1
+  - @opengeni/agent-proto@6.42.1
+  - @opengeni/artifact-tool@6.42.1
+  - @opengeni/capabilities@6.42.1
+  - @opengeni/codemode@6.42.1
+  - @opengeni/codex@6.42.1
+  - @opengeni/config@6.42.1
+  - @opengeni/contracts@6.42.1
+  - @opengeni/decisions@6.42.1
+  - @opengeni/github@6.42.1
+  - @opengeni/interaction@6.42.1
+  - @opengeni/network@6.42.1
+  - @opengeni/observability@6.42.1
+  - @opengeni/runtime@6.42.1
+  - @opengeni/storage@6.42.1
+  - @opengeni/tool-gateway@6.42.1
+  - @opengeni/vaults@6.42.1
+  - @opengeni/vaults-bitwarden@6.42.1
+  - @opengeni/vaults-keeper@6.42.1
+  - @opengeni/vaults-onepassword@6.42.1
+  - @opengeni/vaults-protonpass@6.42.1
+  - @opengeni/xai-subscription@6.42.1
+
 ## 6.42.0
 
 ### Minor Changes
