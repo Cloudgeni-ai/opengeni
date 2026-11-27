@@ -60139,6 +60139,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     // The session prefix was locked before blockers and revalidated afterward.
     // Unadopted writers have no background-command delivery to wake their owner;
     // persist that obligation atomically with physical provider settlement.
+    // A read-only (archived or imported) owner chat refuses wakes; skip it.
     const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
       tx,
       sql`
@@ -60147,6 +60148,10 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         join sandbox_retained_processes process on process.owner_attempt_id = attempt.id
           and process.workspace_id = attempt.workspace_id
           and process.session_id = attempt.session_id
+        join sessions owner_session on owner_session.workspace_id = attempt.workspace_id
+          and owner_session.id = attempt.session_id
+          and owner_session.content_archive_state is null
+          and owner_session.imported_archive_import_id is null
         where attempt.workspace_id = ${input.workspaceId}
           and attempt.account_id = ${input.accountId}
           and attempt.state = 'closed' and attempt.quiesced_at is null
@@ -60183,6 +60188,10 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         join session_turn_attempts attempt
           on attempt.id = coalesce(admission.attempt_id, actor_process.owner_attempt_id)
           and attempt.workspace_id = admission.workspace_id
+        join sessions owner_session on owner_session.workspace_id = attempt.workspace_id
+          and owner_session.id = attempt.session_id
+          and owner_session.content_archive_state is null
+          and owner_session.imported_archive_import_id is null
         where attempt.workspace_id = ${input.workspaceId}
           and attempt.account_id = ${input.accountId}
           and attempt.state = 'closed' and attempt.quiesced_at is null
@@ -67913,8 +67922,12 @@ async function settleRetainedProcessWithAuthority(
           "turn",
           process.ownerAttemptId,
         ));
+      // A read-only (archived or imported) chat refuses wakes and has no turn
+      // to resume; its restore wakes it afresh.
       if (
         process.ownerAttemptId &&
+        session.contentArchiveState === null &&
+        session.importedArchiveImportId === null &&
         (setupAwaitingCompletion ||
           wasAwaitingQuiescence ||
           (await hasPendingSessionAttemptQuiescenceTx(tx, {
@@ -91620,6 +91633,9 @@ async function wakeSandboxLifecycleWaitersTx(
         eq(schema.sessions.sandboxGroupId, input.sandboxGroupId),
         eq(schema.sessions.status, "recovering"),
         eq(schema.sessionTurns.status, "recovering"),
+        // A read-only (archived or imported) chat refuses wakes.
+        isNull(schema.sessions.contentArchiveState),
+        isNull(schema.sessions.importedArchiveImportId),
         sql`${schema.sessionTurns.metadata} @> ${lifecycleWaitJson}::jsonb`,
       ),
     )
@@ -98481,9 +98497,14 @@ function backgroundCommandTerminalMutation(input: {
       // input, so reopening one here would violate cancellation authority. The
       // exact command event remains durable audit/read truth; live sessions get
       // the typed model input below unless a terminal read already observed it.
+      // An archived (or archiving) or imported chat is read-only: the database
+      // refuses its model input and wakes, so its command settles the same way.
+      // Otherwise the reaper could never settle the process or drain its box.
       if (
         session.status === "cancelled" ||
         session.status === "failed" ||
+        session.contentArchiveState !== null ||
+        session.importedArchiveImportId !== null ||
         command.completionObservedAt ||
         abandonedOnUnreachableMachine
       ) {

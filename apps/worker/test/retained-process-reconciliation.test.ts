@@ -3374,6 +3374,64 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(afterReplay?.wakeRevision).toBe(after!.wakeRevision);
   }, 60_000);
 
+  /** Archive cancels the running turn and stores the chat before the turn's
+   * activity proves it stopped: the attempt is closed without a quiescence
+   * receipt, and the session is read-only. */
+  async function archiveSession(fixture: ProcessFixture, status: "cancelled" | "idle") {
+    await admin`
+      update sessions set status = ${status},
+        content_archive_state = 'archived', content_archive_started_at = now(),
+        content_archived_at = now(), content_archive = '{"sha256": "test"}'::jsonb
+      where workspace_id = ${fixture.workspaceId} and id = ${fixture.sessionId}`;
+  }
+
+  async function wakeOutbox(fixture: ProcessFixture) {
+    const [row] = await admin<{ wakeRevision: number; reason: string }[]>`
+      select wake_revision::int as "wakeRevision", reason
+      from session_workflow_wake_outbox
+      where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.sessionId}`;
+    return row ?? null;
+  }
+
+  for (const [status, outcome] of [
+    ["cancelled", "cancelled"],
+    ["idle", "cancelled"],
+    ["idle", "interrupted_recoverable"],
+  ] as const) {
+    test(`the reaper settles a background command of an archived ${status} chat (owner ${outcome})`, async () => {
+      if (!available) return;
+      const fixture = await promoteTurnProcess({ outcome, backgroundCommand: "sleep 3600" });
+      const wakeBefore = await wakeOutbox(fixture);
+      await archiveSession(fixture, status);
+      await runReaper(async () => ({
+        status: "proved",
+        proof: { outcome: "exited", exitCode: 0, reason: "provider_exit_banner" },
+      }));
+      expect(await settlementProjection(fixture)).toMatchObject({
+        processState: "exited",
+        admissionOutcome: "resolved",
+        admissionSettled: true,
+        processHolders: 0,
+      });
+      const [command] = await admin<{ state: string }[]>`
+        select state from session_background_commands
+        where workspace_id = ${fixture.workspaceId} and retained_process_id = ${fixture.process.id}`;
+      expect(command?.state).toBe("exited");
+      // A read-only chat takes no model input and no wake; its audit event stays.
+      expect(await wakeOutbox(fixture)).toEqual(wakeBefore);
+      const [updates] = await admin<{ count: number }[]>`
+        select count(*)::int as count from session_system_updates
+        where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.sessionId}
+          and kind = 'background_command_result'`;
+      expect(updates?.count).toBe(0);
+      const [finished] = await admin<{ count: number }[]>`
+        select count(*)::int as count from session_events
+        where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.sessionId}
+          and type = 'session.command.finished'`;
+      expect(finished?.count).toBe(1);
+    }, 60_000);
+  }
+
   test("copied identity, claim, and admission fences reject; durable proof safely removes a superseded holder", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "superseded" });

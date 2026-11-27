@@ -255,7 +255,11 @@ dedupe-keyed `background_command_result` input with an output locator, appends
 `system.update.pending`, and registers the workflow wake when idle and
 runnable. A failed or cancelled session cannot claim another turn: its terminal
 control transition already drained pending input, so command settlement keeps
-the exact event but does not reopen model work. A duplicate or stale proof
+the exact event but does not reopen model work. An archived (or archiving) or
+imported session settles the same way, and its closed turns get no
+quiescence or provider-settled wake: the database refuses model input and
+wakes for a read-only chat, and refusing them would keep the reaper from ever
+settling the process or draining its box. A duplicate or stale proof
 changes nothing and cannot create a second input. NATS publication happens only
 after commit and is a replaceable short-wait hint; PostgreSQL remains
 authoritative.
