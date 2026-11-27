@@ -288,6 +288,9 @@ const HISTORY_REDIRECT_HOPS = 4;
 const HISTORY_STARTUP_LIMIT_MS = 1_000;
 /** Chromium's load error for an HTTP error status whose response had no body. */
 const HTTP_ERROR_STATUS_LOAD_ERROR = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
+/** Chromium's load error for a load it cancelled because the machine's
+ * network changed while it was connecting. */
+const NETWORK_CHANGED_LOAD_ERROR = "net::ERR_NETWORK_CHANGED";
 /** Recent main-frame loaders remembered per tab, to recognize a navigation's
  * commit even after a later document (a client redirect) replaced it. */
 const COMMITTED_LOADER_HISTORY = 16;
@@ -11329,6 +11332,33 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     url: string,
     options: BrowserTabNavigationOptions = {},
   ): Promise<string | null> {
+    let errorText = await this.loadDestination(state, url);
+    // The browser cancels a load that is still connecting whenever an
+    // address appears or disappears on any of the machine's interfaces (on
+    // Linux even a container's bridge or veth), and its own error page then
+    // reloads it. The website never answered, so load it once more, as the
+    // browser would.
+    if (errorText === NETWORK_CHANGED_LOAD_ERROR)
+      errorText = await this.loadDestination(state, url);
+    // A failed load is reported whichever page the tab shows.
+    if (errorText !== null && options.keepTabOnLoadError !== true) {
+      const failure = new InteractionDefiniteDriverError(
+        "resource_unavailable",
+        `browser could not navigate to the requested URL (${errorText})`,
+        true,
+      );
+      failure.failureReason = destinationLoadFailureReason(errorText);
+      throw failure;
+    }
+    await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
+    await this.refreshFrame(state);
+    // The caller asked to keep the tab on the browser's error page.
+    return errorText;
+  }
+
+  /** Load `url` in the tab once, until its document (or the browser's error
+   * page) committed. Returns Chromium's load error, if any. */
+  private async loadDestination(state: TargetState, url: string): Promise<string | null> {
     this.connection?.assertNavigable?.(url);
     const startedAt = Date.now();
     const loaderBefore = state.frame.loaderId;
@@ -11402,19 +11432,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await this.failUncommittedNavigation(state, loaderBefore, outcome, committed);
       }
     }
-    // A failed load is reported whichever page the tab shows.
-    if (errorText !== null && options.keepTabOnLoadError !== true) {
-      const failure = new InteractionDefiniteDriverError(
-        "resource_unavailable",
-        `browser could not navigate to the requested URL (${errorText})`,
-        true,
-      );
-      failure.failureReason = destinationLoadFailureReason(errorText);
-      throw failure;
-    }
-    await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
-    await this.refreshFrame(state);
-    // The caller asked to keep the tab on the browser's error page.
     return errorText;
   }
 
