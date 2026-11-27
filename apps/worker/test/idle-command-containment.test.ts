@@ -1295,6 +1295,34 @@ describe("idle command containment", () => {
     );
   }, 180_000);
 
+  // Production regression (OpenGeniSandboxDrainExpiredLong): the chat was
+  // archived while its command ran. Its database refuses agent input
+  // (SESSION_ARCHIVED_READ_ONLY), which failed every drain and settlement.
+  test("an archived chat's command settles as audit only and its box goes cold", async () => {
+    const fixture = await idleFixture();
+    await idleFor(fixture, 31);
+    expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
+    await admin`update sessions set content_archive_state = 'archived',
+      content_archive_started_at = now(), content_archived_at = now(),
+      content_archive = '{"sha256": "test"}'::jsonb
+      where workspace_id = ${fixture.workspaceId} and id = ${fixture.attempt.sessionId}`;
+    const confirmed = await confirmDrainCold(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sandboxGroupId: fixture.sandboxGroupId,
+      expectedEpoch: EPOCH,
+      providerMissingBeforeCapture: true,
+      idleCommandContainmentMs: WINDOW_MS,
+    });
+    expect(confirmed.wentCold).toBe(true);
+    expect(confirmed.backgroundCommandWakes ?? []).toEqual([]);
+    const record = await commandTerminalRecord(fixture);
+    expect(record.command).toMatchObject({ state: "lost" });
+    expect(record.finished).toHaveLength(1);
+    expect(record.updates).toEqual([]);
+    expect(record.pending).toEqual([]);
+  }, 180_000);
+
   // Production regression (OpenGeniSandboxDrainExpiredLong): a drain
   // published the checkpoint and stamped its stop cutoff, but the box was
   // not confirmed stopped; by the next tick it was gone. Every later tick

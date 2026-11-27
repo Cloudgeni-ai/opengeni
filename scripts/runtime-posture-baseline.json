@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
   "status": "production",
-  "sourceCommit": "0f4b5e5c484a5708c1dfa8eaf4f4db6cdc59efd1",
-  "release": "ghcr.io/cloudgeni-ai/opengeni-api@sha256:416f5783f23a242df7b70b63002bd2e7a6f968de884a5fcb5aae63864582f0fd"
+  "sourceCommit": "d303238e10a1ce11e131f400bdbc5043a34cd461",
+  "release": "ghcr.io/cloudgeni-ai/opengeni-api@sha256:27e435385ec919d16824e136721f6b43295d684b3ed0594fd04f1b35d7a1abb1"
 }

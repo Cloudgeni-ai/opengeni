@@ -68,6 +68,7 @@ import {
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
   checkCreditLedgerAccountTotals,
+  checkSessionTurnCreditTotals,
   summarizeTurnHolds,
   countActiveUsers,
   readCreditGrantTotals,
@@ -250,6 +251,7 @@ import {
   recordActiveUserGauges,
   recordCreditBalanceGauges,
   recordCreditLedgerTotalsCheck,
+  recordSessionTurnCreditTotalsCheck,
   sampleAccountIds,
   recordCreditGrantGauges,
   recordCreditMicros,
@@ -4437,6 +4439,19 @@ async function refreshQueueLeaseAndCreditGauges(
         );
       } catch (error) {
         observability.warn("sandbox reaper: credit ledger totals check failed", {
+          error: errorMessage(error),
+        });
+      }
+      try {
+        // Likewise one bounded turn of a few random accounts: its kept turn
+        // credit totals against the terminal trigger's full sum.
+        recordSessionTurnCreditTotalsCheck(
+          observability,
+          await checkSessionTurnCreditTotals(db, sampleAccountIds(accountIds, 4)),
+        );
+      } catch (error) {
+        recordSessionTurnCreditTotalsCheck(observability, null);
+        observability.warn("sandbox reaper: session turn credit totals check failed", {
           error: errorMessage(error),
         });
       }

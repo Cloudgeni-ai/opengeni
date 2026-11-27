@@ -1,5 +1,28 @@
 # @opengeni/db
 
+## 6.42.1
+
+### Patch Changes
+
+- a28280a: The editable artifact schema check and the two wake repair inventories now plan cheaply: the schema check looks up its six tables in one catalog query instead of an 8-way join, and the inventories reuse one plan per connection instead of planning again on most calls. Results are unchanged.
+- 7508c74: The child-result and quiescence-receipt wake repair inventories now find stranded sessions when the database owner does not bypass row security, the posture in docs/deployment.md. Before, they found none there and never repaired a wake. Each call opens the wake dispatcher's maintenance claim; results under an owner that bypasses row security are unchanged.
+- d13b53d: Disconnecting a Google connection (Gmail, Drive, Calendar or a Google Integration) no longer cuts off the same Google account's other connections in other workspaces or organizations. Google ends the whole grant of one account and OAuth client when any one of its tokens is revoked, so a disconnect now ends the grant at the provider only when a deployment-wide check (migration 1611) finds no other live connection that may hold it: same provider, the same or an unknown client, and not provably another account. Otherwise, or while that check is not yet granted to the runtime, the disconnect only destroys Opengeni's stored tokens. The rule is generic for any provider registered as revoking on disconnect, and the check returns only yes or no.
+
+  When a refresh of such a provider is refused with `invalid_grant`, every other active connection that may hold the same grant (same token endpoint, the same known client and the same account) is refreshed with its own token in the background; one the provider refuses too moves to `needs_reauth` through the normal path and its owner is told once, so dead siblings stop showing as connected while ones that still work stay connected. A connection whose account or client can't be matched is left alone. Both checks are created withheld from the runtime role, as new definers must be; a later migration grants them.
+
+- 335184d: Writing a turn's terminal event no longer re-reads every model call of the turn to attach its `usage`. Running per-turn credit totals (`session_turn_credit_totals`, `session_turn_credit_calls`), kept exact by triggers on `session_events` and `usage_events`, hold what the previous full sum computed, and the terminal trigger reads them; a turn whose totals are not ready (it predates the migration, has a refund row, or had a counted row updated) still gets the previous full sum, so `usage` is unchanged. The migrations install the triggers one table per migration, each with a short lock wait retried with jitter, without reading history, and a batched backfill recounts earlier turns one per transaction while writers continue. Application statements write the totals only through the triggers (a role running its own SQL could still write its own account's rows through a temporary trigger; that changes only the shown `usage`, never a charge, and the drift check reports it). Reads outside the triggers are limited to the workspace and to sessions the person may see; deleting a session deletes its rows, and a TRUNCATE of either source clears them. The worker compares one bounded turn of a few accounts each metrics cycle with a full recount (`opengeni_session_turn_credit_totals_checked_turns`, `opengeni_session_turn_credit_totals_skipped_turns`, `opengeni_session_turn_credit_totals_mismatched_turns`; all -1 when the check fails).
+
+  Readiness probes no longer fingerprint the database catalogs every 10 seconds: a passing runtime posture inspection stands for 60 seconds per process, with only a connectivity check in between, and any failed probe inspects in full again until one passes.
+
+  - @opengeni/codemode@6.42.1
+  - @opengeni/codex@6.42.1
+  - @opengeni/config@6.42.1
+  - @opengeni/contracts@6.42.1
+  - @opengeni/network@6.42.1
+  - @opengeni/observability@6.42.1
+  - @opengeni/subscriptions@6.42.1
+  - @opengeni/xai-subscription@6.42.1
+
 ## 6.42.0
 
 ### Minor Changes

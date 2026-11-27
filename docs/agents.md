@@ -795,11 +795,11 @@ a ready-made app (`?app=<key>`) or a Get started setup (`get-started?setup=<key>
    cut off (429). Asking again while it is open shows **Already asked**; a
    settled notice reopens only a day later, and a dismissed one stays
    dismissed. The routine (`request_setup_connection_v1`, migration 1599)
-   trusts only the transaction's own account, workspace and subject. Its
-   runtime EXECUTE is withheld for one release; **a later migration must
-   grant it** (as 1571 did for 1562). Until then the route answers
-   `unavailable` and the page copies the link instead, as it does when there
-   is nobody it may ask (no admin, or another scope). A repository row shows
+   trusts only the transaction's own account, workspace and subject. 1599
+   created it with runtime EXECUTE withheld for one release and 1679 grants
+   it. The route answers `unavailable`, and the page copies the link
+   instead, only when there is nobody it may ask (no admin, or another
+   scope). A repository row shows
    when its trigger needs one; it is picked when the trigger is turned on.
    A Get started setup can require a connection its agent template doesn't
    (the Linear setup requires Linear); that is client-side only

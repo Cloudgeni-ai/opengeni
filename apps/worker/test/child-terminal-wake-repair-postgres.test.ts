@@ -429,7 +429,9 @@ test("a child result newer than a compaction failure still repairs the parent wa
 test("content-free discovery inherits only the existing wake dispatcher owner and runtime ACL", async () => {
   const [posture] = await shared.admin`
     select repair.proowner = wake.proowner as same_owner, repair.prosecdef as definer,
-      repair.proconfig = array['search_path=pg_catalog']::text[] as safe_path,
+      -- 1671 adds plan reuse settings; search_path stays pinned.
+      repair.proconfig = array['search_path=pg_catalog', 'plan_cache_mode=force_generic_plan',
+        'join_collapse_limit=1']::text[] as safe_path,
       has_function_privilege('opengeni_app', repair.oid, 'EXECUTE') as app_execute,
       exists (select 1 from aclexplode(coalesce(repair.proacl, acldefault('f', repair.proowner))) acl
         where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as public_execute
