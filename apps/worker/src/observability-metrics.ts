@@ -1580,6 +1580,35 @@ export function recordCreditLedgerTotalsCheck(
   }
 }
 
+export function recordSessionTurnCreditTotalsCheck(
+  observability: Observability,
+  /** Null when the check failed: both gauges read -1, never "no drift". */
+  check: { checked: number; skipped?: number; mismatchedTurnIds: string[] } | null,
+): void {
+  // Mismatched 0 with checked 0 means nothing was compared, not "no drift".
+  observability.setGauge({
+    name: "opengeni_session_turn_credit_totals_checked_turns",
+    help: "Sampled turns whose kept credit totals were compared with a full recount; -1 when the check failed.",
+    value: check ? check.checked : -1,
+  });
+  observability.setGauge({
+    name: "opengeni_session_turn_credit_totals_skipped_turns",
+    help: "Sampled kept turns left out of the full recount because they have too many calls; -1 when the check failed.",
+    value: check ? (check.skipped ?? 0) : -1,
+  });
+  observability.setGauge({
+    name: "opengeni_session_turn_credit_totals_mismatched_turns",
+    help: "Sampled turns whose kept credit totals give a different usage than a full recount; -1 when the check failed.",
+    value: check ? check.mismatchedTurnIds.length : -1,
+  });
+  if (check && check.mismatchedTurnIds.length > 0) {
+    observability.warn("session turn credit totals differ from a full recount", {
+      checked: check.checked,
+      turnIds: check.mismatchedTurnIds.join(","),
+    });
+  }
+}
+
 /** Up to `count` distinct ids chosen uniformly at random (partial Fisher-Yates). */
 export function sampleAccountIds(
   accountIds: readonly string[],
