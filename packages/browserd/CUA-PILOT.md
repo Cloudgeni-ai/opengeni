@@ -64,6 +64,12 @@ key) and `cmd+v` as nothing, since its Command was only a flag on the `v`.
 Each character is now its own US-keyboard key with real Shift presses, a
 chord presses its modifier keys, and text with a character that has no such
 key fails before any key is sent.
+Typing at a point (`type_text`, `press_key` or `hotkey` with `x,y`) in such an
+app clicks the point to focus it. The device's fields are not in the app's
+accessibility tree, whose focused element is the device view covering every
+point, so an accessibility focus moved nothing on the device: text aimed at a
+Simulator sign-in sheet's password field went into its email field, or the
+focus step failed before any key was sent.
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
 In web content it writes any number as text: Chrome empties a number field
