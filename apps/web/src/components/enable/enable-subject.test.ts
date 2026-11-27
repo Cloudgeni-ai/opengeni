@@ -49,6 +49,21 @@ describe("enable", () => {
       app: "decision-log",
     });
     expect(parseEnableSearch({ agent: "../x" })).toEqual({});
+    // Apps opened from a chat keeps it; only a session id, and only for an app.
+    const fromSession = "0b6f2a9e-4c1d-4e8a-9f3b-2d7c5e1a8b40";
+    expect(parseEnableSearch({ app: "work-summary", fromSession })).toEqual({
+      app: "work-summary",
+      fromSession,
+    });
+    expect(parseEnableSearch({ app: "work-summary", fromSession: "x" })).toEqual({
+      app: "work-summary",
+    });
+    expect(parseEnableSearch({ agent: "pr-reviewer", fromSession })).toEqual({
+      agent: "pr-reviewer",
+    });
+    expect(
+      enableHref("w", { kind: "app", templateKey: "work-summary" }, undefined, { fromSession }),
+    ).toBe(`/workspaces/w/enable?app=work-summary&fromSession=${fromSession}`);
     expect(enableHref("w 1", { kind: "agent", templateKey: "triage" }, "connect")).toBe(
       "/workspaces/w%201/enable?agent=triage&step=connect",
     );

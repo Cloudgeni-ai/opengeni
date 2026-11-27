@@ -38,6 +38,8 @@ export interface EnableViewProps {
   name: string;
   description: string;
   icon?: ReactNode | undefined;
+  /** The tile's hue, as the list it was chosen from draws it (a ready-made app's). */
+  hue?: number | undefined;
   back?: DetailBackLink | undefined;
   /** The step the address names; the page scrolls to it. */
   step?: EnableStep | undefined;
@@ -51,6 +53,10 @@ export interface EnableViewProps {
   /** What gets set up, as label and line. */
   facts: readonly EnableFact[];
   wontDoWithoutAsking: readonly SetupGuardrail[];
+  /** How it looks before it's added (a ready-made app's preview), above Connect. */
+  preview?: ReactNode | undefined;
+  /** A choice made when it's turned on (an app's demo data), after what gets set up. */
+  options?: ReactNode | undefined;
   /** One optional line, display only: "Works well with PR reviewer". */
   worksWellWith?: { name: string; onOpen: () => void } | null | undefined;
   stage: EnableStage;
@@ -185,6 +191,7 @@ export function EnableView(props: EnableViewProps) {
     name,
     description,
     icon,
+    hue,
     back,
     step,
     readiness,
@@ -194,6 +201,8 @@ export function EnableView(props: EnableViewProps) {
     repository,
     facts,
     wontDoWithoutAsking,
+    preview,
+    options,
     worksWellWith,
     stage,
     blocker,
@@ -215,7 +224,7 @@ export function EnableView(props: EnableViewProps) {
   const header = (
     <>
       <DetailPageHeader
-        leading={<LogoTile name={name} icon={icon} />}
+        leading={<LogoTile name={name} icon={icon} hue={hue} />}
         title={stage === "on" ? done.title : `Set up ${name}`}
         meta={[description]}
       />
@@ -253,6 +262,7 @@ export function EnableView(props: EnableViewProps) {
   return (
     <DetailPage back={back}>
       {header}
+      {preview ? <div className="mt-6">{preview}</div> : null}
       <div
         ref={(node) => {
           sections.current.connect = node;
@@ -322,6 +332,7 @@ export function EnableView(props: EnableViewProps) {
               . Not needed.
             </p>
           ) : null}
+          {options}
         </DetailSection>
         {wontDoWithoutAsking.length > 0 ? (
           <DetailSection

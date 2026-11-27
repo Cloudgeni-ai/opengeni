@@ -8,7 +8,6 @@
  * ordinary chat with the agent.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { parseAppPackage } from "@opengeni/contracts";
 import type {
   Agent,
   AgentSummary,
@@ -25,6 +24,16 @@ import {
   agentTriggerRunsAs,
   agentTriggerSaveError,
 } from "@opengeni/react/app/components/agents/agent-trigger-dialog";
+import {
+  chosenAppPackage,
+  type ChosenAppPackage,
+} from "@opengeni/react/app/components/artifacts/app-package";
+import { AppTemplatePreview } from "@opengeni/react/app/components/artifacts/app-template-preview";
+import {
+  addedReadyMadeApp,
+  readyMadeAppTileSeed,
+} from "@opengeni/react/app/components/artifacts/available-apps";
+import { ArtifactTypeIcon } from "@opengeni/react/app/components/artifacts/artifact-page-chrome";
 import { t } from "@opengeni/react/app/lib/console-text";
 import { githubConnectedOf } from "@opengeni/react/app/lib/github-connect";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
@@ -32,8 +41,15 @@ import { useNavigate } from "@opengeni/react/app/lib/navigation";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { installReadyMadeApp } from "@opengeni/react/app/lib/ready-made-apps";
 import { toast } from "@opengeni/react/app/lib/toast";
+import {
+  invalidateAppPackageStatus,
+  useAppPackageStatus,
+} from "@opengeni/react/app/lib/use-app-package-status";
+import { invalidateArtifactCatalog } from "@opengeni/react/app/lib/use-artifact-catalog";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import type { DetailBackLink } from "@opengeni/react/ui/detail-page";
+import { logoTileHue } from "@opengeni/react/ui/logo-tile";
+import { CheckboxField } from "@opengeni/react/ui/field";
 
 import { agentForSetup, catalogConnectHref, setupTriggerTask } from "../get-started/guided-setups";
 import {
@@ -567,6 +583,7 @@ function AppEnable({
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [appId, setAppId] = useState<string | null>(null);
+  const [demoData, setDemoData] = useState(true);
   useEffect(() => {
     let live = true;
     client.listAppTemplates(workspaceId).then(
@@ -581,6 +598,20 @@ function AppEnable({
       live = false;
     };
   }, [client, revision, subject.templateKey, workspaceId]);
+  // The package as the install dialog reads it: its page for the preview,
+  // whether it has demo data, its Skills and automations.
+  const chosen = useMemo<ChosenAppPackage | null>(() => {
+    try {
+      return template ? chosenAppPackage(template.package) : null;
+    } catch {
+      return null;
+    }
+  }, [template]);
+  // Already added here (opened again from Get started or the sidebar): it
+  // opens that app instead of adding another.
+  const packages = useAppPackageStatus(client, workspaceId);
+  const added = template ? addedReadyMadeApp(template, packages.apps.values()) : null;
+  const shownAppId = appId ?? added?.appId ?? null;
   const pagePath =
     returnPath ??
     enableHref(workspaceId, { kind: "app", templateKey: subject.templateKey }, "connect");
@@ -600,7 +631,7 @@ function AppEnable({
           readiness,
           canAdd,
           canEdit: true,
-          added: false,
+          added: shownAppId !== null,
           triggerFound: true,
           subjectName: name,
         });
@@ -610,10 +641,17 @@ function AppEnable({
       params: { workspaceId, appId: id, _splat: "" },
     });
   const turnOn = async () => {
-    if (!template || busy || blocker) return;
+    if (!template || busy || blocker || shownAppId) return;
     setBusy(true);
     try {
-      const installed = await installReadyMadeApp(client, workspaceId, template);
+      const installed = await installReadyMadeApp(
+        client,
+        workspaceId,
+        template,
+        chosen?.hasDemoData ? demoData : undefined,
+      );
+      invalidateArtifactCatalog(client, workspaceId);
+      invalidateAppPackageStatus();
       if (installed.notInstalled.length > 0) {
         toast.warning(`${template.name} was added without some parts`, {
           description: installed.notInstalled.map((problem) => problem.reason).join(" "),
@@ -626,38 +664,52 @@ function AppEnable({
       setBusy(false);
     }
   };
-  // What installing adds, as the Apps page's install dialog lists it.
+  // What installing adds.
   const facts = useMemo<EnableFact[]>(() => {
     const list: EnableFact[] = [{ label: "App", description: `Adds ${name} to Apps.` }];
-    let pkg: ReturnType<typeof parseAppPackage>["package"] | null = null;
-    try {
-      pkg = template ? parseAppPackage(template.package).package : null;
-    } catch {
-      pkg = null;
-    }
-    for (const skill of pkg?.skills ?? []) {
+    for (const skill of chosen?.skills ?? []) {
       list.push({ label: `Skill: ${skill.name}`, description: skill.description });
     }
-    for (const automation of pkg?.automations ?? []) {
+    for (const automation of chosen?.automations ?? []) {
       list.push({ label: `Automation: ${automation.name}`, description: "Added switched off." });
     }
     return list;
-  }, [name, template]);
+  }, [chosen, name]);
   const firstJob = template?.setup?.firstJob ?? null;
   return (
     <EnableView
       name={title ?? name}
       description={description ?? template?.description ?? ""}
-      icon={icon}
+      // The Apps list's tile for it: the app icon in its own hue.
+      icon={icon ?? <ArtifactTypeIcon kind="site" />}
+      hue={
+        icon
+          ? undefined
+          : logoTileHue(template ? readyMadeAppTileSeed(template) : subject.templateKey)
+      }
       back={back}
       step={step}
       readiness={readiness}
-      loading={template === undefined && failed === null}
+      // Until the app status is read it can't tell Turn on from Open app.
+      loading={(template === undefined || !packages.loaded) && failed === null}
       loadError={failed}
       onRetry={() => setRevision((value) => value + 1)}
       facts={facts}
       wontDoWithoutAsking={template?.setup?.wontDoWithoutAsking ?? []}
-      stage={appId ? "on" : "turn-on"}
+      preview={
+        template && chosen ? <AppTemplatePreview template={template} html={chosen.html} /> : null
+      }
+      options={
+        chosen?.hasDemoData ? (
+          // Taken when Turn on adds it, so a checkbox rather than a switch.
+          <CheckboxField
+            label="Include demo data"
+            checked={demoData}
+            onCheckedChange={setDemoData}
+          />
+        ) : null
+      }
+      stage={shownAppId ? "on" : "turn-on"}
       blocker={failed ?? blocker}
       busy={busy}
       asked={asked}
@@ -666,8 +718,9 @@ function AppEnable({
       onTurnOn={() => void turnOn()}
       done={{
         title: `${name} is ready.`,
-        open: { label: "Open app", onClick: () => appId && openApp(appId) },
-        firstJob: firstJob && appId ? { text: firstJob, onStart: () => openApp(appId) } : null,
+        open: { label: "Open app", onClick: () => shownAppId && openApp(shownAppId) },
+        firstJob:
+          firstJob && shownAppId ? { text: firstJob, onStart: () => openApp(shownAppId) } : null,
       }}
     />
   );

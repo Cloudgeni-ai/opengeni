@@ -34,18 +34,30 @@ export type EnableSubject =
     }
   | { kind: "app"; templateKey: string };
 
-export type EnableSearch = { agent?: string; app?: string; step?: EnableStep };
+export type EnableSearch = {
+  agent?: string;
+  app?: string;
+  step?: EnableStep;
+  /** The chat Apps was opened from, kept so Back still offers the way to it. */
+  fromSession?: string;
+};
 
 const KEY = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 /** The Enable route's search: one subject and the step to open on. */
 export function parseEnableSearch(search: Record<string, unknown>): EnableSearch {
   const step = enableStepOf(search.step);
   const agent = typeof search.agent === "string" && KEY.test(search.agent) ? search.agent : null;
   const app = typeof search.app === "string" && KEY.test(search.app) ? search.app : null;
+  const fromSession =
+    app && typeof search.fromSession === "string" && SESSION_ID.test(search.fromSession)
+      ? search.fromSession
+      : null;
   return {
     ...(agent ? { agent } : app ? { app } : {}),
     ...(step ? { step } : {}),
+    ...(!agent && fromSession ? { fromSession } : {}),
   };
 }
 
@@ -60,9 +72,11 @@ export function enableHref(
   workspaceId: string,
   subject: Pick<EnableSubject, "kind" | "templateKey">,
   step?: EnableStep,
+  options?: { fromSession?: string | undefined },
 ): string {
   const params = new URLSearchParams({ [subject.kind]: subject.templateKey });
   if (step) params.set("step", step);
+  if (options?.fromSession) params.set("fromSession", options.fromSession);
   return `/workspaces/${encodeURIComponent(workspaceId)}/enable?${params.toString()}`;
 }
 

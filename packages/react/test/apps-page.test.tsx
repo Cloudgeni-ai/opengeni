@@ -26,6 +26,12 @@ describe("an installed app on the Apps page", () => {
     expect(appPackageExtras(undefined, actions)).toBeUndefined();
   });
 
+  test("its tile seeds from its package, so it keeps the ready-made app's hue", () => {
+    const entry = status();
+    expect(appPackageExtras(entry, actions)?.seed).toBe(entry.packageId!);
+    expect(appPackageExtras(status({ packageId: null }), actions)?.seed).toBeUndefined();
+  });
+
   test("shows its version, and nothing else when unchanged and current", () => {
     const html = badges(status());
     expect(html).toContain("v1.0.0");

@@ -2,7 +2,13 @@ import { useMemo, useState, type ReactNode } from "react";
 import type { AgentTemplate, SetupReadiness } from "@opengeni/sdk";
 import { OpenGeniProvider } from "@opengeni/react";
 import { AppContext } from "@opengeni/react/app/app-context";
+import { AvailableApps } from "@opengeni/react/app/components/artifacts/available-apps";
 import { Button } from "@opengeni/react/ui/button";
+import decisionLog from "../../../../../../packages/core/src/app-templates/decision-log.app.json";
+import feedbackBoard from "../../../../../../packages/core/src/app-templates/feedback-board.app.json";
+import incidentLog from "../../../../../../packages/core/src/app-templates/incident-log.app.json";
+import issueTracker from "../../../../../../packages/core/src/app-templates/issue-tracker.app.json";
+import workSummary from "../../../../../../packages/core/src/app-templates/work-summary.app.json";
 import { EnablePage } from "../../../components/enable/enable-page";
 import { GetStartedPage } from "../../../components/get-started/get-started-page";
 import { OnboardingUseCaseStep } from "../../../components/onboarding/use-case-step";
@@ -16,15 +22,29 @@ import { KitCanvas, KitSection } from "../kit";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 
-type State = "showcase" | "enable-nothing" | "enable-ready" | "enable-ask-admin" | "onboarding";
+type State =
+  | "showcase"
+  | "enable-nothing"
+  | "enable-ready"
+  | "enable-ask-admin"
+  | "enable-app"
+  | "enable-app-added"
+  | "apps-available"
+  | "onboarding";
 
 const STATES: { value: State; label: string }[] = [
   { value: "showcase", label: "Get started" },
   { value: "enable-nothing", label: "Enable: nothing connected" },
   { value: "enable-ready", label: "Enable: ready" },
   { value: "enable-ask-admin", label: "Enable: ask an admin" },
+  { value: "enable-app", label: "Enable: ready-made app" },
+  { value: "enable-app-added", label: "Enable: app already added" },
+  { value: "apps-available", label: "Apps: available" },
   { value: "onboarding", label: "First run" },
 ];
+
+// The real ready-made apps, as listAppTemplates returns them.
+const APP_TEMPLATES = [workSummary, issueTracker, feedbackBoard, incidentLog, decisionLog];
 
 const SETUP_NONE = {
   connections: [],
@@ -151,6 +171,25 @@ function readiness(connected: boolean, canConnect = true): SetupReadiness {
 function fixtureClient(state: State) {
   const client = {
     listAgentTemplates: async () => TEMPLATES,
+    listAppTemplates: async () => APP_TEMPLATES,
+    // Work summary is already added in "enable-app-added".
+    listAppPackageStatus: async () =>
+      state === "enable-app-added"
+        ? [
+            {
+              appId: "kit-work-summary",
+              title: workSummary.name,
+              packageId: workSummary.package.packageId,
+              packageVersion: workSummary.package.packageVersion,
+              archived: false,
+              customized: false,
+              skills: [],
+              automations: [],
+              previous: null,
+              update: null,
+            },
+          ]
+        : [],
     getAgentTemplateReadiness: async () =>
       readiness(state === "enable-ready", state !== "enable-ask-admin"),
     requestSetupConnection: async () => ({ status: "requested", adminsAsked: 2 }),
@@ -174,7 +213,9 @@ function Provider({ state, children }: { state: State; children: ReactNode }) {
       githubStatus: { status: "bound" },
       accessContext: {
         subjectId: "kit-person",
-        workspaceGrants: [{ workspaceId: WORKSPACE_ID, permissions: ["sessions:create"] }],
+        workspaceGrants: [
+          { workspaceId: WORKSPACE_ID, permissions: ["sessions:create", "artifacts:publish"] },
+        ],
         accountGrants: [],
       },
       workspaces: [{ id: WORKSPACE_ID, name: "Platform", kind: "shared", settings: {} }],
@@ -214,6 +255,20 @@ export default function EnableSection() {
               <GetStartedPage workspaceId={WORKSPACE_ID} />
             ) : state === "onboarding" ? (
               <OnboardingUseCaseStep onChoose={() => undefined} />
+            ) : state === "apps-available" ? (
+              <div className="p-6">
+                <AvailableApps
+                  workspaceId={WORKSPACE_ID}
+                  installed={[]}
+                  onChoose={() => undefined}
+                />
+              </div>
+            ) : state === "enable-app" || state === "enable-app-added" ? (
+              <EnablePage
+                workspaceId={WORKSPACE_ID}
+                subject={{ kind: "app", templateKey: "work-summary" }}
+                back={{ label: "Apps", onClick: () => undefined }}
+              />
             ) : (
               <EnablePage
                 workspaceId={WORKSPACE_ID}

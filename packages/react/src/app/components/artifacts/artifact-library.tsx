@@ -296,8 +296,12 @@ function opensInViewer(item: ArtifactCatalogItem) {
   return item.kind === "image" || item.kind === "file";
 }
 
-/** What a page adds to one artifact: badges beside it and entries in its ⋯ menu. */
-export type ArtifactItemExtras = { badges?: ReactNode; menu?: ReactNode };
+/**
+ * What a page adds to one artifact: badges beside it, entries in its ⋯ menu,
+ * and the seed of its tile's hue (an app from a ready-made package keeps
+ * that package's hue).
+ */
+export type ArtifactItemExtras = { badges?: ReactNode; menu?: ReactNode; seed?: string };
 
 type ArtifactOpenOptions = {
   workspaceId: string;
@@ -554,7 +558,7 @@ export function ArtifactRow({
           item.kind === "image" ? (
             <ImageTile workspaceId={workspaceId} item={item} />
           ) : (
-            <ArtifactKindTile kind={item.kind} seed={item.id} />
+            <ArtifactKindTile kind={item.kind} seed={extras?.seed ?? item.id} />
           )
         }
         title={item.title}

@@ -37,7 +37,7 @@ function fakeClient(initial: SidebarLayoutResponse) {
 }
 
 describe("persona first run", () => {
-  test("an engineer gets an Engineering group: PR reviews, two agents and Connect", () => {
+  test("an engineer gets an Engineering group: PR reviews, two agents, Work summary and Connect", () => {
     const group = personaSidebarGroup("cloud", { origin: "https://app.example", workspaceId: "w" });
     expect(group).toMatchObject({ type: "group", label: "Engineering" });
     const items = group && group.type === "group" ? (group.items ?? []) : [];
@@ -45,12 +45,18 @@ describe("persona first run", () => {
       "https://app.example/workspaces/w/get-started?setup=pr-reviews",
       "https://app.example/workspaces/w/agents/ready-made/bug-fixer",
       "https://app.example/workspaces/w/agents/ready-made/dependency-updater",
+      "https://app.example/workspaces/w/enable?app=work-summary",
       "https://app.example/workspaces/w/plugins",
     ]);
     expect(items.at(-1)).toMatchObject({ label: "Connect GitHub, Slack and Linear" });
     const everyday = personaSidebarGroup("everyday", { origin: "https://a", workspaceId: "w" });
     expect(everyday).toMatchObject({ label: "Your work" });
     const everydayItems = everyday && everyday.type === "group" ? (everyday.items ?? []) : [];
+    expect(everydayItems.map((item) => item.label)).toEqual([
+      "Work summary",
+      "Feedback board",
+      "Connect Slack, Google Drive and more",
+    ]);
     expect(everydayItems.at(-1)).toMatchObject({ label: "Connect Slack, Google Drive and more" });
     expect(personaSidebarGroup("embed", { origin: "https://a", workspaceId: "w" })).toBeNull();
     expect(

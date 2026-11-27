@@ -56,9 +56,10 @@ const { AgentsPage, BOT_TEMPLATES_MOVED, SLACK_AGENTS_MOVED, duplicateNamesText 
 const { AgentPage, AgentSettingsPage } = await import("../src/app/components/agents/agent-page");
 const { ReadyMadeAgentPreview } =
   await import("../src/app/components/agents/ready-made-agent-preview");
-const { AvailableApps, availableTemplates } =
+const { AvailableApps, addedReadyMadeApp, availableTemplates } =
   await import("../src/app/components/artifacts/available-apps");
 const { installReadyMadeApp } = await import("../src/app/lib/ready-made-apps");
+const { logoTileHue } = await import("../src/ui/logo-tile");
 const {
   NewAgentPage,
   EditAgentPage,
@@ -2408,6 +2409,15 @@ test("a newer ready-made version is offered again beside a customized copy, whic
   expect(availableTemplates(template, [app(true, version)])).toEqual([]);
   expect(availableTemplates(template, [app(false, "0.0.1")])).toEqual([]);
   expect(availableTemplates(template, [app(true, "0.0.1"), app(false, "0.0.1")])).toEqual([]);
+  // Enable follows the same rule: a customized older copy doesn't count as
+  // added, so the newer version can still be turned on; any other copy does.
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(true, "0.0.1")])).toBeNull();
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(true, version)])).not.toBeNull();
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(false, "0.0.1")])).not.toBeNull();
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [])).toBeNull();
+  // Open app opens the copy that counts, not a customized older one listed first.
+  const current = { ...(app(false, version) as object), appId: "current" } as never;
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(true, "0.0.1"), current])).toBe(current);
 });
 
 test("Installing a ready-made app names its Skills and automations, then opens it", async () => {
@@ -2445,6 +2455,35 @@ test("Installing a ready-made app names its Skills and automations, then opens i
   ]);
   // The app opens on its own page.
   expect(path.startsWith(`/workspaces/${WORKSPACE_ID}/apps/app-9`)).toBe(true);
+});
+
+test("in the Opengeni app, choosing a ready-made app opens its Enable page, the one place to add it", async () => {
+  const installer = appInstaller([{ id: "app-9", status: "active", replayed: false }]);
+  const client = Object.assign(fakeAgentsClient([]), installer, {
+    async listAppTemplates() {
+      return [APP_TEMPLATE];
+    },
+  });
+  const chosen: string[] = [];
+  const container = await render(
+    <AgentsTestHost context={canCreate(client)}>
+      <AvailableApps
+        workspaceId={WORKSPACE_ID}
+        installed={[]}
+        onChoose={(templateKey) => chosen.push(templateKey)}
+      />
+    </AgentsTestHost>,
+  );
+  const row = container.querySelector<HTMLButtonElement>("[data-ready-made-app='issue-tracker']")!;
+  // Each ready-made app has its own hue, from its package (the same once added).
+  expect(
+    row.querySelector<HTMLElement>("[data-hued]")?.style.getPropertyValue("--og-tile-hue"),
+  ).toBe(String(logoTileHue(APP_PACKAGE_ID)));
+  await act(async () => row.click());
+  await flush();
+  expect(chosen).toEqual(["issue-tracker"]);
+  expect(document.querySelector("[role='dialog']")).toBeNull();
+  expect(installer.requests).toEqual([]);
 });
 
 async function chooseOutcome(dialog: HTMLElement, title: string) {
