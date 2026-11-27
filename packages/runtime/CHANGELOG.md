@@ -1,5 +1,45 @@
 # @opengeni/runtime
 
+## 6.42.0
+
+### Patch Changes
+
+- 52c2fea: A sandbox whose workspace was already saved, but whose box was gone before the drain could stop it, now finishes draining on the next reaper tick instead of failing every 30 seconds and staying fenced. Leases already stuck this way recover on their own. Warm time is charged up to an earlier attempt's recorded stop cutoff, and not past the last meter tick when there is none. The drain-failure warning names the thrown error's class, and `opengeni_sandbox_provider_gone_after_save_total` counts these drains. A sandbox refused by a running-box or daily limit answers 429 with `Retry-After` so retrying clients back off: a young organization's spent first-day box time names when it is a day old, and the turnless first-day bound is a non-retryable 429.
+
+  Model calls to a customer's own OpenAI-compatible endpoint whose physical request cannot reach it (connection refused or reset, name not found, TLS, socket or timeout) or that answer a client error other than 400, 404, 405, 413 or 422 now count as `customer_provider` failures instead of platform failures. Our own dispatch checkpoint and resolver failures stay platform.
+
+- dda9e3b: A Modal workspace that holds hardlinked files (for example a package manager's cache hardlinked into `node_modules`) now saves: the streamed Modal capture stores files that share an inode as separate regular files, as the other backends already do, instead of hardlink members that the archive check refuses on every retry. Failed workspace saves and restores now also log a closed classification: the sandbox error name, its integrity code, the archive check's reason class (`archiveReason`) and, when the archive command in the box fails, its exit code. Member paths and command output are never logged.
+- bf91461: The stock sandbox and desktop images now also include `reportlab` and `pypdf`, so agents can make and edit PDF files as well as Word, Excel and PowerPoint files without installing anything. Each image build now writes and reads back a real .docx, .xlsx, .pptx and .pdf and fails if any of them can't be made. The bundled documents Skill lists `pypdf` and tells the agent to install a missing package and continue on an import or missing dependency error.
+- Updated dependencies [52c2fea]
+- Updated dependencies [9d0896d]
+- Updated dependencies [bf87544]
+- Updated dependencies [dda9e3b]
+- Updated dependencies [cd461f0]
+- Updated dependencies [f88a948]
+- Updated dependencies [27ba8d2]
+- Updated dependencies [42dc05c]
+- Updated dependencies [826dcce]
+- Updated dependencies [b731e71]
+- Updated dependencies [3ace70b]
+- Updated dependencies [ae08e32]
+- Updated dependencies [b7064b0]
+- Updated dependencies [ebca2a8]
+  - @opengeni/observability@6.42.0
+  - @opengeni/config@6.42.0
+  - @opengeni/contracts@6.42.0
+  - @opengeni/sdk@6.42.0
+  - @opengeni/tool-gateway@6.42.0
+  - @opengeni/capabilities@6.42.0
+  - @opengeni/codemode@6.42.0
+  - @opengeni/codex@6.42.0
+  - @opengeni/decisions@6.42.0
+  - @opengeni/interaction@6.42.0
+  - @opengeni/vaults@6.42.0
+  - @opengeni/jev@6.42.0
+  - @opengeni/agent-proto@6.42.0
+  - @opengeni/network@6.42.0
+  - @opengeni/xai-subscription@6.42.0
+
 ## 6.41.0
 
 ### Patch Changes

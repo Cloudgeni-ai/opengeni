@@ -1,5 +1,81 @@
 # @opengeni/react
 
+## 6.42.0
+
+### Minor Changes
+
+- 826dcce: Agents are job cards. The Agents list shows one status per agent (Working now, Ready, Needs PostHog, On call), what starts it and its last run, and one Ready-made list: opening a ready-made agent previews what it does, when it works and what it needs, and only Add agent adds it. An agent's page says when it works in plain sentences, with whose access each trigger runs as and when it last ran, and keeps its setup one click away in Settings. Add trigger starts from a few outcomes (an issue gets a label, a pull request opens, on a schedule, a mention), with other events one link away, a schedule can open a repository, and Automations no longer repeats the templates a ready-made agent already does. Choosing an outcome shows only what it needs; the note and chat choice stay on Other events and the full form.
+- d345405: A resolved approval notice no longer says "You responded to this approval." when no decision was recorded for it, for example when the turn moved on, was cancelled, replaced by a Steer or failed before it was answered. It now reads "Not answered." with no check mark, and reads as answered if an answer is recorded later. Answers match the question they were given for: its approval id, its turn and its MCP question round, the same way the server keys them (older decisions without a turn or round match the latest open question with that id). A question asked again while its first notice still waits (a worker restart) takes its answer on both notices, and answering an older notice no longer ends a newer one that still asks more. Older requests without an approvals list still read as answered once a decision for their turn, and for their approval id when they carry one, is recorded.
+
+  New export from `@opengeni/react/timeline-model`: `noticeApprovalAnswered(item)`, true for a resolved approval notice with a recorded answer.
+
+- e66f170: Inline chat previews (`opengeni-html`) now keep the "Preparing preview…" surface over the frame until its content can paint, instead of showing an empty white box while render-blocking stylesheets (such as Google Fonts) or the HTML frame host load. If the frame host never answers, the preview shows "Couldn’t load this preview." with Retry, and the loading surface never stays longer than 15 seconds. The preview reports its height before the visualization helpers' CDN scripts, so a slow CDN no longer holds it at its initial height.
+
+  New optional props: `ArtifactSandbox` `loadingUntilPainted`, and `PublishedHtmlArtifactFrame` `onPainted` and `onFailed`.
+
+- 42dc05c: People can put the rail's built-in entries in their own order. "New session", Inbox, Agents, Apps, the Setup group and the pages inside it can be dragged to another place, onto Setup's name to move a page into it, or out of it; Alt+ArrowUp and Alt+ArrowDown move the focused entry one place. The order is saved in the person's own layout as two new options, `navOrder` (the top, with `setup` for the group and `new_session`) and `navSetup` (inside the group). Entries an order doesn't name keep their place, and Reset brings back the default. `sidebar_layout_update` takes the same options.
+
+  `@opengeni/react` exports `RailNewSessionLink`, and a surface that sets the new `primaryNavPlacesNewSession` slot places "New session" among its own entries.
+
+  Insights usage broken down by agent shows each agent's own avatar beside its name, as the Agents page does, and its initials only when it has none.
+
+- 826dcce: Sharper default look: higher-contrast neutral tokens in light and dark (light text `#171717` / `#525252` / `#6b6b6b`, dark `#f5f5f5` / `#a6a6a6` / `#8c8c8c`), solid near-black dark surfaces, and a solid primary button (`#171717` in light, `#f2f2f2` in dark). Decorative gradients and glows are gone; `.og-rail-glow` and `.og-page-glow` now paint solid surfaces and the `--og-color-glow-*` tokens are kept only for compatibility. Row titles use weight 600, headings `-0.012em` tracking, and catalog lists sit on one bordered card.
+
+  New optional props: `RowList` `card`, `LogoTile` `hue` (a tinted icon tile), plus the `logoTileHue(seed)` helper.
+
+- d8d2b46: Apps in the sidebar follow one rule: a pinned app sits in the person's own sidebar links, never in both places.
+
+  - With apps in a section of their own, an app row's Pin adds the app to the person's sidebar (as Customize does), and the Apps section leaves out apps that are already there. Removing the link (now "Unpin" on an app link) brings it back to the Apps section. Only that person's sidebar changes; workspace defaults and other people's sidebars stay as they were.
+  - An app link in the sidebar has Archive in its menu. This is the same personal archive as the app's row in the Sessions list, with Undo.
+  - An app a person archived from their sidebar no longer shows among their sidebar links or live lists (`readSidebarApps` leaves it out for them). The saved link stays, so restoring the app brings it back in place.
+
+  New export from `@opengeni/react`: `withoutSidebarApps(nodes, inSidebar)`. The Chrome setup card now shows the Google Chrome mark.
+
+### Patch Changes
+
+- 81c930e: A turn claimed back from an approval or question pause is marked `resumedFromPause: true` on `SessionTurnForExecution`. Its execution generation still advances, but nothing was interrupted, so the worker no longer tells the model an earlier execution stopped mid-step (which made it repeat completed reads to check state). Re-claims after a real interruption keep that note.
+
+  A Google Drive connect started from a chat's connection card now finishes in that chat when it returns: the connection is turned on and the chat's card asks to allow the personal account, as with other OAuth returns. Before, the chat ignored the Drive return.
+
+- d8d2b46: The Chrome setup card no longer flashes "Add the extension to Chrome" before it knows whether Chrome is linked. Until the first check finishes it shows a quiet "Checking for Chrome…" with no action, and a card shown again starts from the last known Chrome and computer state for that person and workspace while it refreshes. A failed first check still shows the step. The completed line reads "Connected.", naming the profile only when that adds something (more than one linked Chrome, or a profile with its own name), for example "Connected (Work).".
+
+  A Chrome card that sees Chrome linked now clears its chat's wait on the person, so a finished card no longer marks the chat, or the sub-session bar above it, as needing them. `POST …/capability-continuations` for `api:connected-machine` withdraws that chat's Connected Machine card notice only when the chat's latest machine request is the Chrome one, the chat is still waiting, the caller is the person who was asked, and they have a linked Chrome; it still sends nothing to the agent. `SessionCapabilityFrame` takes a new optional `pending` prop that hides the action while a card is still checking.
+
+- 9d0896d: Email sign-in can now require the same Turnstile challenge as email sign-up, to stop scripted password guessing. Turn it on with `OPENGENI_SIGN_IN_CHALLENGE_ENABLED=true` (default off; needs the signup challenge on). The client config then reports `signInChallengeRequired`, the Sign in form shows the widget and sends its token, and refusals use sign-up's error codes.
+
+  Failed rows in the missing quiescence-receipt wake repair now log their error class and PostgreSQL SQLSTATE (no IDs or messages), so the worker's repair failures can be diagnosed.
+
+- bf87544: Support Sign in with Apple as an optional managed sign-in method, including native browser sign-in and personal Security settings. Sign Apple client secrets automatically and expose a token revocation helper for account deletion flows.
+- f1d319d: Show authored Skill titles in the chat timeline and omit inline provider reasoning previews outside English locales. The original reasoning remains available in the expanded step.
+- 962c6d7: A chat or sub-session paused on a browser or computer hand-off, such as a passkey or a sign-in, now shows what it needs above the composer, with Done and Cancel request. Before, it said "needs you" but showed nothing to act on.
+- 31e2564: Let hosted clients omit purchase, upgrade and payment prompts while preserving chat and model recovery that does not require a purchase.
+- 76c072c: Use neutral funding and credit-refusal wording for iOS, without changing model availability or billing.
+- 3ace70b: Removing a repository from a chat with many sub-sessions answers quickly: the sub-sessions that hold the repository are changed a few at a time, and the rest get their removal record in batches. The Remove button in the confirmation works right away instead of waiting for the unsaved-changes check.
+
+  The settings rail has a fixed, collapsed Advanced section at the end for everyone, holding the rarely used pages (Agent learning, API keys, Developer, Shared, Organization identity, Security & data). It replaces the personal More: pages someone had moved under More show at the top again unless they are now under Advanced. The sidebar layout option `settingsMore` is still accepted and returned for older clients, but ignored.
+
+- 1363da9: `@opengeni/react/session` exports `newConversationErrorMessage`, so a host that creates conversations itself can explain a refused first message the way the stock new chat does.
+- df9d061: An approval or question answer can no longer stop a session with "Open suffix resume event does not match an interruption".
+
+  - Only an answer recorded for the paused turn resumes it. Previously, a message sent while an earlier turn waited for approval could be resumed by that earlier turn's decision once it paused for its own approval.
+  - The scheduler and the resume claim now share one rule for this.
+  - A resume whose answer no longer matches an open call applies the pause's other decisions and keeps waiting for the rest, instead of failing the turn.
+  - A call that was still waiting for approval when its turn ended (for example because a new message replaced the pause) is now recorded as never run, instead of as an unknown outcome.
+  - The Connected Machine checkpoint note now shows only for sandbox failures.
+
+- Updated dependencies [9d0896d]
+- Updated dependencies [bf87544]
+- Updated dependencies [cd461f0]
+- Updated dependencies [27ba8d2]
+- Updated dependencies [42dc05c]
+- Updated dependencies [826dcce]
+- Updated dependencies [3ace70b]
+- Updated dependencies [b7064b0]
+- Updated dependencies [ebca2a8]
+  - @opengeni/contracts@6.42.0
+  - @opengeni/sdk@6.42.0
+  - @opengeni/connect@6.42.0
+
 ## 6.41.0
 
 ### Minor Changes

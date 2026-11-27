@@ -1,5 +1,32 @@
 # @opengeni/contracts
 
+## 6.42.0
+
+### Minor Changes
+
+- bf87544: Support Sign in with Apple as an optional managed sign-in method, including native browser sign-in and personal Security settings. Sign Apple client secrets automatically and expose a token revocation helper for account deletion flows.
+- cd461f0: Add versioned AI provider disclosure and consent for native app requests, with authenticated self-service API and SDK methods to review, grant and withdraw permission.
+- 42dc05c: People can put the rail's built-in entries in their own order. "New session", Inbox, Agents, Apps, the Setup group and the pages inside it can be dragged to another place, onto Setup's name to move a page into it, or out of it; Alt+ArrowUp and Alt+ArrowDown move the focused entry one place. The order is saved in the person's own layout as two new options, `navOrder` (the top, with `setup` for the group and `new_session`) and `navSetup` (inside the group). Entries an order doesn't name keep their place, and Reset brings back the default. `sidebar_layout_update` takes the same options.
+
+  `@opengeni/react` exports `RailNewSessionLink`, and a surface that sets the new `primaryNavPlacesNewSession` slot places "New session" among its own entries.
+
+  Insights usage broken down by agent shows each agent's own avatar beside its name, as the Agents page does, and its initials only when it has none.
+
+- 826dcce: Ready-made agents and apps can say what they need: `setup` lists their connections (required or optional, with why), whether they need a repository, one agent they work well with, what they won't do without asking (each line backed by one of its Can use rules: `{ text, permission, connector, tools }`), a first message and a first job. `getAgentTemplateReadiness` (optionally for one suggested `trigger`), `getAgentReadiness` and `listAgentReadiness` (every visible agent in one read) report, for the caller, which connections are already on, which they may connect (the Connect pages' rule, `catalogItemConnectable`) and, for GitHub, how (`connectVia`), and what keeps it off in words. A trigger on GitHub events needs the workspace's GitHub App; one on a schedule also accepts the caller's own GitHub. A ready-made agent's triggers can't be turned on until its required connections are (`agent_setup_incomplete`), on every path that creates or turns one on. No ready-made agent requires another agent any more: hand-offs to PR reviewer or Bug fixer happen only when that agent exists.
+- b7064b0: Ask an admin on the Enable page now sends a real request: `client.requestSetupConnection(workspaceId, { provider, name, returnPath })` puts a "Connect X" notice in the inbox of the workspace's admins with a link back to the same Enable step, and returns `{ status: "requested", adminsAsked }`, or `{ status: "already_asked" }` while that request is still open. When the server can't send requests yet it returns `{ status: "unavailable" }` and the page falls back to copying the link.
+- ebca2a8: Add the self-service account deletion API, its SDK methods, and the managed membership and erasure lifecycle behind it.
+
+### Patch Changes
+
+- 9d0896d: Email sign-in can now require the same Turnstile challenge as email sign-up, to stop scripted password guessing. Turn it on with `OPENGENI_SIGN_IN_CHALLENGE_ENABLED=true` (default off; needs the signup challenge on). The client config then reports `signInChallengeRequired`, the Sign in form shows the widget and sends its token, and refusals use sign-up's error codes.
+
+  Failed rows in the missing quiescence-receipt wake repair now log their error class and PostgreSQL SQLSTATE (no IDs or messages), so the worker's repair failures can be diagnosed.
+
+- 27ba8d2: Record a failed automation run when dispatch exhausts its retries, and notify its owner, if any, once without pausing the automation.
+- 3ace70b: Removing a repository from a chat with many sub-sessions answers quickly: the sub-sessions that hold the repository are changed a few at a time, and the rest get their removal record in batches. The Remove button in the confirmation works right away instead of waiting for the unsaved-changes check.
+
+  The settings rail has a fixed, collapsed Advanced section at the end for everyone, holding the rarely used pages (Agent learning, API keys, Developer, Shared, Organization identity, Security & data). It replaces the personal More: pages someone had moved under More show at the top again unless they are now under Advanced. The sidebar layout option `settingsMore` is still accepted and returned for older clients, but ignored.
+
 ## 6.41.0
 
 ### Minor Changes

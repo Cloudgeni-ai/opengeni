@@ -1,5 +1,97 @@
 # @opengeni/api-router
 
+## 6.42.0
+
+### Minor Changes
+
+- bf87544: Support Sign in with Apple as an optional managed sign-in method, including native browser sign-in and personal Security settings. Sign Apple client secrets automatically and expose a token revocation helper for account deletion flows.
+- cd461f0: Add versioned AI provider disclosure and consent for native app requests, with authenticated self-service API and SDK methods to review, grant and withdraw permission.
+
+### Patch Changes
+
+- 531532b: The compute agent gateway now renews its open sandbox links in batches. Each tick it groups open sessions by workspace and renews up to 250 of them with a single locked statement, instead of one database transaction per sandbox every 5 seconds. Every claim gets the same answer as before (renewed, superseded, lost or revoked); a lease that is already longer is never shortened. A row another transaction holds is skipped and answered busy, which costs that session one renewal instead of making the batch wait, so overlapping batches never block or deadlock. If a batch fails, its claims are renewed one at a time, so one bad claim ends only its own session. At 2,000 open sandboxes a tick drops from 8,000 statements to 32. On staging, with about 2,100 open sandbox links, these renewals had become the largest write load on the database: about 420 transactions per second.
+
+  `@opengeni/db` exports `renewSandboxAgentLinks` and `SANDBOX_AGENT_LINK_RENEW_BATCH_MAX`. `ComputeAgentLinkStore` gains `renewMany`. `bun scripts/operator/bench-sandbox-link-renewal.ts [sandboxes]` compares the two forms.
+
+- 82de8aa: Billing credit emails name the organization in the subject and body, label deployments other than production with their app host, and list the top workspaces by spend (last hour for unusual spending, last day for low or exhausted credits) with links to each shared workspace in organization Billing. Personal workspaces are grouped without names.
+- d8d2b46: The Chrome setup card no longer flashes "Add the extension to Chrome" before it knows whether Chrome is linked. Until the first check finishes it shows a quiet "Checking for Chrome…" with no action, and a card shown again starts from the last known Chrome and computer state for that person and workspace while it refreshes. A failed first check still shows the step. The completed line reads "Connected.", naming the profile only when that adds something (more than one linked Chrome, or a profile with its own name), for example "Connected (Work).".
+
+  A Chrome card that sees Chrome linked now clears its chat's wait on the person, so a finished card no longer marks the chat, or the sub-session bar above it, as needing them. `POST …/capability-continuations` for `api:connected-machine` withdraws that chat's Connected Machine card notice only when the chat's latest machine request is the Chrome one, the chat is still waiting, the caller is the person who was asked, and they have a linked Chrome; it still sends nothing to the agent. `SessionCapabilityFrame` takes a new optional `pending` prop that hides the action while a card is still checking.
+
+- 52c2fea: A sandbox whose workspace was already saved, but whose box was gone before the drain could stop it, now finishes draining on the next reaper tick instead of failing every 30 seconds and staying fenced. Leases already stuck this way recover on their own. Warm time is charged up to an earlier attempt's recorded stop cutoff, and not past the last meter tick when there is none. The drain-failure warning names the thrown error's class, and `opengeni_sandbox_provider_gone_after_save_total` counts these drains. A sandbox refused by a running-box or daily limit answers 429 with `Retry-After` so retrying clients back off: a young organization's spent first-day box time names when it is a day old, and the turnless first-day bound is a non-retryable 429.
+
+  Model calls to a customer's own OpenAI-compatible endpoint whose physical request cannot reach it (connection refused or reset, name not found, TLS, socket or timeout) or that answer a client error other than 400, 404, 405, 413 or 422 now count as `customer_provider` failures instead of platform failures. Our own dispatch checkpoint and resolver failures stay platform.
+
+- 9d0896d: Email sign-in can now require the same Turnstile challenge as email sign-up, to stop scripted password guessing. Turn it on with `OPENGENI_SIGN_IN_CHALLENGE_ENABLED=true` (default off; needs the signup challenge on). The client config then reports `signInChallengeRequired`, the Sign in form shows the widget and sends its token, and refusals use sign-up's error codes.
+
+  Failed rows in the missing quiescence-receipt wake repair now log their error class and PostgreSQL SQLSTATE (no IDs or messages), so the worker's repair failures can be diagnosed.
+
+- 76c072c: Use neutral funding and credit-refusal wording for iOS, without changing model availability or billing.
+- 42dc05c: People can put the rail's built-in entries in their own order. "New session", Inbox, Agents, Apps, the Setup group and the pages inside it can be dragged to another place, onto Setup's name to move a page into it, or out of it; Alt+ArrowUp and Alt+ArrowDown move the focused entry one place. The order is saved in the person's own layout as two new options, `navOrder` (the top, with `setup` for the group and `new_session`) and `navSetup` (inside the group). Entries an order doesn't name keep their place, and Reset brings back the default. `sidebar_layout_update` takes the same options.
+
+  `@opengeni/react` exports `RailNewSessionLink`, and a surface that sets the new `primaryNavPlacesNewSession` slot places "New session" among its own entries.
+
+  Insights usage broken down by agent shows each agent's own avatar beside its name, as the Agents page does, and its initials only when it has none.
+
+- b731e71: Sandbox reaper failures are diagnosable from logs. "sandbox reaper: per-sandbox drain failed" and "sandbox reaper: retained-process settlement failed" now record a protected failure diagnostic (throw site, process correlation) and log its `correlationId`, the hashed `sandboxLeaseKey`, lease epoch and backend, the cause's reviewed class, sandbox fence code (`causeFenceCode`) and SQLSTATE, and a one-way `causeFingerprint` of its message that `scripts/resolve-rejection-fingerprint.ts` maps back to the source literal. Before, both lines dropped their error entirely, and the settlement line carried no correlation at all.
+
+  A viewer attach (`POST /v1/workspaces/:workspaceId/sessions/:id/viewers`) whose caller disconnects while the attach waits on a sandbox lifecycle transition now answers 499 with no body, the client-gone convention, instead of logging a 500 `internal_error`.
+
+- Updated dependencies [81c930e]
+- Updated dependencies [531532b]
+- Updated dependencies [1b8fd9c]
+- Updated dependencies [82de8aa]
+- Updated dependencies [c79fae8]
+- Updated dependencies [52c2fea]
+- Updated dependencies [9d0896d]
+- Updated dependencies [c00db19]
+- Updated dependencies [2f8dd47]
+- Updated dependencies [a55b31b]
+- Updated dependencies [bf87544]
+- Updated dependencies [dda9e3b]
+- Updated dependencies [cd461f0]
+- Updated dependencies [bf91461]
+- Updated dependencies [f88a948]
+- Updated dependencies [e042760]
+- Updated dependencies [27ba8d2]
+- Updated dependencies [42dc05c]
+- Updated dependencies [826dcce]
+- Updated dependencies [b731e71]
+- Updated dependencies [3ace70b]
+- Updated dependencies [b70dfb9]
+- Updated dependencies [ae08e32]
+- Updated dependencies [b7064b0]
+- Updated dependencies [d8d2b46]
+- Updated dependencies [024d5ee]
+- Updated dependencies [962c6d7]
+- Updated dependencies [ebca2a8]
+- Updated dependencies [df9d061]
+  - @opengeni/db@6.42.0
+  - @opengeni/core@6.42.0
+  - @opengeni/observability@6.42.0
+  - @opengeni/runtime@6.42.0
+  - @opengeni/config@6.42.0
+  - @opengeni/contracts@6.42.0
+  - @opengeni/documents@6.42.0
+  - @opengeni/events@6.42.0
+  - @opengeni/tool-gateway@6.42.0
+  - @opengeni/github@6.42.0
+  - @opengeni/storage@6.42.0
+  - @opengeni/artifact-tool@6.42.0
+  - @opengeni/capabilities@6.42.0
+  - @opengeni/codemode@6.42.0
+  - @opengeni/codex@6.42.0
+  - @opengeni/decisions@6.42.0
+  - @opengeni/interaction@6.42.0
+  - @opengeni/vaults@6.42.0
+  - @opengeni/vaults-bitwarden@6.42.0
+  - @opengeni/vaults-keeper@6.42.0
+  - @opengeni/vaults-onepassword@6.42.0
+  - @opengeni/vaults-protonpass@6.42.0
+  - @opengeni/agent-proto@6.42.0
+  - @opengeni/network@6.42.0
+  - @opengeni/xai-subscription@6.42.0
+
 ## 6.41.0
 
 ### Minor Changes
