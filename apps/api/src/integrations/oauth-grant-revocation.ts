@@ -187,11 +187,14 @@ export async function prepareOAuthGrantDisconnect(
       // Decided after this connection's revoke committed, so the check sees
       // the deployment as it is once this connection is gone.
       const decision = await revokeDecision(deps, connection.id, clientId, revoker.family);
-      deps.observability?.info("OAuth grant revocation decision", {
-        connectionId: connection.id,
-        provider: revoker.family.id,
-        decision,
-      });
+      const fields = { connectionId: connection.id, provider: revoker.family.id, decision };
+      // A failed check (for example a family the database doesn't pin) is
+      // safe, since the grant is kept, but must be visible.
+      if (decision === "kept_check_failed") {
+        deps.observability?.warn("OAuth grant revocation decision", fields);
+      } else {
+        deps.observability?.info("OAuth grant revocation decision", fields);
+      }
       if (decision === "revoked") await revokeToken(deps, revoker, connection.id, token);
     },
   };

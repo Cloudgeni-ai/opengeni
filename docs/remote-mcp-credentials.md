@@ -363,10 +363,16 @@ integration).
   `SHARED_GRANT_REFUSED_ERROR`), and its owner is told once without a turn,
   since no chat of the refused connection carries another owner's notice. A sibling that still works stays connected with fresh tokens.
 
-Both definers are created withheld from the runtime role; a later migration
-grants them once the release that knows them is the previous release. A self-hosted install whose runtime role owns the
-functions (it ran the migrations itself) already holds EXECUTE, so both checks
-are active there as soon as the migration runs.
+Migration 1611 creates both definers withheld from the runtime role (the
+previous release rejects a grant on a definer it doesn't know). Migration 1680
+grants them once that release is the previous one, and pins the families they
+accept in SQL: the family arguments must be exactly the Google family, so an
+EXECUTE holder can't match connections by metadata keys it chooses. Adding a
+provider family therefore takes a migration that pins it first. Rows with no
+stored account identity stay conservative: they block a revoke and are never
+marked. A self-hosted install whose runtime role owns the functions (it ran the
+migrations itself) already holds EXECUTE, so both checks are active there as
+soon as 1611 runs.
 
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
