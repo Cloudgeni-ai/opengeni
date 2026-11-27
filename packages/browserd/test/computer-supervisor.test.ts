@@ -581,6 +581,55 @@ describe("ComputerSupervisor", () => {
       await rm(rootDirectory, { recursive: true, force: true });
     }
   });
+
+  test("a full machine ends its longest-unused idle session to open a new one", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-capacity-idle-");
+    let now = 1_000_000;
+    const supervisor = await ComputerSupervisor.open({
+      rootDirectory,
+      maxSessions: 2,
+      now: () => now,
+      environmentAllocator: fixtureEnvironmentAllocator(),
+      createDriver: async (context) =>
+        new FixtureComputerDriver(context.computerSessionId, context.controllerGeneration),
+    });
+    const session = (id: string) => ({
+      ...options(),
+      computerSessionId: id,
+      controllerGeneration: `controller-${id.slice(0, 1)}`,
+    });
+    const finished = session("22222222-2222-4222-8222-222222222222");
+    const recent = session("33333333-3333-4333-8333-333333333333");
+    const opened = (): string[] =>
+      supervisor
+        .listSessions()
+        .map((entry) => entry.computerSessionId)
+        .sort();
+    try {
+      await supervisor.createSession(finished);
+      await supervisor.createSession(recent);
+      // Sessions used within the hold may be mid-task: they stay.
+      await expect(
+        supervisor.createSession(session("44444444-4444-4444-8444-444444444444")),
+      ).rejects.toMatchObject({ code: "capacity_exhausted", retryable: false });
+      expect(opened()).toEqual([finished.computerSessionId, recent.computerSessionId]);
+      // The first chat finished and left its session open; past the hold,
+      // the longest-unused session makes room.
+      now += RECENT_USE_UPDATE_HOLD_MS + 1;
+      await supervisor.heartbeat(recent);
+      const added = session("44444444-4444-4444-8444-444444444444");
+      await supervisor.createSession(added);
+      expect(opened()).toEqual([recent.computerSessionId, added.computerSessionId]);
+      // The ended session opens again when its chat comes back.
+      now += RECENT_USE_UPDATE_HOLD_MS + 1;
+      await supervisor.heartbeat(added);
+      await supervisor.createSession(finished);
+      expect(opened()).toEqual([finished.computerSessionId, added.computerSessionId]);
+    } finally {
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
 });
 
 class FixtureComputerDriver implements ComputerSupervisorDriver {
