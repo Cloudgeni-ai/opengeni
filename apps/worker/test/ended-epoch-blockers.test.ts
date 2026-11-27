@@ -385,6 +385,26 @@ describe("blockers on an ended lease epoch", () => {
     expect(await listedFor(fixture)).toEqual([]);
   }, 60_000);
 
+  test("an archived chat's request on a box observed terminated settles without a wake", async () => {
+    const fixture = await deadAttemptFixture({ outcome: "interrupted_recoverable" });
+    await retireEpochUnsettled(fixture);
+    const wakeBefore = await ownerWake(fixture);
+    // The chat was archived while its turn still awaited quiescence; the
+    // database refuses every wake for it, so settlement must not enqueue one.
+    await admin`
+      update sessions set content_archive_state = 'archived', content_archive_started_at = now(),
+        content_archived_at = now(), content_archive = '{"sha256": "test"}'::jsonb
+      where workspace_id = ${fixture.workspaceId} and id = ${fixture.attempt.sessionId}`;
+    const listed = await listedFor(fixture);
+    expect(listed).toHaveLength(1);
+    expect(await settleEndedEpochWorkspaceBlockers(db, listed[0]!)).toMatchObject({
+      admissionsRejected: 1,
+    });
+    expect(await requestRow(fixture)).toMatchObject({ provider_outcome: "rejected" });
+    expect(await ownerWake(fixture)).toBe(wakeBefore);
+    expect(await listedFor(fixture)).toEqual([]);
+  }, 60_000);
+
   test("the reaper settles them only after observing the old box terminated", async () => {
     const fixture = await deadAttemptFixture({ outcome: "failed" });
     await retireEpochUnsettled(fixture);
