@@ -19,8 +19,8 @@ export function useDuplicateSite(workspaceId: string) {
   const inFlight = useRef(false);
   const openCopy = (copy: WorkspaceArtifact) =>
     void navigate({
-      to: "/workspaces/$workspaceId/sites/$siteId",
-      params: { workspaceId, siteId: copy.id },
+      to: "/workspaces/$workspaceId/apps/$appId/$",
+      params: { workspaceId, appId: copy.id, _splat: "" },
     });
   const duplicate = async (
     site: Readonly<{ id: string; title: string }>,

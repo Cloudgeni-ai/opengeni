@@ -592,16 +592,13 @@ test("an app in the Artifacts list opens in the app view; other artifacts keep t
       [...container.querySelectorAll<HTMLAnchorElement>("a[href]")].find((anchor) =>
         anchor.textContent?.includes(title),
       )!;
-    // A Site opened from the list keeps the list's place, for its Back to Artifacts.
-    expect(link("Status board").getAttribute("href")).toBe(
-      "/workspaces/workspace/sites/same?browse=true&q=plan",
-    );
+    // An app opens on its own page, the same however it's opened.
+    expect(link("Status board").getAttribute("href")).toBe("/workspaces/workspace/apps/same");
     expect(link("Project brief").getAttribute("href")).toContain(
       "/workspaces/workspace/artifacts/editable/same?",
     );
     await act(async () => link("Status board").click());
-    expect(router.state.location.pathname).toBe("/workspaces/workspace/sites/same");
-    expect(router.state.location.search).toMatchObject({ browse: true, q: "plan" });
+    expect(router.state.location.pathname).toBe("/workspaces/workspace/apps/same");
   } finally {
     localStorage.removeItem("opengeni:artifact-library:view:v1");
     await act(async () => root.unmount());

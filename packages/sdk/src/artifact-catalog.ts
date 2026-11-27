@@ -37,6 +37,8 @@ export type ArtifactCatalogListOptions = {
   includeSubSessions?: boolean;
   q?: string;
   kind?: ArtifactCatalogKind;
+  /** Leaves one kind out. */
+  excludeKind?: ArtifactCatalogKind;
   sort?: "updated" | "newest" | "title";
   status?: "active" | "archived";
   limit?: number;

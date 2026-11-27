@@ -4,16 +4,20 @@ import decisionLog from "./decision-log.app.json";
 import feedbackBoard from "./feedback-board.app.json";
 import incidentLog from "./incident-log.app.json";
 import issueTracker from "./issue-tracker.app.json";
+import workSummary from "./work-summary.app.json";
 
 /**
- * Ready-made apps people add in Capabilities (Ready-made) and on the
- * Artifacts page (Apps). Each is a content file: an app package
- * (docs/app-packages.md) with a name, a line about it and its team. Adding
- * one installs the package as a new app and opens it, where it asks to
- * connect any tool it declares. These use only Site Data, so they work
- * right away; tool-backed ones (a GitHub or Linear board) come later.
+ * Ready-made apps people preview and add on the Apps page. Each is a
+ * content file: an app package (docs/app-packages.md)
+ * with a name, a line about it and its team, and its own package id and
+ * version: raising the version offers the update to every app installed
+ * from it. Adding one installs the package as a new app (with any Skills
+ * and automations it carries) and opens it. These use only Site Data, so
+ * they work right away; tool-backed ones (a GitHub or Linear board) come
+ * later.
  */
 const APP_TEMPLATE_FILES: readonly unknown[] = [
+  workSummary,
   issueTracker,
   incidentLog,
   feedbackBoard,

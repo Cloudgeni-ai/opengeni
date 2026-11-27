@@ -21,6 +21,7 @@ export * from "./setup-connection-requests";
 export * from "./app-server";
 export * from "./site-tool-data";
 export * from "./app-package-exports";
+export * from "./app-package-installs";
 export * from "./organization-connectors";
 import {
   organizationConnectorLogin,

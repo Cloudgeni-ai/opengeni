@@ -11,20 +11,13 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
-  ArchiveIcon,
   ArrowLeftRightIcon,
   ArrowLeftIcon,
-  CopyIcon,
   LinkIcon,
-  Maximize2Icon,
   MessageSquareIcon,
-  MoreHorizontalIcon,
   PanelLeftCloseIcon,
   PanelRightCloseIcon,
-  PinIcon,
   PlusIcon,
-  RefreshCwIcon,
-  Settings2Icon,
   SquareArrowOutUpRightIcon,
 } from "lucide-react";
 import {
@@ -52,21 +45,7 @@ import type {
   NewConversationCreateOptions,
 } from "../../hooks/use-new-conversation";
 import { Button } from "../../ui/button";
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuTrigger,
-} from "../../ui/context-menu";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "../../ui/dropdown-menu";
-import { useSiteActions } from "../components/artifacts/site-actions";
-import { useSiteSidebarActions } from "../lib/site-sidebar-bridge";
+import { SiteActionsMenu, SiteTitleMenu } from "../components/artifacts/site-header-controls";
 import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
 import { useAppContext, type SessionCreationHandoff } from "../app-context";
@@ -297,17 +276,18 @@ export function SiteViewRoute({
   // back, so the toolbar drops its own back link while the bar shows it.
   const artifactsBack = useArtifactsBackLink(workspaceId, back?.fromSession, back ?? undefined);
   const artifactsBackHref = artifactsBack.href;
+  const artifactsBackLabel = artifactsBack.label === "Apps" ? "Apps" : "Artifacts";
   const artifactsBackClick = useRef(artifactsBack.onClick);
   artifactsBackClick.current = artifactsBack.onClick;
   const backPlace = useMemo(() => {
     if (!back) return null;
     const crumb = {
-      label: "Artifacts",
+      label: artifactsBackLabel,
       href: artifactsBackHref,
       onClick: () => artifactsBackClick.current?.(),
     };
     return { section: crumb, parent: crumb };
-  }, [back, artifactsBackHref]);
+  }, [back, artifactsBackHref, artifactsBackLabel]);
   const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null, publishing, {
     copyable: true,
     place: backPlace,
@@ -712,34 +692,6 @@ export function AppPageChat({
 
 const ignoreHasConversations = () => {};
 
-/** Right-click the Site's title: copy it or the Site's address. */
-function SiteTitleMenu({
-  workspaceId,
-  origin,
-  children,
-}: {
-  workspaceId: string;
-  origin: { siteId: string; title: string };
-  children: ReactNode;
-}) {
-  const site = useSiteActions(workspaceId, origin);
-  return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="min-w-40" data-site-title-menu="">
-        <ContextMenuItem onSelect={site.copyTitle}>
-          <CopyIcon className="size-4" />
-          Copy title
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={site.copyLink}>
-          <LinkIcon className="size-4" />
-          Copy app link
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
-  );
-}
-
 /**
  * The Site's header row. On the page it is a slim row with no frame of its
  * own, so the Site reads as part of the page. In the macOS app, where the
@@ -879,77 +831,6 @@ function ShowChatButton({ onClick }: { onClick: () => void }) {
  * sidebar lists Sites) and Settings. Rarer ones (duplicate, export, allowed
  * actions) are in Settings; copying the address is in "Published".
  */
-function SiteActionsMenu({
-  workspaceId,
-  origin,
-  hasVersion,
-  onReload,
-  onFullScreen,
-}: {
-  workspaceId: string;
-  origin: { siteId: string; title: string };
-  hasVersion: boolean;
-  onReload: () => void;
-  /** Absent while the app is already full screen. */
-  onFullScreen?: (() => void) | undefined;
-}) {
-  const site = useSiteActions(workspaceId, origin, { hasVersion });
-  const sidebar = useSiteSidebarActions(workspaceId, origin);
-  const labels = useArtifactLabels();
-  return (
-    <span data-site-actions-root="" className="contents">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="More app actions"
-            title="More"
-            data-site-actions-menu=""
-            className="size-8 rounded-md text-fg-muted hover:text-fg pointer-coarse:size-11"
-          >
-            <MoreHorizontalIcon aria-hidden="true" className="size-4" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-56">
-          {onFullScreen ? (
-            <DropdownMenuItem onSelect={onFullScreen}>
-              <Maximize2Icon aria-hidden="true" />
-              {labels.openFullScreen}
-            </DropdownMenuItem>
-          ) : null}
-          <DropdownMenuItem onSelect={onReload}>
-            <RefreshCwIcon aria-hidden="true" />
-            {labels.reloadSite}
-          </DropdownMenuItem>
-          {sidebar ? (
-            <DropdownMenuItem onSelect={sidebar.togglePin}>
-              <PinIcon aria-hidden="true" className={sidebar.pinned ? "fill-current" : undefined} />
-              {sidebar.pinned ? "Unpin" : "Pin"}
-            </DropdownMenuItem>
-          ) : null}
-          <DropdownMenuItem asChild>
-            <Link {...site.details} state={{ artifactDetailFromSite: origin.siteId }}>
-              <Settings2Icon aria-hidden="true" />
-              Settings
-            </Link>
-          </DropdownMenuItem>
-          {sidebar ? (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={sidebar.archive}>
-                <ArchiveIcon aria-hidden="true" />
-                Archive
-              </DropdownMenuItem>
-            </>
-          ) : null}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </span>
-  );
-}
-
 const PAGE_SIZE = 30;
 
 /**
@@ -976,8 +857,8 @@ function ArtifactsBackLink({
       <a
         href={back.href}
         onClick={back.onClick}
-        aria-label="Back to Artifacts"
-        title="Back to Artifacts"
+        aria-label={`Back to ${back.label}`}
+        title={`Back to ${back.label}`}
       >
         <ArrowLeftIcon aria-hidden="true" className="size-4" />
         {back.label}

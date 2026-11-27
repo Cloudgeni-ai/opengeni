@@ -99,10 +99,14 @@ describe("simplified interface navigation", () => {
     expect(interfaceListsOrganizationSection(false, "insights")).toBe(true);
   });
 
-  test("Apps is the Artifacts page's Apps tab and an app's own view; Artifacts is the rest", () => {
+  test("Apps is its own page and an app's view; Artifacts is the rest", () => {
     const apps = primaryWorkspaceItems(false).find((item) => item.label === "Apps")!;
     const artifacts = PRIMARY_WORKSPACE_ITEMS.find((item) => item.label === "Artifacts")!;
     const at = (pathname: string, kind?: string) => ({ pathname, kind });
+    expect(isNavItemActive(at("/workspaces/w/apps"), "w", apps)).toBe(true);
+    expect(isNavItemActive(at("/workspaces/w/apps"), "w", artifacts)).toBe(false);
+    // An app opened from the sidebar has its own rail link.
+    expect(isNavItemActive(at("/workspaces/w/apps/a1/"), "w", apps)).toBe(false);
     expect(isNavItemActive(at("/workspaces/w/artifacts", "site"), "w", apps)).toBe(true);
     expect(isNavItemActive(at("/workspaces/w/artifacts", "site"), "w", artifacts)).toBe(false);
     expect(isNavItemActive(at("/workspaces/w/sites/s1"), "w", apps)).toBe(true);
@@ -115,11 +119,9 @@ describe("simplified interface navigation", () => {
   test("a destination's tooltip names the product the way the interface does", () => {
     const artifacts = PRIMARY_WORKSPACE_ITEMS.find((item) => item.label === "Artifacts")!;
     expect(itemDescription(artifacts, "Opengeni")).toBe(
-      "Apps, images, documents, and files built with Opengeni",
+      "Images, documents, and files built with Opengeni",
     );
-    expect(itemDescription(artifacts, "Geni")).toBe(
-      "Apps, images, documents, and files built with Geni",
-    );
+    expect(itemDescription(artifacts, "Geni")).toBe("Images, documents, and files built with Geni");
     for (const item of WORKSPACE_CONFIG_GROUPS.flatMap((group) => group.items)) {
       expect(itemDescription(item, "Geni")).not.toContain("Opengeni");
     }
@@ -132,6 +134,7 @@ describe("simplified interface navigation", () => {
     expect(primaryWorkspaceItems(true).map((item) => item.label)).toEqual([
       "Capabilities",
       "Agents",
+      "Apps",
       "Artifacts",
     ]);
     expect(groupedWorkspaceItems(true).items.map((item) => item.label)).toEqual([

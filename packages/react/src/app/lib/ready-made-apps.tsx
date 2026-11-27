@@ -16,16 +16,19 @@ type Installer = {
  * Install keys belong to the person and the package, so the same person adding
  * the same version again gets the app they added, unless they archived it,
  * then it's added fresh (each archived copy keys the next one). Someone else,
- * or a newer version of the template, adds a new copy. Used by the
- * Capabilities Ready-made tab and the Artifacts Apps tab.
+ * or a newer version of the template, adds a new copy. Used by the Apps
+ * page's Available list.
  */
 export async function installReadyMadeApp(
   client: Installer,
   workspaceId: string,
   template: Pick<AppTemplate, "key" | "package">,
+  demoData?: boolean,
 ): Promise<AppPackageInstallResponse> {
+  const demo = demoData === undefined ? {} : { demoData };
   let installed = await client.installAppPackage(workspaceId, {
     package: template.package,
+    ...demo,
     idempotencyKey: `ready-made:${template.key}`,
   });
   for (
@@ -35,6 +38,7 @@ export async function installReadyMadeApp(
   ) {
     installed = await client.installAppPackage(workspaceId, {
       package: template.package,
+      ...demo,
       idempotencyKey: `ready-made:${template.key}:after:${installed.app.id}`,
     });
   }

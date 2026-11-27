@@ -8,6 +8,7 @@
  * ordinary chat with the agent.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { parseAppPackage } from "@opengeni/contracts";
 import type {
   Agent,
   AgentSummary,
@@ -605,8 +606,8 @@ function AppEnable({
         });
   const openApp = (id: string) =>
     void navigate({
-      to: "/workspaces/$workspaceId/artifacts/$artifactId",
-      params: { workspaceId, artifactId: id },
+      to: "/workspaces/$workspaceId/apps/$appId/$",
+      params: { workspaceId, appId: id, _splat: "" },
     });
   const turnOn = async () => {
     if (!template || busy || blocker) return;
@@ -625,10 +626,23 @@ function AppEnable({
       setBusy(false);
     }
   };
-  const facts = useMemo<EnableFact[]>(
-    () => [{ label: "App", description: `Adds ${name} to Apps. Everyone here can open it.` }],
-    [name],
-  );
+  // What installing adds, as the Apps page's install dialog lists it.
+  const facts = useMemo<EnableFact[]>(() => {
+    const list: EnableFact[] = [{ label: "App", description: `Adds ${name} to Apps.` }];
+    let pkg: ReturnType<typeof parseAppPackage>["package"] | null = null;
+    try {
+      pkg = template ? parseAppPackage(template.package).package : null;
+    } catch {
+      pkg = null;
+    }
+    for (const skill of pkg?.skills ?? []) {
+      list.push({ label: `Skill: ${skill.name}`, description: skill.description });
+    }
+    for (const automation of pkg?.automations ?? []) {
+      list.push({ label: `Automation: ${automation.name}`, description: "Added switched off." });
+    }
+    return list;
+  }, [name, template]);
   const firstJob = template?.setup?.firstJob ?? null;
   return (
     <EnableView

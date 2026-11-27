@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { APP_PACKAGE_FORMAT } from "@opengeni/contracts";
 import {
+  firstSentence,
   notInstalledSummary,
   readAppPackageFile,
   upgradePlanLines,
@@ -63,6 +64,13 @@ describe("an app package file chosen in the console", () => {
       ]),
     ).toBe("create_items: It failed. (and 1 more)");
   });
+
+  test("the install dialog shows a Skill's first sentence as what it does", () => {
+    expect(
+      firstSentence("Adds what got done to the Work summary app. Use after finishing work."),
+    ).toBe("Adds what got done to the Work summary app.");
+    expect(firstSentence("Tracks v1.2 releases")).toBe("Tracks v1.2 releases");
+  });
 });
 
 describe("an upgrade's plan in the console", () => {
@@ -101,6 +109,23 @@ describe("an upgrade's plan in the console", () => {
       "Queries: removes old",
       "Syncs: adds Import (paused)",
       "Keeps notes, which the package doesn't have",
+    ]);
+  });
+
+  test("names the version change, Skills and automations", () => {
+    expect(
+      upgradePlanLines({
+        ...empty,
+        version: { changed: true, html: true, source: false, tools: false },
+        packageVersion: { current: "1.0.0", next: "1.1.0" },
+        skills: { added: ["triage"], changed: ["work-summary"], unchanged: [], kept: ["old"] },
+        automations: { added: ["Daily summary"], kept: [] },
+      }),
+    ).toEqual([
+      "Version 1.0.0 → 1.1.0",
+      "Skills: adds triage; updates work-summary",
+      "Automations: adds Daily summary (switched off)",
+      "Keeps old, which the package doesn't have",
     ]);
   });
 });

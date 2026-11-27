@@ -14,6 +14,8 @@
   "package": {
     "format": "opengeni.app-package",
     "version": 1,
+    "packageId": "2b7e4f10-6c3d-8a52-b1e9-0d4f8a6c2e31",
+    "packageVersion": "1.0.0",
     "exportedAt": "2026-11-22T00:00:00.000Z",
     "app": {
       "title": "Issue tracker",
@@ -39,5 +41,40 @@
         "label": "Issue tracker"
       }
     ]
+  },
+  "preview": {
+    "records": {
+      "issues": [
+        {
+          "title": "Checkout button hidden on small screens",
+          "details": "Below 360 px the button falls off the page.",
+          "owner": "Maya",
+          "priority": "urgent",
+          "status": "in_progress",
+          "opened": "{{today}}"
+        },
+        {
+          "title": "Search ignores accents",
+          "owner": "Jon",
+          "priority": "high",
+          "status": "open",
+          "opened": "{{today-1}}"
+        },
+        {
+          "title": "Typo on the pricing page",
+          "owner": "Ana",
+          "priority": "low",
+          "status": "open",
+          "opened": "{{today-2}}"
+        },
+        {
+          "title": "Slow invoice PDF",
+          "owner": "Jon",
+          "priority": "medium",
+          "status": "done",
+          "opened": "{{today-5}}"
+        }
+      ]
+    }
   }
 }

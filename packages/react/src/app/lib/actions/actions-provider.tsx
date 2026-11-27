@@ -388,8 +388,8 @@ export function ActionsProvider(props: { children: ReactNode }) {
       openSite: (siteId) => {
         rail.setDrawerOpen(false);
         void navigate({
-          to: "/workspaces/$workspaceId/sites/$siteId",
-          params: { workspaceId, siteId },
+          to: "/workspaces/$workspaceId/apps/$appId/$",
+          params: { workspaceId, appId: siteId, _splat: "" },
         });
       },
       siteLink: (siteId) => `${page.origin()}${sitePath(workspaceId, siteId)}`,

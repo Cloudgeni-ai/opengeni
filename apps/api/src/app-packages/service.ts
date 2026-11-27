@@ -32,8 +32,10 @@ import {
   artifactRequestedToolsMissingFromAttemptCatalog,
   createWorkspaceArtifact,
   getAppPackageId,
+  getAppPackageInstall,
   getWorkspaceArtifactContentRef,
   getWorkspaceArtifactCurrent,
+  putAppPackageInstall,
   setAppPackageId,
   SiteDataError,
   WorkspaceArtifactConflictError,
@@ -75,6 +77,9 @@ import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { redactWorkspaceArtifactProvenance } from "../workspace-artifact-provenance";
 import { exportAppSidebar, installAppSidebar } from "./sidebar";
 import { appSyncHooks, syncName } from "./syncs";
+import { exportPackageExtras } from "./installed";
+import { applyPackageSkills, planPackageSkills, type PackageSkillWriter } from "./skills";
+import { addPackageAutomations } from "./automations";
 
 /**
  * App packages: export an app (a Site) with its definitions as one file, and
@@ -168,7 +173,10 @@ export async function exportAppPackage(
   grant: AccessGrant,
   appId: string,
   request: AppPackageExportRequest = {},
+  /** Without its built files (an upgrade's saved state keeps its version instead). */
+  options: { files?: boolean } = {},
 ): Promise<AppPackageExportResponse> {
+  const withFiles = options.files !== false;
   if (!deps.objectStorage)
     throw new AppPackageError("unavailable", "File storage isn't configured");
   const viewer = await siteViewerForGrant(deps.db, grant);
@@ -189,18 +197,20 @@ export async function exportAppPackage(
     notExported.push({ part: "sync", reason: reason(error, "listing syncs") });
   }
   const sidebar = await exportAppSidebar(deps, grant, appId, notExported);
+  const extras = await exportPackageExtras(deps, grant, appId, notExported);
 
   const pkg: AppPackage = {
     format: APP_PACKAGE_FORMAT,
     version: APP_PACKAGE_VERSION,
     packageId: (await getAppPackageId(deps.db, grant.workspaceId, appId)) ?? ownPackageId(appId),
+    ...(extras.packageVersion ? { packageVersion: extras.packageVersion } : {}),
     exportedAt: new Date().toISOString(),
     app: {
       title: artifact.title,
       description: artifact.description,
       html: content.html,
       // An HTML-only app has no retained source of its own.
-      ...(ref.sourceKey ? { source: content.source } : {}),
+      ...(ref.sourceKey && withFiles ? { source: content.source } : {}),
     },
     tools: await portableTools(deps, grant, content.requestedTools, notExported),
     data: {
@@ -226,9 +236,11 @@ export async function exportAppPackage(
     },
     syncs,
     ...(sidebar.length > 0 ? { sidebar } : {}),
+    ...(extras.skills ? { skills: extras.skills } : {}),
+    ...(extras.automations ? { automations: extras.automations } : {}),
   };
   // A multi-file build's files, measured from the manifest before any is read.
-  if (ref.assetManifest) {
+  if (ref.assetManifest && withFiles) {
     const encoded = ref.assetManifest.files.reduce(
       (total, file) => total + Math.ceil(file.sizeBytes / 3) * 4 + file.path.length + 24,
       0,
@@ -267,6 +279,43 @@ const tooLarge = () =>
     "too_large",
     `The package would be over ${APP_PACKAGE_MAX_BYTES / (1024 * 1024)} MB (the app's files and definitions together)`,
   );
+
+/**
+ * The app's files at one of its versions, as a package's `app` has them:
+ * its HTML, retained source and built files. Going back rebuilds the saved
+ * state's package from these.
+ */
+export async function appPackageFilesAt(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  appId: string,
+  versionId: string,
+): Promise<Pick<AppPackage["app"], "html" | "source" | "assets">> {
+  if (!deps.objectStorage)
+    throw new AppPackageError("unavailable", "File storage isn't configured");
+  const viewer = await siteViewerForGrant(deps.db, grant);
+  const ref = await getWorkspaceArtifactContentRef(
+    deps.db,
+    grant.workspaceId,
+    viewer,
+    appId,
+    versionId,
+  );
+  const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
+  return {
+    html: content.html,
+    ...(ref.sourceKey ? { source: content.source } : {}),
+    ...(ref.assetManifest
+      ? {
+          assets: await readSiteAssetBundle(
+            deps.objectStorage,
+            grant.workspaceId,
+            ref.assetManifest,
+          ),
+        }
+      : {}),
+  };
+}
 
 /**
  * The package id of an app made here: derived from its id, so every export
@@ -603,6 +652,8 @@ export async function installAppPackage(
     visibility?: WorkspaceArtifactVisibility | undefined;
     demoData?: boolean | undefined;
     provenance: AppInstallProvenance;
+    /** Who saves the package's Skills (the person, or the agent's live turn), or why no one can. */
+    skillWriter: PackageSkillWriter;
   },
 ): Promise<AppPackageInstallResponse> {
   if (!deps.objectStorage)
@@ -624,6 +675,8 @@ export async function installAppPackage(
     demoRecords: 0,
     demoRows: 0,
     demoFiles: 0,
+    skills: [],
+    automations: [],
   };
 
   // 1. The app itself, from the package's version.
@@ -816,7 +869,62 @@ export async function installAppPackage(
   if (pkg.sidebar?.length)
     installed.sidebar = await installAppSidebar(deps, grant, app, pkg.sidebar, notInstalled);
 
-  // 6. Demo data, only into collections, tables and file lists that are
+  // 6. Its Skills (workspace Skills linked to the app) and automations
+  // (switched off), then what came with it, so its later upgrades know.
+  // A replay finds them linked already and adds nothing twice.
+  const before = await getAppPackageInstall(deps.db, grant.workspaceId, app.id);
+  let skillLinks = before?.skills ?? [];
+  if (pkg.skills?.length) {
+    const plan = await planPackageSkills(deps, grant, {
+      skills: pkg.skills,
+      links: skillLinks,
+      packageId: pkg.packageId ?? null,
+      mode: "install",
+    });
+    notInstalled.push(...plan.problems);
+    const applied = await applyPackageSkills(
+      deps,
+      grant,
+      {
+        plan,
+        links: skillLinks,
+        writer: input.skillWriter,
+        operationKey: input.provenance.operationKey,
+        appTitle: app.title,
+      },
+      notInstalled,
+    );
+    skillLinks = applied.links;
+    installed.skills = skillLinks.map((link) => link.name);
+  }
+  let automations = before?.automations ?? [];
+  if (pkg.automations?.length) {
+    automations = (
+      await addPackageAutomations(
+        deps,
+        grant,
+        {
+          appId: app.id,
+          automations: pkg.automations,
+          existing: automations,
+          surface: input.provenance.sourceAttemptId === null ? "http" : "first_party_mcp",
+        },
+        notInstalled,
+      )
+    ).automations;
+    installed.automations = automations.map((entry) => entry.name);
+  }
+  await putAppPackageInstall(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    appId: app.id,
+    packageVersion: pkg.packageVersion ?? null,
+    versionId: before?.versionId ?? app.currentVersion?.id ?? null,
+    skills: skillLinks,
+    automations,
+  });
+
+  // 7. Demo data, only into collections, tables and file lists that are
   // still empty. Files go first: demo values that are a packaged file's id
   // then name its installed copy.
   if (wantsDemo && pkg.demoData) {

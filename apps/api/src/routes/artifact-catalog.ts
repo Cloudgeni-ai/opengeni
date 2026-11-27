@@ -246,7 +246,8 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
     let kinds = ArtifactCatalogKind.options.filter(
       (kind) =>
         (kind === "image" || kind === "file" ? filesAllowed : artifactsAllowed) &&
-        (!query.kind || kind === query.kind),
+        (!query.kind || kind === query.kind) &&
+        kind !== query.excludeKind,
     );
     if (!deps.editableArtifacts) {
       if (query.kind && editableKinds.has(query.kind) && artifactsAllowed)

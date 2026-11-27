@@ -1,6 +1,6 @@
 // The app menu's real Upgrade from package dialog (UpgradeAppDialog) with a
 // synthetic plan, to preview it. Upgrade only waits; nothing reaches an API.
-//   ?plan=safe|destructive|conflict|other-app   ?theme=light|dark
+//   ?plan=safe|destructive|conflict|other-app|update|restore   ?theme=light|dark
 import type { AppPackageUpgradePlan } from "@opengeni/contracts";
 import { useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -26,8 +26,21 @@ const safe: AppPackageUpgradePlan = {
   conflicts: [],
   problems: [],
 };
+const update: AppPackageUpgradePlan = {
+  ...safe,
+  tools: { added: [], removed: [] },
+  collections: { added: [], changed: ["entries"], unchanged: [], kept: [] },
+  migrations: { applied: [], new: [], conflicting: [] },
+  queries: { added: [], changed: [], removed: [], unchanged: [] },
+  syncs: { added: [], changed: [], unchanged: [], kept: [] },
+  packageVersion: { current: "1.0.0", next: "1.1.0" },
+  skills: { added: [], changed: ["work-summary"], unchanged: [], kept: [] },
+  automations: { added: [], kept: ["Update the work summary"] },
+};
 const plans: Record<string, AppPackageUpgradePlan> = {
   safe,
+  update,
+  restore: { ...update, packageVersion: { current: "1.1.0", next: "1.0.0" } },
   destructive: {
     ...safe,
     migrations: { applied: ["create_items"], new: ["add_price", "drop_qty"], conflicting: [] },
@@ -77,7 +90,12 @@ function Preview() {
         state={
           {
             phase: "ready",
-            chosen: { json: {}, title: "Team board", hasDemoData: false },
+            source:
+              kind === "update"
+                ? { kind: "update", title: "Work summary", version: "1.1.0", request: {} }
+                : kind === "restore"
+                  ? { kind: "previous", title: "Work summary", version: "1.0.0", request: {} }
+                  : { kind: "file", title: "Team board", request: { package: {} } },
             plan: plans[kind] ?? safe,
             key: "preview",
           } as never

@@ -4,7 +4,7 @@
 import { useSidebarLayout } from "@/components/sidebar-layout/use-sidebar-layout";
 import { APPS_WORKSPACE_ITEM, navItemKey, type WorkspaceConfigTarget } from "./workspace-nav-data";
 
-/** Each entry's rail key (`navItemKey`): Apps and Artifacts share a page. */
+/** Each entry's rail key (`navItemKey`). */
 const ENTRY_TARGETS: Readonly<Record<string, WorkspaceConfigTarget | string>> = {
   capabilities: "/workspaces/$workspaceId/plugins",
   knowledge: "/workspaces/$workspaceId/state",
@@ -33,8 +33,8 @@ export function navEntryKey(target: string): string {
 
 /**
  * The entries this person hides: the inbox, and the rail destinations by
- * `navItemKey`. Hiding Artifacts hides Apps too, its tab, so a rail trimmed
- * before Apps existed stays as it was.
+ * `navItemKey`. Hiding Artifacts hides Apps too, as when Apps was its tab,
+ * so a rail trimmed before Apps had its own page stays as it was.
  */
 export function hiddenNavEntries(hidden: readonly string[]): {
   inbox: boolean;

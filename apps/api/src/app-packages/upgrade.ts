@@ -1,5 +1,6 @@
 import {
   APP_PACKAGE_MAX_BYTES,
+  APP_PACKAGE_SNAPSHOTS_KEPT,
   parseAppPackage,
   siteSqlDestructiveChanges,
   stableJson,
@@ -14,12 +15,18 @@ import {
 import { siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   artifactRequestedToolsMissingFromAttemptCatalog,
+  consumeAppPackageSnapshot,
+  getAppPackageInstall,
   getAppPackageId,
   getWorkspaceArtifactContentRef,
   getWorkspaceArtifactCurrent,
+  getAppPackageSnapshot,
   publishWorkspaceArtifactVersion,
+  putAppPackageInstall,
+  saveAppPackageSnapshot,
   setAppPackageId,
   WorkspaceArtifactOperationError,
+  type AppPackageInstall,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import { ApiHttpError } from "../http/api-error";
@@ -40,8 +47,24 @@ import { decodeSiteAssetFiles, storeSiteAssetFiles, type DecodedSiteAssets } fro
 import { prepareWorkspaceArtifactPublication } from "../site-uploads";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { redactWorkspaceArtifactProvenance } from "../workspace-artifact-provenance";
-import { AppPackageError, jsonBytes, ownPackageId, reason } from "./service";
+import {
+  AppPackageError,
+  appPackageFilesAt,
+  exportAppPackage,
+  jsonBytes,
+  ownPackageId,
+  reason,
+} from "./service";
 import { appSyncHooks, syncName } from "./syncs";
+import {
+  APP_CUSTOMIZED_MESSAGE,
+  appPackageCustomized,
+  applyPackageSkills,
+  planPackageSkills,
+  type PackageSkillPlan,
+  type PackageSkillWriter,
+} from "./skills";
+import { addPackageAutomations } from "./automations";
 
 /**
  * Upgrading an app from a package (docs/app-packages.md#upgrade): a plan of
@@ -82,6 +105,22 @@ export function appUpgradeOperationKey(
     .digest("hex")}`;
 }
 
+/**
+ * The key of one "go back" request (its caller and idempotency key), kept on
+ * the saved state it applied, so a retry of `previous: true` finds the same
+ * one after it was gone back to.
+ */
+export function appRestoreRequestKey(
+  prefix: "subject" | "attempt",
+  namespace: string,
+  appId: string,
+  idempotencyKey: string,
+): string {
+  return `${prefix}:${createHash("sha256")
+    .update(`${namespace}:app-restore:${appId}:${idempotencyKey}`)
+    .digest("hex")}`;
+}
+
 const toolKey = (tool: ToolGatewayIdentity) => `${tool.serverId}\u0000${tool.toolName}`;
 
 type Prepared = {
@@ -96,6 +135,9 @@ type Prepared = {
   sqlEnabled: boolean;
   /** The package's asset files, checked; null without any (or when they're invalid). */
   assets: DecodedSiteAssets | null;
+  /** What came with the app from its package, or null when it wasn't installed from one. */
+  install: AppPackageInstall | null;
+  skills: PackageSkillPlan | null;
 };
 
 /** A version's asset files for comparing: path and content, by path. */
@@ -166,6 +208,15 @@ async function prepare(
   // Managers only: the same check as reading the app's data definitions.
   const data = await describeSiteData(deps, grant, appId);
   const sql = await describeSiteSql(deps, grant, appId);
+  const install = await getAppPackageInstall(deps.db, grant.workspaceId, appId);
+  // A customized app is forked for good: an update could break or drop the
+  // fields its changes rely on, so it gets no package updates.
+  if (await appPackageCustomized(deps, grant, install, ref.version.id))
+    throw new ApiHttpError(409, {
+      code: "conflict",
+      message: APP_CUSTOMIZED_MESSAGE,
+      details: { reason: "customized" },
+    });
   const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
   const destructive: AppPackageProblem[] = [];
   const conflicts: AppPackageProblem[] = [];
@@ -395,6 +446,35 @@ async function prepare(
       }
   }
 
+  // What came with the app: its version label, Skills and automations.
+  plan.packageVersion = {
+    current: install?.packageVersion ?? null,
+    next: pkg.packageVersion ?? null,
+  };
+  let skills: PackageSkillPlan | null = null;
+  if (pkg.skills?.length || install?.skills.length) {
+    skills = await planPackageSkills(deps, grant, {
+      skills: pkg.skills ?? [],
+      links: install?.skills ?? [],
+      packageId: pkg.packageId ?? currentPackageId,
+      mode: "upgrade",
+    });
+    plan.skills = {
+      added: skills.added,
+      changed: skills.changed,
+      unchanged: skills.unchanged,
+      kept: skills.kept,
+    };
+    problems.push(...skills.problems);
+  }
+  const automationNames = new Set((install?.automations ?? []).map((entry) => entry.name));
+  plan.automations = {
+    added: (pkg.automations ?? [])
+      .map((automation) => automation.name)
+      .filter((name) => !automationNames.has(name)),
+    kept: [...automationNames],
+  };
+
   return {
     pkg,
     plan,
@@ -405,6 +485,8 @@ async function prepare(
     queries,
     sqlEnabled: sql.enabled,
     assets: decodedAssets,
+    install,
+    skills,
   };
 }
 
@@ -414,6 +496,61 @@ function refused(message: string, plan: AppPackageUpgradePlan): ApiHttpError {
     message,
     details: { plan },
   });
+}
+
+/** Whether applying the plan changes anything at all. */
+export function upgradePlanChanges(plan: AppPackageUpgradePlan): boolean {
+  return (
+    plan.version.changed ||
+    plan.collections.added.length + plan.collections.changed.length > 0 ||
+    plan.migrations.new.length > 0 ||
+    plan.queries.added.length + plan.queries.changed.length + plan.queries.removed.length > 0 ||
+    plan.syncs.added.length + plan.syncs.changed.length > 0 ||
+    (plan.skills?.added.length ?? 0) + (plan.skills?.changed.length ?? 0) > 0 ||
+    (plan.automations?.added.length ?? 0) > 0 ||
+    (plan.packageVersion?.next ?? null) !== (plan.packageVersion?.current ?? null)
+  );
+}
+
+/**
+ * The package an upgrade applies: the one given, or with `previous` a saved
+ * state of the app from before an upgrade: the one with that id (also once
+ * gone back to, so a retry applies the same one) or, with `true`, the latest
+ * not gone back to. Its package is the saved definitions plus the app's
+ * files at the saved version. The app must be one the caller sees; the
+ * upgrade itself checks they manage it.
+ */
+export async function resolveAppUpgradeSource(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  appId: string,
+  request: {
+    package?: Record<string, unknown> | undefined;
+    previous?: boolean | string | undefined;
+  },
+  /** appRestoreRequestKey of this request, when it has an idempotency key. */
+  restoreKey: string | null = null,
+): Promise<{ package: unknown; snapshotId: string | null }> {
+  if (!request.previous) return { package: request.package, snapshotId: null };
+  const viewer = await siteViewerForGrant(deps.db, grant);
+  await getWorkspaceArtifactCurrent(deps.db, grant.workspaceId, viewer, appId);
+  const snapshot = await getAppPackageSnapshot(
+    deps.db,
+    grant.workspaceId,
+    appId,
+    typeof request.previous === "string" ? { id: request.previous } : { restoreKey },
+  );
+  if (!snapshot)
+    throw new ApiHttpError(409, {
+      code: "conflict",
+      message: "This app has no earlier version saved to go back to",
+    });
+  const saved = snapshot.package as { app?: Record<string, unknown> };
+  const files = await appPackageFilesAt(deps, grant, appId, snapshot.versionId);
+  return {
+    package: { ...saved, app: { ...saved.app, ...files } },
+    snapshotId: snapshot.id,
+  };
 }
 
 /**
@@ -435,6 +572,12 @@ export async function upgradeAppFromPackage(
     dryRun?: boolean | undefined;
     allowDestructive?: boolean | undefined;
     provenance: AppUpgradeProvenance | null;
+    /** Who saves the package's Skills, or why no one can. */
+    skillWriter: PackageSkillWriter;
+    /** The saved state this applies (going back), marked gone back to once it applied. */
+    snapshotId?: string | null | undefined;
+    /** appRestoreRequestKey of this request, kept on the saved state it applied. */
+    restoreKey?: string | null | undefined;
   },
 ): Promise<AppPackageUpgradeResponse> {
   const prepared = await prepare(deps, grant, appId, input.package);
@@ -445,6 +588,8 @@ export async function upgradeAppFromPackage(
     migrations: [],
     queries: [],
     syncs: [],
+    skills: [],
+    automations: [],
   };
   const notUpgraded: AppPackageProblem[] = [];
   const viewer = await siteViewerForGrant(deps.db, grant);
@@ -482,6 +627,34 @@ export async function upgradeAppFromPackage(
   const tools = plan.version.changed
     ? await toolsForCaller(deps, grant, prepared, input.provenance, notUpgraded)
     : prepared.tools;
+
+  // 0. The app as it is now, to go back to: saved once per upgrade (not
+  // when going back), keeping the latest few. Without it the upgrade still
+  // runs; the app's earlier versions stay in its history.
+  if (!input.snapshotId && upgradePlanChanges(plan)) {
+    try {
+      const before = await current();
+      if (!before.currentVersion) throw new Error("The app has no published version");
+      // Its files stay in the app's version history; only the definitions are saved.
+      const exported = await exportAppPackage(deps, grant, appId, {}, { files: false });
+      const { html: _html, source: _source, assets: _assets, ...app } = exported.package.app;
+      await saveAppPackageSnapshot(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        appId,
+        packageVersion: prepared.install?.packageVersion ?? null,
+        versionId: before.currentVersion.id,
+        operationKey: input.provenance.operationKey,
+        package: { ...exported.package, app } as unknown as Record<string, unknown>,
+        keep: APP_PACKAGE_SNAPSHOTS_KEPT,
+      });
+    } catch (error) {
+      notUpgraded.push({
+        part: "app",
+        reason: reason(error, "saving the app as it was, to go back to"),
+      });
+    }
+  }
 
   // 1. Collections the package adds or changes.
   for (const { name, ...definition } of prepared.collections) {
@@ -619,8 +792,63 @@ export async function upgradeAppFromPackage(
     }
   }
 
+  // 6. Skills (replacing their files) and new automations (switched off).
+  let skillLinks = prepared.install?.skills ?? [];
+  if (prepared.skills) {
+    const applied = await applyPackageSkills(
+      deps,
+      grant,
+      {
+        plan: prepared.skills,
+        links: skillLinks,
+        writer: input.skillWriter,
+        operationKey: input.provenance.operationKey,
+        appTitle: (await current()).title,
+      },
+      notUpgraded,
+    );
+    skillLinks = applied.links;
+    upgraded.skills = applied.written;
+  }
+  let automations = prepared.install?.automations ?? [];
+  if (pkg.automations?.length) {
+    const added = await addPackageAutomations(
+      deps,
+      grant,
+      {
+        appId,
+        automations: pkg.automations,
+        existing: automations,
+        surface: input.provenance.sourceAttemptId === null ? "http" : "first_party_mcp",
+      },
+      notUpgraded,
+    );
+    automations = added.automations;
+    upgraded.automations = added.added;
+  }
+
+  // What the app now has from its package: the version it published is the
+  // one later "Modified" checks compare with.
+  const after = await current();
+  await putAppPackageInstall(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    appId,
+    packageVersion: input.snapshotId
+      ? (pkg.packageVersion ?? null)
+      : (pkg.packageVersion ?? prepared.install?.packageVersion ?? null),
+    versionId: after.currentVersion?.id ?? null,
+    skills: skillLinks,
+    automations,
+  });
+  if (input.snapshotId)
+    await consumeAppPackageSnapshot(deps.db, grant.workspaceId, {
+      snapshotId: input.snapshotId,
+      restoreKey: input.restoreKey ?? input.provenance.operationKey,
+    });
+
   return {
-    app: await current(),
+    app: after,
     dryRun: false,
     applied: true,
     plan,

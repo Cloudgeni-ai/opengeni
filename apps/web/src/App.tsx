@@ -385,6 +385,10 @@ const LazyArtifactsRoute = lazyRouteComponent(
   () => import("@opengeni/react/app/routes/artifacts"),
   "ArtifactsRoute",
 );
+const LazyAppsRoute = lazyRouteComponent(
+  () => import("@opengeni/react/app/routes/apps"),
+  "AppsRoute",
+);
 const LazySiteViewRoute = lazyRouteComponent(
   () => import("@opengeni/react/app/routes/site-view"),
   "SiteViewRoute",
@@ -1313,6 +1317,13 @@ const workspaceArtifactsRoute = createRoute({
   validateSearch: artifactReturnSearch,
   component: Artifacts,
 });
+// Apps: the apps here and the ready-made ones to add (docs/app-packages.md).
+const workspaceAppsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "apps",
+  validateSearch: artifactReturnSearch,
+  component: Apps,
+});
 const workspaceArtifactDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   // A Site's details, by tab; without a tab it opens the Site view instead.
@@ -1562,6 +1573,7 @@ const routeTree = rootRoute.addChildren([
     workspaceMemoryRoute,
     workspaceStateRoute,
     workspaceArtifactsRoute,
+    workspaceAppsRoute,
     workspaceRetainedArtifactRoute,
     workspaceArtifactDetailRoute,
     workspaceSiteViewRoute,
@@ -2080,6 +2092,11 @@ function Artifacts() {
   const { workspaceId } = workspaceArtifactsRoute.useParams();
   const { fromSession } = workspaceArtifactsRoute.useSearch();
   return <LazyArtifactsRoute workspaceId={workspaceId} fromSession={fromSession} />;
+}
+function Apps() {
+  const { workspaceId } = workspaceAppsRoute.useParams();
+  const { fromSession } = workspaceAppsRoute.useSearch();
+  return <LazyAppsRoute workspaceId={workspaceId} fromSession={fromSession} />;
 }
 function IdentityLink() {
   const { linkId } = identityLinkRoute.useParams();

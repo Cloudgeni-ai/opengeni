@@ -17,8 +17,10 @@ import type {
   AppPackageInstallResponse,
   AppPackageUpgradeRequest,
   AppPackageUpgradeResponse,
+  AppPackageStatus,
   AppTemplate,
   ListAppTemplatesResponse,
+  ListAppPackageStatusResponse,
 } from "@opengeni/contracts";
 import type {
   BillingAlertSettings,
@@ -10347,6 +10349,7 @@ export class OpenGeniClient {
       "includeSubSessions",
       "q",
       "kind",
+      "excludeKind",
       "sort",
       "status",
       "limit",
@@ -10595,7 +10598,9 @@ export class OpenGeniClient {
   /**
    * Upgrades an app from a newer package (docs/app-packages.md#upgrade):
    * `dryRun` returns the plan; otherwise the package's version becomes the
-   * app's new version and only its new data definitions run.
+   * app's new version and only its new data definitions run. `previous` (a
+   * saved state's id from `listAppPackageStatus`, or `true` for the latest)
+   * instead goes back to the app's state before an upgrade.
    */
   async upgradeAppPackage(
     workspaceId: string,
@@ -10625,6 +10630,24 @@ export class OpenGeniClient {
       options,
     );
     return response.templates;
+  }
+
+  /**
+   * Installed apps with their package version, local changes, Skills,
+   * automations, restorable previous version and any ready-made update.
+   */
+  async listAppPackageStatus(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<AppPackageStatus[]> {
+    const response = await this.requestJson<ListAppPackageStatusResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/app-packages/status`,
+      undefined,
+      undefined,
+      options,
+    );
+    return response.apps;
   }
 
   async setWorkspaceArtifactStatus(

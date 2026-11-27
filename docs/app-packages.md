@@ -7,10 +7,12 @@ again makes another copy; [upgrading](#upgrade) an app from a newer package
 keeps the app and its data and applies only what changed.
 
 Code: `packages/contracts/src/app-package.ts` (format and lenient parser),
-`apps/api/src/app-packages/` (export, install, `upgrade.ts`, `exports.ts`
-for export file cleanup, and the syncs hook),
-`apps/api/src/routes/app-packages.ts`, `apps/api/src/mcp/app-package-tools.ts`,
-`packages/react/src/app/components/artifacts/app-package.tsx` (console).
+`apps/api/src/app-packages/` (export, install, `upgrade.ts`, `skills.ts`,
+`automations.ts`, `status.ts`, `exports.ts` for export file cleanup, and the
+syncs hook), `apps/api/src/routes/app-packages.ts`,
+`apps/api/src/mcp/app-package-tools.ts`, `packages/db/src/app-package-installs.ts`,
+`packages/react/src/app/routes/apps.tsx` (the Apps page) and
+`packages/react/src/app/components/artifacts/app-package.tsx` (dialogs).
 
 ## Format (version 1)
 
@@ -20,6 +22,7 @@ One JSON file, named `<title>.opengeni-app.json`:
 | --- | --- |
 | `format`, `version` | `"opengeni.app-package"`, `1` |
 | `packageId` | The app's id across its packages (see [Provenance](#provenance)) |
+| `packageVersion` | Optional version label, numbers only (`1.2.0`); compared number by number to offer [updates](#updates-and-going-back) |
 | `exportedAt` | ISO time of the export |
 | `app` | `title`, `description`, `html` of the current version, its retained editable `source` when it has one, and a [multi-file](published-sites.md) build's `assets` (`{ files: [{ path, base64 }] }`, the same shape as an asset upload) |
 | `tools` | The tools the version requests ([requested tools](published-sites.md)), as connector-level entries: the author's account routes become their connector (`connectorToolIdentities` in `apps/api/src/site-tool-routing.ts`) |
@@ -27,6 +30,8 @@ One JSON file, named `<title>.opengeni-app.json`:
 | `sql.migrations` | Site SQL migrations in applied order (`name`, `sql`) |
 | `sql.queries` | Site SQL named queries (`name`, `sql`, access, parameters) |
 | `syncs` | Data sync definitions, as plain objects (see [Syncs](#syncs)) |
+| `skills` | [Skills](#skills) the app comes with: each `{ files: [{ path, content }] }`, a SKILL.md folder; name and description come from its SKILL.md. At most 10 |
+| `automations` | [Automations](#automations) it comes with: each `{ name, prompt, schedule }`. At most 5 |
 | `sidebar` | The app's links in the workspace's default [sidebar](sidebar-layout.md): each link's `path` and `label`, and the `group` label it sits in. Absent when it has none |
 | `demoData` | Only when the author asked: `records` of shared collections (`shared`, `shared_read`), `sqlRows` per table and `files` (the app's shared Site files, see [Files](#files-and-blob-values)). Per-person (`per_viewer`) and submission (`append_only`) collections, and private files, belong to the people who wrote them and are listed in `notExported` |
 
@@ -36,7 +41,8 @@ base64 size); 50 syncs; 10 sidebar links. Parts over a limit are left
 out and listed in the export's `notExported`, not a failed export.
 
 Every addition since the first release is optional (`packageId`,
-`app.assets`, `demoData.files`, blob values), so older version 1 packages stay readable and the version stays 1.
+`packageVersion`, `skills`, `automations`, `app.assets`, `demoData.files`,
+blob values), so older version 1 packages stay readable and the version stays 1.
 
 Install validates leniently: unknown fields are ignored, a newer `version` is
 read as far as version 1 goes, and an invalid collection, migration, query,
@@ -97,7 +103,10 @@ Steps, each reported rather than failing the install:
    otherwise to their own sidebar. A link
    goes into the group of the same label when there is one, else into a new
    group. Nothing is added when the app already has a link (a replay).
-6. Load demo data (default on when the package has some; `demoData: false`
+6. Add its [Skills](#skills) and [automations](#automations), and record the
+   install (`app_package_installs`: package version, the app version it
+   wrote, linked Skills and automations).
+7. Load demo data (default on when the package has some; `demoData: false`
    declines), only into empty collections and tables.
 
 The idempotency key, together with the package's content, makes the app
@@ -113,7 +122,9 @@ accounts; nothing from the author's connections is packaged.
 
 `POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/package/upgrade`
 (`artifacts:publish` and manager of the app). Body
-`{ package, dryRun?, allowDestructive?, idempotencyKey? }`. Returns 200 with
+`{ package | previous: <saved state id> | true, dryRun?, allowDestructive?, idempotencyKey? }`
+(exactly one of `package` and `previous`; see [Updates and going
+back](#updates-and-going-back)). Returns 200 with
 `{ app, dryRun, applied, plan, upgraded, notUpgraded }`. Code:
 `apps/api/src/app-packages/upgrade.ts`.
 
@@ -211,9 +222,9 @@ startup:
 
 - `app_export { appId, demoData? }` (`artifacts:read`): stores the package and
   returns a short-lived download link, its filename and a summary of contents.
-- `app_upgrade { appId, fileId | package, dryRun?, allowDestructive?, idempotencyKey }`
+- `app_upgrade { appId, fileId | package | previous, dryRun?, allowDestructive?, idempotencyKey }`
   (`artifacts:publish`; `files:read` to read `fileId`): plans and applies an
-  [upgrade](#upgrade). Agents dry-run first, tell the person the plan, and pass
+  [upgrade](#upgrade), or with `previous: true` [goes back](#updates-and-going-back). Agents dry-run first, tell the person the plan, and pass
   `allowDestructive` only with their explicit agreement.
 - `app_install { fileId | package, title?, visibility?, demoData?, idempotencyKey }`
   (`artifacts:publish`; `files:read` to read `fileId`): installs and returns
@@ -222,13 +233,101 @@ startup:
   account for the tool's connector); each other packaged tool is left out and
   reported by name. Installing from the Apps page keeps them all.
 
+## Skills
+
+A package can carry Skills: the instructions that tell agents how to use the
+app (what goes in it, when to update it). They use the workspace's ordinary
+Skills (`saveSkill`), not a separate store.
+
+- **Install** adds each one as a workspace Skill (its `stableKey` is the
+  Skill's name) and links it to the app in `app_package_installs.skills`
+  (`skillId`, `name`, and the `revisionId` the package wrote, or
+  `pendingRevisionId` while it waits for review). Copies of one package share
+  their Skills: installing another copy links the shared Skill as it is here
+  and only an upgrade, after its plan,
+  replaces it. A different Skill with the same name already here stays as it
+  is and is reported. Writing workspace Skills needs the same permission as
+  the Skills page (`documents:manage`); without it the app installs and each
+  Skill is listed in `notInstalled`. Skills are written as the caller: a
+  person, a key (as a service) or an agent, under the workspace's Agent
+  learning setting (Review first leaves them pending).
+- **Upgrade** plans them like the rest (`plan.skills`: `added`, `changed`,
+  `unchanged`, and `kept`, Skills the app came with that the package no
+  longer has, which stay) and writes only changed ones.
+- **Export** writes the linked Skills' current files, so an edited Skill
+  travels with the app.
+- **Archiving or deleting the app keeps its Skills.** They are ordinary
+  workspace Skills; while the app is archived they show "From app <title>"
+  on the Skills page (deleting the app drops the link and the label). Remove
+  one there when it's no longer wanted.
+
+## Automations
+
+A package can carry automations (scheduled agent runs): `name`, `prompt` and
+an automation `schedule`. Install adds each one **switched off**, owned by
+the installer; `{{appId}}` in the prompt becomes the new app's id (and back
+on export). Adding them needs `scheduled_tasks:manage`, otherwise each is
+listed in `notInstalled`. Upgrades add new ones (also off) and keep the
+app's existing ones as they are (`plan.automations`: `added`, `kept`). They
+are matched by the name they came with, so renaming one here doesn't add it
+again. Archiving the app leaves its automations as they are; switch them off
+on the Automations page if they shouldn't run.
+
+## Updates and going back
+
+`GET /v1/workspaces/:workspaceId/app-packages/status` (`artifacts:read`;
+SDK `listAppPackageStatus`) lists the installed apps the caller can see
+(also ones installed before installs were recorded, which show no version
+until their first update), each
+with its `packageVersion`, `archived`, `customized`, its Skills (each with
+`modified`), its automations, `previous` (a saved earlier state) and `update`
+(a ready-made app with the same `packageId` and a later `packageVersion`).
+
+- **Customized**: the app's current version isn't the one the package wrote,
+  or a linked Skill's live revision is neither the one the package wrote nor
+  one it saved for review. Apps stay editable (no lock), but a customized app
+  is forked for good: an update could break or drop the fields its changes
+  rely on. It shows **Customized** ("Customized apps don't get updates."),
+  never **Update available** or **Restore previous version** (`update` and
+  `previous` are null), and the API refuses its package upgrades and going
+  back with 409 (`details.reason: "customized"`), for the console, the API
+  and `app_upgrade` alike. Undoing the changes doesn't bring updates back:
+  any change publishes a new version. A newer ready-made version shows under
+  Available again, to add as a separate app. A Skill shared by copies of one
+  package is workspace state: editing it customizes every copy.
+- **Update**: the Apps page shows **Update available**; it opens the
+  ordinary upgrade with the ready-made app's package, dry run first.
+- **Going back**: before applying an upgrade that changes something, the API
+  saves the app as it is in `app_package_snapshots`, keeping the last 3 per
+  app: the app version it was at (its files stay in the app's version
+  history) and its definitions and Skills as a package without those files.
+  `previous` upgrades the app from one the same way (plan first): its id
+  (`status.previous.id`, so the plan and a retry apply the same one) or
+  `true` for the latest. Once applied it is marked gone back to, with the
+  request's key, so going back again reaches the one before and a retry of
+  the same request (same `idempotencyKey`) applies the same one once. With
+  none it answers 409. Data is never rolled back: migrations already run
+  stay, and so do Skills and automations added since.
+
 ## Console
 
-The Sites tab of Artifacts has **Install app** for people who can publish:
-choose a package file, optionally include its demo data, Install. The new app
-opens. An app's "…" menu has **Export app** (no data) and **Upgrade from
-package** for its managers: choose a package file, see the plan, Upgrade.
+The rail's **Apps** page lists the apps here, with their version and
+**Customized** or **Update available**, and below them the ready-made apps not
+added yet. Header actions: **Install from file** (for people who can publish)
+and **New app**. Nothing installs on a click: choosing a ready-made app or a
+file opens one dialog first. For a ready-made app it shows the app's
+description and a [preview](#preview) of the app; then, for either, it says
+installing adds the app and its Skills for agents, names each Skill with its
+one line, lists automations (added off), offers demo data when the package
+has some, and has one **Install** button. The new app opens.
+
+An app's "…" menu on the Apps page has **Update to x** and **Restore previous
+version** when they apply; its settings' More has **Export**, **Upgrade**
+(from a package file) and **Previous version**. Each shows the plan first.
 Destructive changes need an explicit confirm; conflicts can't be upgraded.
+
+Apps aren't listed on Artifacts; links to its old Apps tab
+(`/artifacts?kind=site`) open the Apps page.
 
 ## Export file cleanup
 
@@ -247,20 +346,33 @@ recorded export objects.
 `GET /v1/workspaces/:workspaceId/app-templates` (`artifacts:read`; SDK
 `listAppTemplates`) lists ready-made apps: content files in
 `packages/core/src/app-templates/*.app.json` (schema `AppTemplate`: `key`,
-`name`, `description`, `team` and a `package`). A file that isn't a valid
-package, or whose package has problems, is skipped. Four ship, in this
-order: Issue tracker, Incident log, Feedback board and Decision log. Each
-keeps its records in Site Data, so it works right after it is added (Feedback
-board's votes are a `per_viewer` collection). Capabilities **Ready-made** and
-the Artifacts page (its **Apps** tab, and its empty state) offer them; both add
-one by installing its `package` through the ordinary install above, keyed
-`ready-made:<key>`. Install keys belong to the person and the package, so the
+`name`, `description`, `team`, a `package` and `preview` sample records). A file that isn't a valid
+package, or whose package has problems, is skipped. Five ship, in this
+order: Work summary, Issue tracker, Incident log, Feedback board and Decision
+log. Each has a fixed `packageId` and a `packageVersion`; raising the version
+in the file offers the update to every app installed from it. Each keeps its
+records in Site Data, so it works right after it is added (Feedback board's
+votes are a `per_viewer` collection). **Work summary** comes with a
+`work-summary` Skill (what agents add and how) and a weekday "Update the work
+summary" automation, added off. The Apps page offers them; it installs one
+through the ordinary install above, keyed `ready-made:<key>`. Install keys belong to the person and the package, so the
 same person adding the same template version again gets the app they added
 (an archived one is added fresh); a teammate, or a newer template version,
 adds a separate copy with its own data. Then the app opens, and asks to
 connect any tool it uses.
 Ready-made apps built on a connected tool (a Linear or GitHub board) come
 later, with app server code.
+
+### Preview
+
+Before installing, the dialog shows the ready-made app's own page running on
+its template's `preview.records` (sample records per collection; `{{today}}`
+or `{{today-N}}` in a string is that day's date). It runs in the usual
+sandboxed app frame, drawn scaled down and inert (no clicks or focus), with a
+read-only in-memory Site Data (`packages/react/src/app/lib/app-template-preview.ts`):
+reads list the sample, every write and tool call is refused, and nothing
+reaches the server. The sample records are not demo data: installing never
+adds them.
 
 ## Self-hosting
 
@@ -272,6 +384,7 @@ later, with app server code.
 - Not packaged anywhere: private files, records and files past the demo
   limits, publication settings, sharing and tool allowances. Upgrades never
   change these.
-- Packages carry no stable package id: an app doesn't record which package it
-  came from, so any package can be offered as an upgrade of any app, and the
-  plan shows what would change.
+- An app installed before migration 1669 has no install record: it is
+  listed with no version or Customized, and a ready-made one offers its update.
+- A shared Skill's update saved for review (Review first) is linked as
+  pending on every copy that shares it, so approving it customizes none.

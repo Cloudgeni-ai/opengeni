@@ -44,8 +44,8 @@ export function artifactRoute(kind: ArtifactKind) {
 }
 
 /**
- * Where the artifact opens, as a plain URL (row links, Copy link): a Site in
- * the Site view with its chat beside it, anything else on its own page.
+ * Where the artifact opens, as a plain URL (row links, Copy link): an app on
+ * its own page, anything else on its own page.
  */
 export function artifactPath(
   workspaceId: string,
@@ -53,7 +53,7 @@ export function artifactPath(
   fromSession?: string,
 ): string {
   if (item.kind === "site")
-    return `/workspaces/${encodeURIComponent(workspaceId)}/sites/${encodeURIComponent(item.id)}`;
+    return `/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(item.id)}`;
   const base = artifactRoute(item.kind)
     .replace("$workspaceId", encodeURIComponent(workspaceId))
     .replace("$artifactId", encodeURIComponent(item.id));

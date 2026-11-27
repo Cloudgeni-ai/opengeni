@@ -67,7 +67,7 @@ describe("Site navigation", () => {
         return element?.scrollTop ?? -1;
       });
 
-  test("a Site opened from the Artifacts page goes back to it as it was", async () => {
+  test("an app opened from the Artifacts page opens on its own page, and Back returns as it was", async () => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 560 } });
     try {
       await open(page, `/workspaces/${workspaceId}/artifacts?sort=title`);
@@ -77,20 +77,13 @@ describe("Site navigation", () => {
       const scrolled = await listScroll(page);
       expect(scrolled).toBeGreaterThan(0);
 
-      // Opening a Site keeps the page's query in the Site view's address...
+      // The app opens on its own page, the same however it's opened.
       await card.click();
-      await page.waitForURL(new RegExp(`/sites/${pricingSiteId}\\?`, "u"));
-      expect(new URL(page.url()).searchParams.get("sort")).toBe("title");
-      // ...and the Site's toolbar starts with Back to it, a real link.
-      const back = page.getByRole("link", { name: "Back to Artifacts" });
-      await back.waitFor();
-      expect(await back.getAttribute("href")).toBe(
-        `/workspaces/${workspaceId}/artifacts?sort=title`,
-      );
-      await page.frameLocator("iframe").first().locator("body").waitFor();
+      await page.waitForURL(new RegExp(`/apps/${pricingSiteId}/?$`, "u"));
 
-      // Back returns to the page with its sort and its scroll.
-      await back.click();
+      // The browser's (and the desktop app's) Back returns to the page with
+      // its sort and its scroll.
+      await page.goBack();
       await page.waitForURL(/\/artifacts\?sort=title$/u);
       await page.getByText("Pricing calculator", { exact: true }).first().waitFor();
       let restored = -1;
@@ -100,13 +93,6 @@ describe("Site navigation", () => {
         await page.waitForTimeout(100);
       }
       expect(Math.abs(restored - scrolled)).toBeLessThanOrEqual(2);
-
-      // The browser's (and the desktop app's) Back goes there too.
-      await page.getByText("Pricing calculator", { exact: true }).first().click();
-      await page.waitForURL(/\/sites\//u);
-      await page.goBack();
-      await page.waitForURL(/\/artifacts\?sort=title$/u);
-      await page.getByText("Pricing calculator", { exact: true }).first().waitFor();
     } finally {
       await page.close();
     }

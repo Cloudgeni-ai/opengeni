@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { LinkIcon } from "lucide-react";
 import type { SkillRecord, SkillScope, SkillSummary } from "@opengeni/sdk";
 import {
@@ -17,6 +17,7 @@ import { useOrganizationNameFrom } from "@/lib/use-organization-name";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { useAppPackageStatus } from "@opengeni/react/app/lib/use-app-package-status";
 import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 
 /*
@@ -91,6 +92,15 @@ export function SkillsPanelContent({
   const organizationName =
     useOrganizationNameFrom(context, organizationId, canManageOrganization) ?? "your organization";
   const [reachFor, setReachFor] = useState<string | null>(null);
+  // Skills an app installed keep its name, also after the app is archived.
+  const appPackages = useAppPackageStatus(client, workspaceId).apps;
+  const skillSources = useMemo(() => {
+    const sources = new Map<string, string>();
+    for (const app of appPackages.values())
+      for (const skill of app.skills)
+        if (!sources.has(skill.id)) sources.set(skill.id, `From app ${app.title}`);
+    return sources;
+  }, [appPackages]);
 
   useEffect(() => {
     if (!openSkillRef) return;
@@ -106,6 +116,7 @@ export function SkillsPanelContent({
       workspaceId={workspaceId}
       canManage={canManage}
       query={query}
+      skillSources={skillSources}
       owner={owner}
       showUnavailable={canManageOrganization}
       refreshRevision={refreshRevision}

@@ -40,14 +40,12 @@ describe("hiddenNavEntries", () => {
     ]);
   });
 
-  test("Apps hides alone; hiding Artifacts hides Apps too", () => {
-    expect([...hiddenNavEntries(["apps"]).targets]).toEqual([
-      "/workspaces/$workspaceId/artifacts?kind=site",
-    ]);
+  test("Apps hides alone; hiding Artifacts hides Apps too, as before", () => {
+    expect([...hiddenNavEntries(["apps"]).targets]).toEqual(["/workspaces/$workspaceId/apps"]);
     expect([...hiddenNavEntries(["artifacts", "get_started"]).targets]).toEqual([
       "/workspaces/$workspaceId/artifacts",
       "/workspaces/$workspaceId/get-started",
-      "/workspaces/$workspaceId/artifacts?kind=site",
+      "/workspaces/$workspaceId/apps",
     ]);
   });
 });

@@ -2121,6 +2121,8 @@ export const FORCE_RLS_TABLES = [
   "api_keys",
   "app_notifications",
   "app_package_exports",
+  "app_package_installs",
+  "app_package_snapshots",
   "app_server_runs",
   "app_sync_keys",
   "app_sync_queue",
@@ -2743,6 +2745,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "api_keys",
   // 1542_app_package_exports: stored app package files and their sweep.
   "app_package_exports",
+  // 1669_app_package_installs: installed app packages and their saved earlier states.
+  "app_package_installs",
+  "app_package_snapshots",
   // 1554_app_server_code: runs of an app's server code (inserts, prune deletes).
   "app_server_runs",
   // 1541_app_sync_paging_and_leases: the keys each sync wrote (removeMissing).

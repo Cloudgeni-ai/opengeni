@@ -183,6 +183,8 @@ export interface SkillsPanelProps {
   listTitle?: string | null | undefined;
   /** Filters the loaded list by name. */
   query?: string | undefined;
+  /** Where a Skill came from, by Skill id ("From app Work summary"), shown on its row. */
+  skillSources?: ReadonlyMap<string, string> | undefined;
   owner?: SkillOwnerFilter | undefined;
   /** Also list organization Skills that don't work in this workspace. */
   showUnavailable?: boolean | undefined;
@@ -242,6 +244,7 @@ export function SkillsPanel({
   refusalCodes,
   listTitle = null,
   query = "",
+  skillSources,
   owner = "all",
   showUnavailable = false,
   refreshRevision = 0,
@@ -991,11 +994,13 @@ export function SkillsPanel({
   const rows = matchingSkills.map((skill) => {
     const name = skillName(skill) || "Untitled skill";
     const state = skill.availableHere === false ? "Not used here" : skillStatus(skill);
-    const detail = describeRows
+    const base = describeRows
       ? state === "Installed"
         ? (skillShortDescription(skill.description) ?? "No description")
         : state
       : `${state} · ${SKILL_SCOPE_LABEL[skill.scope]}`;
+    const source = skillSources?.get(skill.id);
+    const detail = source ? `${source} · ${base}` : base;
     return {
       id: skill.id,
       name,

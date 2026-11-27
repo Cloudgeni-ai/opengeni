@@ -184,13 +184,19 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
       requestSessionWorkflowWakeDispatch: noop,
       signalApprovalDecision: noop,
       signalSessionControl: noop,
+      syncScheduledTask: noop,
+      deleteScheduledTaskSchedule: noop,
+      triggerScheduledTask: noop,
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
   } as unknown as AppDependencies;
   const app = createApp(deps);
   const identitySource = "example:instance";
   const service = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-  const person = async (workspaceId: string): Promise<Who> => {
+  const person = async (
+    workspaceId: string,
+    permissions: readonly string[] = PERMISSIONS,
+  ): Promise<Who> => {
     const identity = await ensureExternalIdentity(db.db, {
       accountId,
       source: identitySource,
@@ -201,7 +207,7 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
       headers: service,
       body: JSON.stringify({
         identity: { source: identitySource, externalId: identity.externalId },
-        permissions: PERMISSIONS,
+        permissions,
         operationId: crypto.randomUUID(),
       }),
     });
@@ -212,7 +218,7 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
         accountId,
         workspaceId,
         subjectId: identity.subjectId,
-        permissions: [...PERMISSIONS] as AccessGrant["permissions"],
+        permissions: [...permissions] as AccessGrant["permissions"],
         principalKind: "human_session",
       },
       headers: {
@@ -253,6 +259,7 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
     target,
     author,
     installer,
+    person,
     call,
     appBase,
     objectStorage,
@@ -1584,3 +1591,188 @@ async function agentTools(
   };
   return { callTool, mcp };
 }
+
+const SKILL_MD = (line: string) =>
+  `---\nname: board-notes\ndescription: Add notes to the team board\n---\n\n${line}\n`;
+
+/** A package with a Skill and an automation, at a version. */
+function skilledPackage(version: string, skillLine: string): Record<string, unknown> {
+  return {
+    format: APP_PACKAGE_FORMAT,
+    version: 1,
+    packageId: "2b7e1c4d-5a6f-8b90-a1c2-d3e4f5a6b7c8",
+    packageVersion: version,
+    app: { title: "Board with notes", html: `<!doctype html><h1>Board ${version}</h1>` },
+    data: { collections: [{ name: "notes", accessMode: "shared" }] },
+    skills: [{ files: [{ path: "SKILL.md", content: SKILL_MD(skillLine) }] }],
+    automations: [
+      {
+        name: "Tidy the board",
+        prompt: "Tidy the board {{appId}}",
+        schedule: { type: "calendar", timeZone: "UTC", hour: 17, minute: 0 },
+      },
+    ],
+  };
+}
+
+test("packages carry Skills and automations; updates show them, and go back", async () => {
+  const f = await fixture();
+  const manager = await f.person(f.target.id, [
+    ...PERMISSIONS,
+    "documents:manage",
+    "scheduled_tasks:manage",
+  ]);
+  const installed = await f.install({ package: skilledPackage("1.0.0", "Version one.") }, manager);
+  expect(installed.status, installed.text).toBe(201);
+  expect(installed.json.notInstalled).toEqual([]);
+  expect(installed.json.installed).toMatchObject({
+    skills: ["board-notes"],
+    automations: ["Tidy the board"],
+  });
+  const appId = installed.json.app.id as string;
+  const statusPath = `/v1/workspaces/${f.target.id}/app-packages/status`;
+  const listed = async () =>
+    ((await f.call(manager, "GET", statusPath)).json.apps as any[]).find(
+      (entry) => entry.appId === appId,
+    );
+  const first = await listed();
+  expect(first).toMatchObject({
+    packageVersion: "1.0.0",
+    customized: false,
+    archived: false,
+    previous: null,
+    update: null,
+  });
+  expect(first.skills).toMatchObject([{ name: "board-notes", modified: false }]);
+  expect(first.automations.map((entry: any) => entry.name)).toEqual(["Tidy the board"]);
+  // The automation is added switched off.
+  const tasks = await f.call(manager, "GET", `/v1/workspaces/${f.target.id}/scheduled-tasks`);
+  const task = (tasks.json.tasks ?? tasks.json.items ?? []).find(
+    (entry: any) => entry.id === first.automations[0].id,
+  );
+  if (task) expect(task.enabled ?? task.status !== "active").toBeFalsy();
+
+  // The update's plan names the version and the Skill it changes.
+  const base = f.appBase(f.target.id, appId);
+  const next = skilledPackage("1.1.0", "Version two.");
+  const planned = await f.call(manager, "POST", `${base}/package/upgrade`, {
+    package: next,
+    dryRun: true,
+  });
+  expect(planned.status, planned.text).toBe(200);
+  expect(planned.json.plan).toMatchObject({
+    packageVersion: { current: "1.0.0", next: "1.1.0" },
+    skills: { added: [], changed: ["board-notes"] },
+    automations: { added: [], kept: ["Tidy the board"] },
+  });
+  const applied = await f.call(manager, "POST", `${base}/package/upgrade`, {
+    package: next,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(applied.status, applied.text).toBe(200);
+  expect(applied.json.notUpgraded).toEqual([]);
+  expect(applied.json.upgraded.skills).toEqual(["board-notes"]);
+  const updated = await listed();
+  expect(updated).toMatchObject({ packageVersion: "1.1.0", customized: false });
+  expect(updated.previous).toMatchObject({ packageVersion: "1.0.0" });
+  const skill = await f.call(
+    manager,
+    "GET",
+    `/v1/workspaces/${f.target.id}/skills/content/${updated.skills[0].id}`,
+  );
+  expect(skill.status, skill.text).toBe(200);
+  expect(skill.text).toContain("Version two.");
+
+  // Going back plans and applies the saved 1.0.0 the same way.
+  const back = await f.call(manager, "POST", `${base}/package/upgrade`, {
+    previous: true,
+    dryRun: true,
+  });
+  expect(back.status, back.text).toBe(200);
+  expect(back.json.plan).toMatchObject({
+    packageVersion: { current: "1.1.0", next: "1.0.0" },
+    skills: { changed: ["board-notes"] },
+  });
+  const savedId = updated.previous.id as string;
+  const restoreKey = crypto.randomUUID();
+  const restored = await f.call(manager, "POST", `${base}/package/upgrade`, {
+    previous: savedId,
+    idempotencyKey: restoreKey,
+  });
+  expect(restored.status, restored.text).toBe(200);
+  const content = await f.call(manager, "GET", `${base}/content`);
+  expect(content.json.html).toContain("Board 1.0.0");
+  expect(await listed()).toMatchObject({ packageVersion: "1.0.0", previous: null });
+  // A retry of the same restore applies the same saved state once, not an older one.
+  for (const previous of [savedId, true]) {
+    const retried = await f.call(manager, "POST", `${base}/package/upgrade`, {
+      previous,
+      idempotencyKey: restoreKey,
+    });
+    expect(retried.status, retried.text).toBe(200);
+    expect(retried.json.plan.packageVersion).toMatchObject({ next: "1.0.0" });
+  }
+  expect(await listed()).toMatchObject({ packageVersion: "1.0.0" });
+  // Exactly one of package or previous.
+  const both = await f.call(manager, "POST", `${base}/package/upgrade`, {
+    package: next,
+    previous: true,
+    dryRun: true,
+  });
+  expect(both.status).toBe(422);
+
+  // Customized here: forked for good. No update or going back is offered,
+  // and the server refuses package updates (dry run included).
+  const current = await f.call(manager, "GET", `${base}/current`);
+  expect(current.status, current.text).toBe(200);
+  const edited = await f.call(manager, "POST", `${base}/versions`, {
+    html: "<!doctype html><h1>Our own board</h1>",
+    expectedCurrentVersionId: String(current.json.artifact.currentVersion.id),
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(edited.status, edited.text).toBeLessThan(300);
+  expect(await listed()).toMatchObject({ customized: true, update: null, previous: null });
+  for (const body of [
+    { package: next, dryRun: true },
+    { package: next, idempotencyKey: crypto.randomUUID() },
+  ]) {
+    const refusedUpgrade = await f.call(manager, "POST", `${base}/package/upgrade`, body);
+    expect(refusedUpgrade.status, refusedUpgrade.text).toBe(409);
+    expect(refusedUpgrade.text).toContain("customized");
+  }
+  const after = await f.call(manager, "GET", `${base}/content`);
+  expect(after.json.html).toContain("Our own board");
+
+  // Installing another copy from an older file links the shared Skill as it is.
+  const copy = await f.install({ package: skilledPackage("0.9.0", "Version zero.") }, manager);
+  expect(copy.status, copy.text).toBe(201);
+  expect(copy.json.notInstalled).toEqual([]);
+  expect(copy.json.installed.skills).toEqual(["board-notes"]);
+  const kept = await f.call(
+    manager,
+    "GET",
+    `/v1/workspaces/${f.target.id}/skills/content/${updated.skills[0].id}`,
+  );
+  expect(kept.status, kept.text).toBe(200);
+  expect(kept.text).not.toContain("Version zero.");
+
+  // Without permission to change Skills, the app installs and a new Skill is
+  // reported. (An existing shared Skill is only linked, as above.)
+  const fresh = {
+    ...skilledPackage("1.2.0", "Version three."),
+    packageId: "7c1d2e3f-4a5b-8c6d-9e0f-a1b2c3d4e5f6",
+    skills: [
+      {
+        files: [
+          {
+            path: "SKILL.md",
+            content: SKILL_MD("Version three.").replace("board-notes", "board-tidying"),
+          },
+        ],
+      },
+    ],
+  };
+  const plain = await f.install({ package: fresh });
+  expect(plain.status, plain.text).toBe(201);
+  expect(plain.json.notInstalled).toContainEqual(expect.objectContaining({ part: "skill" }));
+}, 120_000);

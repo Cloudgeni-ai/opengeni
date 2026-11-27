@@ -87,7 +87,7 @@ import {
 } from "../../lib/artifact-library-view";
 import { useSimplifiedInterface } from "../../lib/simplified-interface";
 import { cn } from "../../lib/utils";
-import { siteViewArtifactsReturn, type ArtifactReturnSearch } from "../../lib/routes";
+import type { ArtifactReturnSearch } from "../../lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
 import { useCopyArtifactLink } from "./copy-artifact-link";
 
@@ -296,9 +296,13 @@ function opensInViewer(item: ArtifactCatalogItem) {
   return item.kind === "image" || item.kind === "file";
 }
 
+/** What a page adds to one artifact: badges beside it and entries in its ⋯ menu. */
+export type ArtifactItemExtras = { badges?: ReactNode; menu?: ReactNode };
+
 type ArtifactOpenOptions = {
   workspaceId: string;
   item: ArtifactCatalogItem;
+  extras?: ArtifactItemExtras | undefined;
   sessionId?: string | undefined;
   onSelect?: ((item: ArtifactCatalogItem) => void) | undefined;
   /** A plain click on an image or file shows it in the list's viewer instead. */
@@ -317,6 +321,7 @@ type ArtifactOpenOptions = {
 function useArtifactOpen({
   workspaceId,
   item,
+  extras,
   sessionId,
   onSelect,
   onView,
@@ -381,13 +386,10 @@ function useArtifactOpen({
     onSelect
       ? onSelect(item)
       : item.kind === "site"
-        ? // A Site opens in the Site view, with its chat beside it. From the
-          // Artifacts page it carries that page's query, so the Site view's
-          // Back returns to the page as it was.
+        ? // An app opens on its own page, the same however it's opened.
           void navigate({
-            to: "/workspaces/$workspaceId/sites/$siteId",
-            params: { workspaceId, siteId: item.id },
-            ...(browseSearch ? { search: siteViewArtifactsReturn(browseSearch) } : {}),
+            to: "/workspaces/$workspaceId/apps/$appId/$",
+            params: { workspaceId, appId: item.id, _splat: "" },
           })
         : void navigate({
             to: artifactRoute(item.kind),
@@ -400,6 +402,7 @@ function useArtifactOpen({
         <PanelsTopLeftIcon />
         Open
       </DropdownMenuItem>
+      {extras?.menu}
       {onPin ? (
         <DropdownMenuItem disabled={pinning || loading} onSelect={() => void togglePin()}>
           {item.pinned ? <PinOffIcon /> : <PinIcon />}
@@ -472,11 +475,12 @@ function useArtifactOpen({
     link: onSelect
       ? null
       : {
-          href: browseSearch
-            ? `${artifactPath(workspaceId, item)}${stringifySearch(
-                item.kind === "site" ? siteViewArtifactsReturn(browseSearch) : browseSearch,
-              )}`
-            : artifactPath(workspaceId, item, sessionId),
+          href:
+            item.kind === "site"
+              ? artifactPath(workspaceId, item)
+              : browseSearch
+                ? `${artifactPath(workspaceId, item)}${stringifySearch(browseSearch)}`
+                : artifactPath(workspaceId, item, sessionId),
           onClick: (event: MouseEvent<HTMLElement>) => {
             if (!isPlainClick(event)) return;
             event.preventDefault();
@@ -509,6 +513,7 @@ const ARTIFACT_COLUMNS: RowListColumn[] = [
 export function ArtifactRow({
   workspaceId,
   item,
+  extras,
   sessionId,
   onSelect,
   onView,
@@ -526,10 +531,12 @@ export function ArtifactRow({
   onArchive?: ArtifactArchiveAction | undefined;
   loading?: boolean | undefined;
   browseSearch?: ArtifactReturnSearch | undefined;
+  extras?: ArtifactItemExtras | undefined;
 }) {
   const { open, menu, link, dialog } = useArtifactOpen({
     workspaceId,
     item,
+    extras,
     sessionId,
     onSelect,
     onView,
@@ -570,6 +577,10 @@ export function ArtifactRow({
             <StatusBadge variant="dot" tone="neutral">
               Archived
             </StatusBadge>
+          ) : extras?.badges ? (
+            <span className="relative z-10 inline-flex flex-wrap items-center gap-1.5">
+              {extras.badges}
+            </span>
           ) : undefined
         }
         cells={{ updated: <RelativeTime date={item.updatedAt} /> }}
@@ -774,6 +785,7 @@ export function ArtifactCard({
   loading,
   browseSearch,
   quiet = false,
+  extras,
 }: {
   workspaceId: string;
   item: ArtifactCatalogItem;
@@ -786,10 +798,12 @@ export function ArtifactCard({
   browseSearch?: ArtifactReturnSearch | undefined;
   /** Borderless, on a soft tile (the session panel). */
   quiet?: boolean | undefined;
+  extras?: ArtifactItemExtras | undefined;
 }) {
   const { open, menu, link, dialog } = useArtifactOpen({
     workspaceId,
     item,
+    extras,
     sessionId,
     onSelect,
     onView,
@@ -863,6 +877,12 @@ export function ArtifactCard({
           <p className="mt-0.5 truncate text-xs leading-4.5 text-fg-subtle">
             {artifactKindLabel[item.kind]} · {updatedMeta(item)}
           </p>
+          {extras?.badges ? (
+            // Above the card's stretched link, so a badge can be a button.
+            <div className="relative z-10 mt-2 flex flex-wrap items-center gap-1.5">
+              {extras.badges}
+            </div>
+          ) : null}
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -937,6 +957,8 @@ export function ArtifactLibrary({
   artifactKindsHidden = false,
   browseSearch,
   viewer = false,
+  itemExtras,
+  empty,
 }: {
   workspaceId: string;
   sessionId?: string | undefined;
@@ -973,6 +995,10 @@ export function ArtifactLibrary({
    * (the session panel). The workspace library browses on artifact pages.
    */
   viewer?: boolean | undefined;
+  /** Badges and menu entries a page adds to each artifact (the Apps page's versions). */
+  itemExtras?: ((item: ArtifactCatalogItem) => ArtifactItemExtras | undefined) | undefined;
+  /** The first-run empty state's words, when the page lists some kinds only. */
+  empty?: { title: string; description: string } | undefined;
 }) {
   const { productName } = useSimplifiedInterface();
   const [view, setView] = useState<ArtifactView>(readArtifactView);
@@ -1064,8 +1090,11 @@ export function ArtifactLibrary({
       <EmptyState
         variant={compact ? "inline" : "page"}
         icon={<PanelsTopLeftIcon />}
-        title="No artifacts yet"
-        description={`Apps, images, documents, spreadsheets and presentations ${productName} makes show up here.`}
+        title={empty?.title ?? "No artifacts yet"}
+        description={
+          empty?.description ??
+          `Apps, images, documents, spreadsheets and presentations ${productName} makes show up here.`
+        }
         action={emptyAction}
       />
     );
@@ -1124,6 +1153,7 @@ export function ArtifactLibrary({
                 loading={loading}
                 browseSearch={browseSearch}
                 quiet={compact}
+                extras={itemExtras?.(item)}
               />
             ))}
           </ul>
@@ -1146,6 +1176,7 @@ export function ArtifactLibrary({
                 onArchive={onArchive}
                 loading={loading}
                 browseSearch={browseSearch}
+                extras={itemExtras?.(item)}
               />
             ))}
           </RowList>
@@ -1180,7 +1211,7 @@ export function ArtifactLibrary({
           <ToolbarSearch
             value={filters.q}
             onValueChange={(q) => onFiltersChange({ ...filters, q })}
-            placeholder="Search artifacts"
+            placeholder={filters.kind === "site" ? "Search apps" : "Search artifacts"}
             aria-label="Search artifacts by title"
             maxLength={200}
           />

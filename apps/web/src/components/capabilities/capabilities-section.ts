@@ -5,7 +5,7 @@
 export type CapabilitiesSection = "connections" | "skills" | "ready-made";
 
 /** What Ready-made can be narrowed to (`?kind=`), for example from the Agents page. */
-export type ReadyMadeKind = "agent" | "app" | "skill";
+export type ReadyMadeKind = "agent" | "skill";
 
 export const CAPABILITIES_SECTIONS: readonly CapabilitiesSection[] = [
   "connections",
@@ -29,5 +29,5 @@ export function capabilitiesSectionFromSearch(value: unknown): CapabilitiesSecti
 }
 
 export function readyMadeKindFromSearch(value: unknown): ReadyMadeKind | undefined {
-  return value === "agent" || value === "app" || value === "skill" ? value : undefined;
+  return value === "agent" || value === "skill" ? value : undefined;
 }

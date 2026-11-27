@@ -14,6 +14,8 @@
   "package": {
     "format": "opengeni.app-package",
     "version": 1,
+    "packageId": "a1d3f5b7-9c2e-8f40-b8d6-2e4a6c8e0f13",
+    "packageVersion": "1.0.0",
     "exportedAt": "2026-11-21T00:00:00.000Z",
     "app": {
       "title": "Decision log",
@@ -39,5 +41,29 @@
         "label": "Decision log"
       }
     ]
+  },
+  "preview": {
+    "records": {
+      "decisions": [
+        {
+          "title": "Move billing to monthly invoices",
+          "why": "Customers asked for one invoice a month; it also cuts card fees.",
+          "owner": "Ana",
+          "date": "{{today-1}}"
+        },
+        {
+          "title": "Use Postgres for analytics",
+          "why": "One database to run; the volumes fit for now.",
+          "owner": "Jon",
+          "date": "{{today-4}}"
+        },
+        {
+          "title": "Weekly releases on Tuesdays",
+          "why": "Gives a day to fix anything before the weekend.",
+          "owner": "Maya",
+          "date": "{{today-9}}"
+        }
+      ]
+    }
   }
 }

@@ -100,7 +100,7 @@ export function useSiteDirectoryVersion(subjectId: string): number {
   );
 }
 
-/** A Site's page in the app, as a plain path (new tab). */
+/** An app's own page, as a plain path (new tab). */
 export function sitePath(workspaceId: string, siteId: string): string {
-  return `/workspaces/${encodeURIComponent(workspaceId)}/sites/${encodeURIComponent(siteId)}`;
+  return `/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(siteId)}`;
 }

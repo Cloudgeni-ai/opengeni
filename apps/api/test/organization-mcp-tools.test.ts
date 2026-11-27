@@ -550,7 +550,7 @@ describe("organization MCP app and file saving", () => {
     expect(first.value).toMatchObject({
       appId,
       version: 1,
-      link: `https://app.example.test/workspaces/${workspaceId}/sites/${appId}`,
+      link: `https://app.example.test/workspaces/${workspaceId}/apps/${appId}`,
       replayed: false,
     });
     expect(bodies[0]).toMatchObject({
