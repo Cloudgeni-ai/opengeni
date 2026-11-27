@@ -198,7 +198,7 @@ pass `useOpenGeniText()` when you build on them.
 A call is the web's realtime voice session on native WebRTC, reported to the system as a phone call (CallKit on iOS). It keeps working with the phone locked, follows AirPods and CarPlay, shows in the Phone app's recents, and ends from the lock screen or a headset. On Android the same adapter sets up the phone's call audio (communication mode, audio focus, and the loudspeaker or a connected headset) without a system call screen.
 
 ```sh
-npx expo install react-native-webrtc
+npx expo install react-native-webrtc react-native-screens
 ```
 
 ```tsx
@@ -231,6 +231,7 @@ function AgentCall({ session }: { session: SessionInputs }) {
 - Calls started outside the app (Siri, Phone recents, a home-screen quick action whose type ends in `.call`, a voice command) arrive as `startRequested` events, or through `takePendingStartRequest()` after a cold launch. The host decides which session they talk to. A request that names a chat carries its `target` session and its `workspaceId`; `callFromOutside(sessionId, workspaceId)` calls a session in another workspace of the signed-in account. Requests wait natively until JavaScript takes them (for up to a minute), so a request that launched the app is not lost to an early listener, and each starts once.
 - **Voice commands:** `adapter.setCallCommands([{ id, workspaceId, sessionId, name }])` tells the system which chats the person can call by name. On iOS the generated intent offers them as its chat parameter ("Call Research in Opengeni"), and the app's App Shortcuts are refreshed; on Android each becomes a launcher shortcut (touch and hold the app icon), and `adapter.pinCallCommand(command)` asks the launcher to put one on the home screen. Write only the signed-in account's commands, and an empty list on sign-out. Commands are opt-in per chat: never pass every chat.
 - `NativeAgentCallProvider` defaults generic outside calls to a fresh realtime session; `resolveOutsideCall` can preserve a host's explicit preferences. An explicit session request still wins. Generic calls keep a generic system-recents handle; calling a named session records that session. Selecting another session as conversational context does not change the active voice session.
+- `NativeAgentCallProvider` shows the full-screen call as a layer above the app, not a presented modal, so it never competes with the navigator's modal screens: on iOS it opens in the window above every presented screen (react-native-screens' `FullWindowOverlay`), and minimizing unmounts it so the screen underneath shows; on Android it is drawn above the app and Back minimizes.
 
 ### iOS configuration
 

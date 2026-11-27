@@ -15,11 +15,28 @@ mock.module("react-native", () => ({
   View: host,
   Text: host,
   Pressable: host,
-  Modal: (props: { visible: boolean; children?: ReactNode }) =>
-    props.visible ? host(props) : null,
   Alert: { alert() {} },
-  StyleSheet: { create: (value: unknown) => value },
+  StyleSheet: { create: (value: unknown) => value, absoluteFill: {} },
+  Platform: { OS: "ios" },
+  useWindowDimensions: () => ({ width: 400, height: 800 }),
+  Keyboard: { dismiss() {} },
+  BackHandler: { addEventListener: () => ({ remove() {} }) },
+  Animated: {
+    Value: class {
+      interpolate() {
+        return this;
+      }
+    },
+    View: host,
+    timing: () => ({
+      start(finish: (result: { finished: boolean }) => void) {
+        finish({ finished: true });
+      },
+      stop() {},
+    }),
+  },
 }));
+mock.module("react-native-screens", () => ({ FullWindowOverlay: host }));
 mock.module("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0, bottom: 0 }),
 }));

@@ -12,10 +12,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Alert, Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useNativeTimelineTheme } from "../timeline/theme";
 import { nativeCallTitle } from "./call-title";
+import { CallSurfaceLayer } from "./call-surface-layer";
 import {
   DEFAULT_OPENGENI_NATIVE_CALL_LABELS,
   OpenGeniNativeCallView,
@@ -590,12 +591,7 @@ function ActiveAgentCall(
   if (props.target.ringing) return null;
   return (
     <>
-      <Modal
-        visible={props.expanded}
-        animationType="slide"
-        presentationStyle="fullScreen"
-        onRequestClose={props.onMinimize}
-      >
+      <CallSurfaceLayer visible={props.expanded} onRequestClose={props.onMinimize}>
         {surface(
           <CallScreen
             call={call}
@@ -604,7 +600,7 @@ function ActiveAgentCall(
             onMinimize={call.error ? onFinished : props.onMinimize}
           />,
         )}
-      </Modal>
+      </CallSurfaceLayer>
       {!props.expanded && !props.pillHidden
         ? surface(
             <OnCallPill
