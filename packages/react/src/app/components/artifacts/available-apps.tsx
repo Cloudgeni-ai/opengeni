@@ -73,9 +73,9 @@ export function readyMadeAppTileSeed(template: AppTemplate): string {
 }
 
 /**
- * The active app here added from this ready-made app's package, when it
- * counts as added: by the same rule as Available, so a template offered
- * again (every copy customized, the template newer) can still be added.
+ * The app here that makes this ready-made app count as added, by the same
+ * rule as Available: an active copy of its package that isn't a customized
+ * older version. Without one (only such copies) Enable adds it again.
  */
 export function addedReadyMadeApp(
   template: AppTemplate,
@@ -83,9 +83,10 @@ export function addedReadyMadeApp(
 ): AppPackageStatus | null {
   const packageId = templatePackageId(template);
   if (!packageId) return null;
-  const apps = [...installed];
-  if (availableTemplates([template], apps).length > 0) return null;
-  return apps.find((app) => app.packageId === packageId && !app.archived) ?? null;
+  for (const app of installed)
+    if (app.packageId === packageId && availableTemplates([template], [app]).length === 0)
+      return app;
+  return null;
 }
 
 export function AvailableApps({

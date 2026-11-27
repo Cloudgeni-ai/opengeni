@@ -2415,6 +2415,9 @@ test("a newer ready-made version is offered again beside a customized copy, whic
   expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(true, version)])).not.toBeNull();
   expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(false, "0.0.1")])).not.toBeNull();
   expect(addedReadyMadeApp(APP_TEMPLATE as never, [])).toBeNull();
+  // Open app opens the copy that counts, not a customized older one listed first.
+  const current = { ...(app(false, version) as object), appId: "current" } as never;
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(true, "0.0.1"), current])).toBe(current);
 });
 
 test("Installing a ready-made app names its Skills and automations, then opens it", async () => {
