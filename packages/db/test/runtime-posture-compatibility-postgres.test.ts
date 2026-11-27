@@ -99,6 +99,52 @@ realTest("readiness inspects both namespaces once without caching posture", asyn
   }
 });
 
+realTest("readiness fingerprints the catalogs once per TTL and again after a failure", async () => {
+  const driver = (client!.db as unknown as { $client: postgres.Sql }).$client;
+  const originalDebug = driver.options.debug;
+  const statements: string[] = [];
+  let clock = 0;
+  const ready = runtimeDatabaseReadyCheck(client!.db, options, undefined, { now: () => clock });
+  const fingerprints = () =>
+    statements.filter((query) => query.includes("hashint8extended")).length;
+  try {
+    driver.options.debug = (_connection, query) => statements.push(query);
+    await ready();
+    expect(fingerprints()).toBe(1);
+    // Six kubelet periods of 10 s: one connectivity check each, then a full one.
+    for (let probe = 0; probe < 5; probe += 1) {
+      clock += 10_000;
+      await ready();
+    }
+    expect(fingerprints()).toBe(1);
+    clock += 10_000;
+    await ready();
+    expect(fingerprints()).toBe(2);
+    // An incompatible posture is inspected on every probe until it passes.
+    await database!.admin.unsafe(
+      "GRANT EXECUTE ON FUNCTION opengeni_private.read_sender_connection(uuid, uuid, uuid, text) TO opengeni_app",
+    );
+    clock += 60_000;
+    try {
+      await expect(ready()).rejects.toThrow(RuntimeDatabasePostureError);
+      clock += 10_000;
+      await expect(ready()).rejects.toThrow(RuntimeDatabasePostureError);
+      expect(fingerprints()).toBe(4);
+    } finally {
+      await database!.admin.unsafe(
+        "REVOKE EXECUTE ON FUNCTION opengeni_private.read_sender_connection(uuid, uuid, uuid, text) FROM opengeni_app",
+      );
+    }
+    clock += 10_000;
+    await ready();
+    clock += 10_000;
+    await ready();
+    expect(fingerprints()).toBe(5);
+  } finally {
+    driver.options.debug = originalDebug;
+  }
+});
+
 realTest(
   "readiness stays up on a revoked required EXECUTE grant and still fails on excess privilege",
   async () => {
@@ -108,8 +154,12 @@ realTest(
     const missing =
       "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)";
     const reported: (readonly string[])[] = [];
-    const ready = runtimeDatabaseReadyCheck(client!.db, options, (degraded) =>
-      reported.push(degraded),
+    // Every probe inspects (no readiness TTL): each change must show at once.
+    const ready = runtimeDatabaseReadyCheck(
+      client!.db,
+      options,
+      (degraded) => reported.push(degraded),
+      { ttlMs: 0 },
     );
     await ready();
     expect(reported.at(-1)).toEqual([]);

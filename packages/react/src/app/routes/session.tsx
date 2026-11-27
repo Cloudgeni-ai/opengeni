@@ -251,7 +251,11 @@ import {
   useAppContext,
   type SessionCreationHandoff,
 } from "../app-context";
-import { useLiveSessionEvents } from "../../hooks/use-live-session-events";
+import {
+  latestSequenceAfter,
+  useLiveSessionEvents,
+  useSessionHistoryBaseline,
+} from "../../hooks/use-live-session-events";
 import {
   sessionRouteAppState,
   sessionRouteCreationHandoff,
@@ -606,6 +610,9 @@ export function SessionRoute({
   // completed turn. Only event types are inspected.
   useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
   useLiveSessionEvents(sessionId, events, initialHistoryReady, onEvent);
+  // The dock's own reads (links, artifacts) wait for the history, or for its
+  // read to fail, so a chat whose history can't load still shows them.
+  const dockHistoryReady = initialHistoryReady || Boolean(streamError && !initialLoading);
   // The embedding host follows the open chat from this stream.
   // A chat in a panel beside another view isn't the page's open chat.
   useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading }, routed);
@@ -1697,13 +1704,17 @@ export function SessionRoute({
         </Suspense>
       );
     }
-    return (
+    // The same dock element (by key, and under the same wrapper) as the loaded
+    // view below, so opening a chat mounts the dock and its reads once.
+    const loadingView = (
       <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
         <SessionDock
+          key={SESSION_DOCK_KEY}
           workspaceId={workspaceId}
           sessionId={sessionId}
           session={null}
           events={events}
+          historyReady={dockHistoryReady}
           connectionState={connectionState}
           primary={
             session && streamError && !initialLoading ? (
@@ -1730,6 +1741,11 @@ export function SessionRoute({
           }}
         />
       </div>
+    );
+    return routed ? (
+      loadingView
+    ) : (
+      <SessionStartupProvider session={null}>{loadingView}</SessionStartupProvider>
     );
   }
 
@@ -1896,10 +1912,12 @@ export function SessionRoute({
         </LazyPart>
       )}
       <SessionDock
+        key={SESSION_DOCK_KEY}
         workspaceId={workspaceId}
         sessionId={sessionId}
         session={session}
         events={events}
+        historyReady={dockHistoryReady}
         connectionState={connectionState}
         primary={
           <ChatPaymentPages
@@ -1968,6 +1986,16 @@ function withHostMessageContext(
   return value ? { modelContext: value } : {};
 }
 
+/** Events that can change which artifacts a chat has published. */
+function isArtifactRefreshEvent(event: SessionEvent): boolean {
+  return (
+    event.type === "agent.toolCall.output" ||
+    event.type === "turn.completed" ||
+    event.type === "turn.failed" ||
+    event.type === "turn.cancelled"
+  );
+}
+
 /** The latest agent-settings change, and whether a turn has started since. */
 function lastAgentChange(events: readonly SessionEvent[]): { at: string; pending: boolean } | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -1989,6 +2017,8 @@ type SessionDockProps = {
   sessionId: string;
   session: Session | null;
   events: SessionEvent[];
+  /** The chat's history has loaded (or failed to) once; the dock's own reads start then. */
+  historyReady: boolean;
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   primary: React.ReactNode;
   onReloadSession: () => Promise<void>;
@@ -2009,6 +2039,9 @@ type SessionDockProps = {
     | null
     | undefined;
 };
+
+/** Both route branches render the dock under this key so it never remounts. */
+const SESSION_DOCK_KEY = "session-dock";
 
 /** The chat with the session panel beside it, or the chat alone when the surface has no panel. */
 function SessionDock(props: SessionDockProps) {
@@ -2063,23 +2096,19 @@ function SessionDockPanel(props: SessionDockProps) {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects durable artifacts and Debug around it.
   // Heavy editor/runtime code stays lazy until the user opens the tab.
+  // The first artifact and link reads start once the history has loaded; after
+  // that only newer events re-read them, never older history arriving later.
+  const historyBaseline = useSessionHistoryBaseline(
+    props.sessionId,
+    props.events,
+    props.historyReady,
+  );
   // Tool output may have published a file or Site, here or in a sub-session;
   // the end of a turn settles everything. Either re-reads the chat's artifacts.
-  const artifactRefreshSequence = useMemo(() => {
-    for (let index = props.events.length - 1; index >= 0; index -= 1) {
-      const event = props.events[index];
-      if (
-        event &&
-        (event.type === "agent.toolCall.output" ||
-          event.type === "turn.completed" ||
-          event.type === "turn.failed" ||
-          event.type === "turn.cancelled")
-      ) {
-        return event.sequence;
-      }
-    }
-    return 0;
-  }, [props.events]);
+  const artifactRefreshSequence = useMemo(
+    () => latestSequenceAfter(props.events, historyBaseline, isArtifactRefreshEvent),
+    [props.events, historyBaseline],
+  );
   // Let the Artifacts page show its cached rows on the next visit but refetch them.
   useEffect(() => {
     if (artifactRefreshSequence) expireArtifactCatalog(context.client, props.workspaceId);
@@ -2140,6 +2169,7 @@ function SessionDockPanel(props: SessionDockProps) {
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
     events: props.events,
+    historyBaseline,
   });
   const canControlSession = hasWorkspacePermission(
     context.accessContext,
@@ -2426,7 +2456,8 @@ function SessionDockPanel(props: SessionDockProps) {
 function useSessionEditableArtifactSummaries(input: {
   workspaceId: string;
   sessionId: string;
-  refreshSequence: number;
+  /** Null while the chat's history is loading: nothing is read yet. */
+  refreshSequence: number | null;
 }): Readonly<{
   artifacts: readonly SessionEditableArtifactSummary[];
   status: SessionEditableArtifactsStatus;
@@ -2460,6 +2491,7 @@ function useSessionEditableArtifactSummaries(input: {
   );
 
   useEffect(() => {
+    if (input.refreshSequence === null) return;
     if (
       discovery.current?.key !== authorityKey ||
       discovery.current.client !== context.client ||

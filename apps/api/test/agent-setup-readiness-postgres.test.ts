@@ -314,15 +314,16 @@ test("Ask an admin asks the workspace's admins once, in their inbox, once the da
     values (${f.accountId}::uuid, ${orgAdmin}, 'active', 'admin', ${orgAdminPersonal!.id}::uuid)`;
   const recipients = [admin, orgAdmin].sort();
 
-  // Withheld for a release (1599): nobody is asked, and the page shares a link.
-  const before = await ask();
-  expect(before.status, JSON.stringify(before.json)).toBe(200);
-  expect(before.json).toEqual({ status: "unavailable", adminsAsked: 0 });
-  expect(await notices()).toEqual([]);
-
   const appRole = decodeURIComponent(new URL(shared.appUrl).username);
-  await shared.admin.unsafe(`grant execute on function ${routine} to "${appRole}"`);
   try {
+    // Withheld, as 1599 left it until 1679: nobody is asked, and the page shares a link.
+    await shared.admin.unsafe(`revoke execute on function ${routine} from "${appRole}"`);
+    const before = await ask();
+    expect(before.status, JSON.stringify(before.json)).toBe(200);
+    expect(before.json).toEqual({ status: "unavailable", adminsAsked: 0 });
+    expect(await notices()).toEqual([]);
+    await shared.admin.unsafe(`grant execute on function ${routine} to "${appRole}"`);
+
     // The admins are asked, never the person asking, with the template's name
     // for it; asking again while it's open asks no one twice.
     expect((await ask({ name: "Something else" })).json).toEqual({
@@ -447,6 +448,7 @@ test("Ask an admin asks the workspace's admins once, in their inbox, once the da
     for (let index = 0; index < 6; index += 1) statuses.push((await ask()).status);
     expect(statuses).toContain(429);
   } finally {
-    await shared.admin.unsafe(`revoke execute on function ${routine} from "${appRole}"`);
+    // The migrated database grants it (1679); leave it granted.
+    await shared.admin.unsafe(`grant execute on function ${routine} to "${appRole}"`);
   }
 });

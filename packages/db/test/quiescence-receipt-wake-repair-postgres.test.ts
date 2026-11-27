@@ -593,7 +593,7 @@ describe("missing quiescence-receipt wake repair", () => {
       select p.prosrc as body, r.rolname as owner
       from pg_proc p join pg_roles r on r.oid=p.proowner
       where p.oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
-    const match = definition!.body.match(/RETURN QUERY\s+([\s\S]*);\s*END\s*$/);
+    const match = definition!.body.match(/RETURN QUERY\s+([\s\S]*?LIMIT p_limit);/);
     if (!match) throw new Error("Unexpected inventory definition");
     const candidate = match[1]!
       .replace(/\bp_limit\b/g, "$1")
@@ -682,9 +682,48 @@ describe("missing quiescence-receipt wake repair", () => {
     if (process.env.OPENGENI_BENCH_RECOVERY_PLAN === "1") console.log(JSON.stringify(measurements));
   }, 60_000);
 
-  test("owner-key and quiet-window migrations change only their predicate and preserve routine authority on replay", async () => {
+  test("owner-key, quiet-window and wake-claim migrations change only their part and preserve routine authority on replay", async () => {
     const QUIET_WINDOW_1014 = "wake.updated_at < now() - interval '10 minutes'";
     const QUIET_WINDOW_1239 = "wake.updated_at < now() - interval '2 minutes'";
+    // 1677 adds only the call's 'wakes' maintenance claim around the query.
+    const WAKE_CLAIM_1677 = [
+      "\n    DECLARE capability_id uuid := gen_random_uuid();",
+      "\n      INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES" +
+        "\n        (capability_id, pg_backend_pid(), pg_current_xact_id(), 'wakes');",
+      "\n      DELETE FROM opengeni_private.maintenance_claim_capabilities claim WHERE claim.id = capability_id;",
+    ];
+    const withoutWakeClaim = (body: string) => {
+      for (const line of WAKE_CLAIM_1677) {
+        expect(body.split(line)).toHaveLength(2);
+        body = body.replace(line, "");
+      }
+      return body;
+    };
+    // 1693 then opens that claim only when row security applies to the owner.
+    const CLAIM_GUARD_1693: [string, string][] = [
+      [
+        "\n      IF claim_needed THEN" +
+          "\n        INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES" +
+          "\n          (capability_id, pg_backend_pid(), pg_current_xact_id(), 'wakes');" +
+          "\n      END IF;",
+        WAKE_CLAIM_1677[1]!,
+      ],
+      [
+        "\n      IF claim_needed THEN" +
+          "\n        DELETE FROM opengeni_private.maintenance_claim_capabilities claim WHERE claim.id = capability_id;" +
+          "\n      END IF;",
+        WAKE_CLAIM_1677[2]!,
+      ],
+    ];
+    const CLAIM_NEEDED_1693 = /\n {6}claim_needed constant boolean :=[\s\S]*?;(?=\n {4}BEGIN)/;
+    const withoutClaimGuard = (body: string) => {
+      for (const [guarded, plain] of CLAIM_GUARD_1693) {
+        expect(body.split(guarded)).toHaveLength(2);
+        body = body.replace(guarded, plain);
+      }
+      expect(body).toMatch(CLAIM_NEEDED_1693);
+      return body.replace(CLAIM_NEEDED_1693, "");
+    };
     expect(QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS).toBe(120);
     const baseline = await readFile(
       new URL("../drizzle/0977_baseline_01.sql", import.meta.url),
@@ -702,11 +741,24 @@ describe("missing quiescence-receipt wake repair", () => {
       new URL("../drizzle/1260_quiescence_repair_wake_quiet_window.sql", import.meta.url),
       "utf8",
     );
+    const wakeClaimMigration = await readFile(
+      new URL("../drizzle/1677_wake_repair_inventory_owner_rls.sql", import.meta.url),
+      "utf8",
+    );
+    const claimGuardMigration = await readFile(
+      new URL("../drizzle/1693_wake_repair_inventory_claim_guard.sql", import.meta.url),
+      "utf8",
+    );
     await shared.admin.begin(async (tx) => {
       const [scope] = await tx<{ schema: string }[]>`select current_schema() as schema`;
       const schema = `"${scope!.schema.replaceAll('"', '""')}"`;
+      // Replaying a historical CREATE OR REPLACE resets the routine's settings
+      // to its search path, dropping 1671's plan reuse setting; authority is
+      // the search path among them.
       const readPosture = () => tx`
-        select proowner, proacl::text, prosecdef, provolatile, proconfig,
+        select proowner, proacl::text, prosecdef, provolatile,
+          array(select setting from unnest(proconfig) setting
+            where setting like 'search_path=%') as proconfig,
           proargtypes::text, proallargtypes::text, proargmodes, proargnames, prorettype
         from pg_proc where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
       const initialPosture = await readPosture();
@@ -722,7 +774,7 @@ describe("missing quiescence-receipt wake repair", () => {
         select prosrc as body from pg_proc
         where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
       expect(
-        installed[0]!.body
+        withoutWakeClaim(withoutClaimGuard(installed[0]!.body))
           .replace("latest.account_id = session.account_id AND ", "")
           .replace(QUIET_WINDOW_1239, QUIET_WINDOW_1014)
           .trim(),
@@ -765,8 +817,38 @@ describe("missing quiescence-receipt wake repair", () => {
         const [current] = await tx<{ body: string }[]>`
           select prosrc as body from pg_proc
           where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
-        expect(current!.body).toBe(installed[0]!.body);
+        expect(current!.body).toBe(withoutWakeClaim(withoutClaimGuard(installed[0]!.body)));
         expect(current!.body).toBe(ownerKey!.body.replace(QUIET_WINDOW_1014, QUIET_WINDOW_1239));
+      }
+
+      // 1677 then adds only the call's maintenance claim, idempotently, with
+      // the same answer, owner, grants and signature.
+      const quietRows =
+        await tx`select * from opengeni_private.list_quiescence_receipt_wake_repairs_v1(100,null,null)`;
+      for (let replay = 0; replay < 2; replay++) {
+        await tx.unsafe(wakeClaimMigration);
+        expect(await readPosture()).toEqual(initialPosture);
+        const [current] = await tx<{ body: string }[]>`
+          select prosrc as body from pg_proc
+          where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
+        expect(current!.body).toBe(withoutClaimGuard(installed[0]!.body));
+        expect(
+          await tx`select * from opengeni_private.list_quiescence_receipt_wake_repairs_v1(100,null,null)`,
+        ).toEqual(quietRows);
+      }
+
+      // 1693 then guards that claim, idempotently, with the same answer,
+      // owner, grants and signature.
+      for (let replay = 0; replay < 2; replay++) {
+        await tx.unsafe(claimGuardMigration);
+        expect(await readPosture()).toEqual(initialPosture);
+        const [current] = await tx<{ body: string }[]>`
+          select prosrc as body from pg_proc
+          where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
+        expect(current!.body).toBe(installed[0]!.body);
+        expect(
+          await tx`select * from opengeni_private.list_quiescence_receipt_wake_repairs_v1(100,null,null)`,
+        ).toEqual(quietRows);
       }
     });
   });

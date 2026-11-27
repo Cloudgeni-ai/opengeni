@@ -17,6 +17,7 @@ import { useRetainedReads } from "./hooks/shared-query";
 import { OpenGeniContext } from "./session-context";
 import { ErrorMessageContext, type ErrorMessageFormatter } from "./lib/error-message";
 import { joinClientConfigRead } from "./lib/client-config-read";
+import { MOUNT_READ_REUSE_MS } from "./lib/mount-read-reuse";
 import {
   OpenGeniMessagesProvider,
   useOpenGeniText,
@@ -143,8 +144,12 @@ export function OpenGeniProvider({
   const verifyApiContract = useCallback(async (): Promise<void> => {
     try {
       // Joins a config read already in flight (the conversation flags read the
-      // same endpoint on mount) instead of sending a second request.
-      const config = await joinClientConfigRead(client);
+      // same endpoint on mount), or one a moment old (the host's startup read),
+      // instead of sending a second request. An older one is read again.
+      const config = await joinClientConfigRead(client, undefined, {
+        // A config read that settled moments ago (the host's startup read).
+        settledWithinMs: MOUNT_READ_REUSE_MS,
+      });
       if (strictContract && config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
         throw new OpenGeniApiContractMismatchError(
           OPENGENI_API_CONTRACT_REVISION,

@@ -58,7 +58,9 @@ export function useWorkspaceIntegrations(
     // toast: the tools load again by themselves once it answers.
     const quietRetry = createQuietRetry();
     const loadMcpServers = () => {
-      void refreshWorkspaceMcpServers(workspaceId, abortController.signal).then(
+      void refreshWorkspaceMcpServers(workspaceId, abortController.signal, {
+        reuseRecent: true,
+      }).then(
         () => quietRetry.reset(),
         (error) => {
           if (abortController.signal.aborted || isAbortError(error)) return;

@@ -800,6 +800,16 @@ export default defineConfig({
               priority: 5,
             },
             {
+              // The contracts index builds its session and scheduled-task
+              // schemas from these at load time. Entry-aware merging can fold
+              // them into a chunk with SDK read helpers that import the index,
+              // a cycle in which the index may read them before they exist.
+              name: "agent-config-contracts",
+              test: /packages[\\/]contracts[\\/]src[\\/](?:agent-config|reasoning-effort|vaults)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
+            },
+            {
               // Keep schema parsing from being folded into a larger shared
               // startup chunk when a lazy route changes its import boundary.
               name: "schema-runtime",

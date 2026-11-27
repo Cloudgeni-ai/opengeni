@@ -6,6 +6,7 @@ import { modelUsesCredits } from "@opengeni/react/app/lib/model-policy";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import { CREDIT_BALANCE_CHANGED } from "@opengeni/react/app/lib/credit-balance-events";
 import { invalidateSharedQueries, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
+import { billingSummaryQueryKey } from "@opengeni/react/app/lib/billing-summary-read";
 import { creditBalanceSplitLabel } from "@opengeni/react/app/lib/credit-coverage";
 import type { BillingSummary, ClientConfig } from "@opengeni/react/app/types";
 
@@ -41,36 +42,33 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
   const canManage = visible && hasAccountPermission(accessContext, accountId, "billing:manage");
   const canRead =
     visible && (canManage || hasAccountPermission(accessContext, accountId, "billing:read"));
-  const balance = useSharedQuery(
+  // The billing summary is the same shared read as the chat's credit notices.
+  // Operator reviews do not emit this browser's credit-change event. The
+  // shared cache uses one visible-page timer per client/account, suspends
+  // hidden tabs, and revalidates stale data when they become visible again.
+  const summary = useSharedQuery(
     client,
-    ["model-settings", "credits", accountId],
-    async () => {
-      const billing = await client.getBilling({ accountId });
-      if (billing.mode !== "stripe") return { label: null };
-      const { balanceMicros, currency } = billing.balance;
-      let label =
-        balanceMicros > 0
-          ? `${formatMoneyMicros(balanceMicros, currency)} left`
-          : "No credits left";
-      // Scoped credit only pays for some models: say how much any model can use.
-      const split = creditBalanceSplitLabel(billing.balance);
-      if (split) {
-        label = split;
-      } else if (billing.balance.plan) {
-        const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
-        if (catalog?.plan) {
-          const remaining = billing.balance.plan.creditRemainingMicros;
-          // Credits: what API use spends, apart from plan credit (as on Billing).
-          const credits = billing.balance.creditsMicros ?? balanceMicros - remaining;
-          label = `${formatMoneyMicros(remaining, currency)} plan credit · ${formatMoneyMicros(credits, currency)} credits`;
-        }
-      }
-      return { label, promotionDecision: billing.balance.promotionDecision };
-    },
-    // Operator reviews do not emit this browser's credit-change event. The
-    // shared cache uses one visible-page timer per client/account, suspends
-    // hidden tabs, and revalidates stale data when they become visible again.
+    billingSummaryQueryKey(accountId),
+    async () => await client.getBilling({ accountId }),
     { enabled: canRead, staleTimeMs: 60_000, pollIntervalMs: 60_000 },
+  );
+  const billing = summary.error ? null : summary.data;
+  const stripe = billing?.mode === "stripe" ? billing : null;
+  // Scoped credit only pays for some models: say how much any model can use.
+  const split = stripe ? creditBalanceSplitLabel(stripe.balance) : null;
+  const needsPlans = Boolean(stripe && !split && stripe.balance.plan);
+  const plans = useSharedQuery(
+    client,
+    ["model-settings", "credits", accountId, "plans"],
+    // A failed read is an error, not an empty catalog: the row falls back to
+    // the basic label and the next poll reads it again.
+    async () => await client.getBillingSubscriptionPlans({ accountId }),
+    { enabled: canRead && needsPlans, staleTimeMs: 60_000, pollIntervalMs: 60_000 },
+  );
+  const balance = creditsBalance(
+    stripe,
+    split,
+    needsPlans ? { loading: plans.loading, data: plans.error ? null : plans.data } : null,
   );
   useEffect(() => {
     const changed = (event: Event) => {
@@ -82,8 +80,36 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
   }, [client, accountId]);
   return {
     visible,
-    balanceLabel: balance.error ? null : (balance.data?.label ?? null),
+    balanceLabel: balance?.label ?? null,
     canOpenBilling: canManage,
-    promotionDecision: canRead && !balance.error ? balance.data?.promotionDecision : undefined,
+    promotionDecision: canRead ? balance?.promotionDecision : undefined,
   };
+}
+
+/**
+ * The row's words once everything they need is read: null while the summary
+ * (or, for a plan, the plan catalog) is still loading or failed.
+ */
+function creditsBalance(
+  billing: BillingSummary | null,
+  split: string | null,
+  plans: { loading: boolean; data: { plan?: unknown } | null } | null,
+): {
+  label: string | null;
+  promotionDecision?: BillingSummary["balance"]["promotionDecision"];
+} | null {
+  if (!billing) return null;
+  if (plans?.loading) return null;
+  const { balanceMicros, currency } = billing.balance;
+  let label =
+    balanceMicros > 0 ? `${formatMoneyMicros(balanceMicros, currency)} left` : "No credits left";
+  if (split) {
+    label = split;
+  } else if (billing.balance.plan && plans?.data?.plan) {
+    const remaining = billing.balance.plan.creditRemainingMicros;
+    // Credits: what API use spends, apart from plan credit (as on Billing).
+    const credits = billing.balance.creditsMicros ?? balanceMicros - remaining;
+    label = `${formatMoneyMicros(remaining, currency)} plan credit · ${formatMoneyMicros(credits, currency)} credits`;
+  }
+  return { label, promotionDecision: billing.balance.promotionDecision };
 }
