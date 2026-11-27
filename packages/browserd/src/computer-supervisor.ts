@@ -417,6 +417,9 @@ export class ComputerSupervisor {
   private async installSession(
     options: ValidatedSessionOptions,
   ): Promise<ComputerSupervisorSession> {
+    while (this.sessions.size + this.creating.size >= this.maxSessions) {
+      if (!(await this.endLeastRecentlyUsedIdleSession())) break;
+    }
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
       throw new InteractionControllerError(
         "capacity_exhausted",
@@ -446,6 +449,32 @@ export class ComputerSupervisor {
         this.creating.delete(options.computerSessionId);
       }
     }
+  }
+
+  /** Makes room on a full machine by ending its least recently used session
+   * on the machine's own screen that is not in use. Such a session holds no
+   * state of its own (see isIdle), and the server opens it again on its next
+   * request, so nothing an agent sees is lost. Chats that finished never end
+   * their sessions themselves, so without this they fill the machine. A
+   * session used within RECENT_USE_UPDATE_HOLD_MS may be mid-task and stays,
+   * as does an isolated virtual seat, which owns its display and apps. */
+  private async endLeastRecentlyUsedIdleSession(): Promise<boolean> {
+    const usedBefore = this.now() - RECENT_USE_UPDATE_HOLD_MS;
+    let oldest: Runtime | undefined;
+    for (const runtime of this.sessions.values()) {
+      if (
+        runtime.lifecycle !== "active" ||
+        runtime.environmentLease.rfbPort !== null ||
+        !runtime.controller.isIdle() ||
+        runtime.lastUsedAt > usedBefore
+      ) {
+        continue;
+      }
+      if (!oldest || runtime.lastUsedAt < oldest.lastUsedAt) oldest = runtime;
+    }
+    if (!oldest) return false;
+    await this.endSession(binding(oldest));
+    return true;
   }
 
   private async displaceOtherSessions(computerSessionId: string): Promise<void> {
