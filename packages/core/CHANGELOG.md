@@ -1,5 +1,64 @@
 # @opengeni/core
 
+## 6.42.0
+
+### Minor Changes
+
+- cd461f0: Add versioned AI provider disclosure and consent for native app requests, with authenticated self-service API and SDK methods to review, grant and withdraw permission.
+- ebca2a8: Add the self-service account deletion API, its SDK methods, and the managed membership and erasure lifecycle behind it.
+
+### Patch Changes
+
+- 82de8aa: Billing credit emails name the organization in the subject and body, label deployments other than production with their app host, and list the top workspaces by spend (last hour for unusual spending, last day for low or exhausted credits) with links to each shared workspace in organization Billing. Personal workspaces are grouped without names.
+- c00db19: Faster reads for long-running chats, schedule lists and Insights calls. A chat's effective model after a settings change no longer reads every automated run a schedule made in it; listing schedules reads their target chats in one batch instead of once per schedule; and pricing a page of Insights calls looks up each call's ledger debits by source instead of scanning the account's ledger per row. Two indexes are added concurrently.
+- e042760: The **PR reviewer** template posts one scannable review: a one-line verdict and short summary, each Critical and Bug finding as an inline comment on its lines with a concrete fix (a GitHub suggestion when it is small), nits left out or folded into a collapsed block, re-reviews that resolve fixed threads instead of repeating findings, and answers to questions in their own thread. Agents already created from the template keep their instructions.
+- 3ace70b: Removing a repository from a chat with many sub-sessions answers quickly: the sub-sessions that hold the repository are changed a few at a time, and the rest get their removal record in batches. The Remove button in the confirmation works right away instead of waiting for the unsaved-changes check.
+
+  The settings rail has a fixed, collapsed Advanced section at the end for everyone, holding the rarely used pages (Agent learning, API keys, Developer, Shared, Organization identity, Security & data). It replaces the personal More: pages someone had moved under More show at the top again unless they are now under Advanced. The sidebar layout option `settingsMore` is still accepted and returned for older clients, but ignored.
+
+- Updated dependencies [81c930e]
+- Updated dependencies [531532b]
+- Updated dependencies [1b8fd9c]
+- Updated dependencies [82de8aa]
+- Updated dependencies [c79fae8]
+- Updated dependencies [52c2fea]
+- Updated dependencies [9d0896d]
+- Updated dependencies [c00db19]
+- Updated dependencies [2f8dd47]
+- Updated dependencies [a55b31b]
+- Updated dependencies [bf87544]
+- Updated dependencies [dda9e3b]
+- Updated dependencies [cd461f0]
+- Updated dependencies [bf91461]
+- Updated dependencies [f88a948]
+- Updated dependencies [27ba8d2]
+- Updated dependencies [42dc05c]
+- Updated dependencies [826dcce]
+- Updated dependencies [b731e71]
+- Updated dependencies [3ace70b]
+- Updated dependencies [b70dfb9]
+- Updated dependencies [ae08e32]
+- Updated dependencies [b7064b0]
+- Updated dependencies [d8d2b46]
+- Updated dependencies [024d5ee]
+- Updated dependencies [962c6d7]
+- Updated dependencies [ebca2a8]
+- Updated dependencies [df9d061]
+  - @opengeni/db@6.42.0
+  - @opengeni/observability@6.42.0
+  - @opengeni/runtime@6.42.0
+  - @opengeni/config@6.42.0
+  - @opengeni/contracts@6.42.0
+  - @opengeni/documents@6.42.0
+  - @opengeni/events@6.42.0
+  - @opengeni/tool-gateway@6.42.0
+  - @opengeni/storage@6.42.0
+  - @opengeni/capabilities@6.42.0
+  - @opengeni/codex@6.42.0
+  - @opengeni/vaults@6.42.0
+  - @opengeni/network@6.42.0
+  - @opengeni/xai-subscription@6.42.0
+
 ## 6.41.0
 
 ### Patch Changes

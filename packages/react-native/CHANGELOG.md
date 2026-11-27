@@ -1,5 +1,47 @@
 # @opengeni/react-native
 
+## 6.42.0
+
+### Minor Changes
+
+- 1363da9: `NativeAgentCallProvider` takes `beforeCall`, and `MeetingRecorderProvider` takes `beforeCapture`: each is awaited before a call, a recording or an audio import starts, and false starts nothing (an import then fails with an `AudioImportError` whose reason is `declined`, which `showAudioImportError` doesn't show). Apps use them to ask for the person's permission first, such as sharing with AI providers.
+
+### Patch Changes
+
+- d345405: A resolved approval notice no longer says "You responded to this approval." when no decision was recorded for it, for example when the turn moved on, was cancelled, replaced by a Steer or failed before it was answered. It now reads "Not answered." with no check mark, and reads as answered if an answer is recorded later. Answers match the question they were given for: its approval id, its turn and its MCP question round, the same way the server keys them (older decisions without a turn or round match the latest open question with that id). A question asked again while its first notice still waits (a worker restart) takes its answer on both notices, and answering an older notice no longer ends a newer one that still asks more. Older requests without an approvals list still read as answered once a decision for their turn, and for their approval id when they carry one, is recorded.
+
+  New export from `@opengeni/react/timeline-model`: `noticeApprovalAnswered(item)`, true for a resolved approval notice with a recorded answer.
+
+- 230b9c0: Keep the Android chat composer docked at the bottom when reopening a chat after leaving with the keyboard open.
+- 1363da9: `MessageTimeline` follows the surrounding `PurchasePresentationProvider` from `@opengeni/react`: an app that hides purchase prompts gets chat failures and credit stops that say what is missing without offering to buy it.
+- 76c072c: Use neutral funding and credit-refusal wording for iOS, without changing model availability or billing.
+- 1feaf67: Android recording and dictation start again in release builds with R8 optimization. The recorder's start options were an Expo `Record`, which Expo converts by Kotlin reflection, and that conversion fails in optimized builds, so every start was rejected before the microphone opened. The options are now read from the plain object.
+- Updated dependencies [826dcce]
+- Updated dependencies [d345405]
+- Updated dependencies [81c930e]
+- Updated dependencies [d8d2b46]
+- Updated dependencies [9d0896d]
+- Updated dependencies [bf87544]
+- Updated dependencies [e66f170]
+- Updated dependencies [f1d319d]
+- Updated dependencies [cd461f0]
+- Updated dependencies [962c6d7]
+- Updated dependencies [27ba8d2]
+- Updated dependencies [31e2564]
+- Updated dependencies [76c072c]
+- Updated dependencies [42dc05c]
+- Updated dependencies [826dcce]
+- Updated dependencies [3ace70b]
+- Updated dependencies [1363da9]
+- Updated dependencies [b7064b0]
+- Updated dependencies [826dcce]
+- Updated dependencies [d8d2b46]
+- Updated dependencies [ebca2a8]
+- Updated dependencies [df9d061]
+  - @opengeni/react@6.42.0
+  - @opengeni/contracts@6.42.0
+  - @opengeni/sdk@6.42.0
+
 ## 6.41.0
 
 ### Patch Changes

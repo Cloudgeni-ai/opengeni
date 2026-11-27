@@ -1,5 +1,34 @@
 # @opengeni/observability
 
+## 6.42.0
+
+### Minor Changes
+
+- f88a948: A turn that fails because the organization's plan refuses a sandbox (no paid plan or credit, a card to verify, or the Free plan's daily box time spent) now counts as `failure_origin="customer_plan"` instead of a platform failure, and the turn-failure alert and Runtime Failures dashboard leave it out of the platform ratio.
+
+### Patch Changes
+
+- 52c2fea: A sandbox whose workspace was already saved, but whose box was gone before the drain could stop it, now finishes draining on the next reaper tick instead of failing every 30 seconds and staying fenced. Leases already stuck this way recover on their own. Warm time is charged up to an earlier attempt's recorded stop cutoff, and not past the last meter tick when there is none. The drain-failure warning names the thrown error's class, and `opengeni_sandbox_provider_gone_after_save_total` counts these drains. A sandbox refused by a running-box or daily limit answers 429 with `Retry-After` so retrying clients back off: a young organization's spent first-day box time names when it is a day old, and the turnless first-day bound is a non-retryable 429.
+
+  Model calls to a customer's own OpenAI-compatible endpoint whose physical request cannot reach it (connection refused or reset, name not found, TLS, socket or timeout) or that answer a client error other than 400, 404, 405, 413 or 422 now count as `customer_provider` failures instead of platform failures. Our own dispatch checkpoint and resolver failures stay platform.
+
+- dda9e3b: A Modal workspace that holds hardlinked files (for example a package manager's cache hardlinked into `node_modules`) now saves: the streamed Modal capture stores files that share an inode as separate regular files, as the other backends already do, instead of hardlink members that the archive check refuses on every retry. Failed workspace saves and restores now also log a closed classification: the sandbox error name, its integrity code, the archive check's reason class (`archiveReason`) and, when the archive command in the box fails, its exit code. Member paths and command output are never logged.
+- b731e71: Sandbox reaper failures are diagnosable from logs. "sandbox reaper: per-sandbox drain failed" and "sandbox reaper: retained-process settlement failed" now record a protected failure diagnostic (throw site, process correlation) and log its `correlationId`, the hashed `sandboxLeaseKey`, lease epoch and backend, the cause's reviewed class, sandbox fence code (`causeFenceCode`) and SQLSTATE, and a one-way `causeFingerprint` of its message that `scripts/resolve-rejection-fingerprint.ts` maps back to the source literal. Before, both lines dropped their error entirely, and the settlement line carried no correlation at all.
+
+  A viewer attach (`POST /v1/workspaces/:workspaceId/sessions/:id/viewers`) whose caller disconnects while the attach waits on a sandbox lifecycle transition now answers 499 with no body, the client-gone convention, instead of logging a 500 `internal_error`.
+
+- ae08e32: Restoring an archived chat from long-term storage no longer fails forever when one of its inbox updates carried accepted subscription authority (for example a background result caused by a turn accepted before a provider cutover). The restore now copies that authority record again, as when the update was first accepted. Session archive failure logs also keep the database SQLSTATE, never the message.
+- Updated dependencies [9d0896d]
+- Updated dependencies [bf87544]
+- Updated dependencies [cd461f0]
+- Updated dependencies [27ba8d2]
+- Updated dependencies [42dc05c]
+- Updated dependencies [826dcce]
+- Updated dependencies [3ace70b]
+- Updated dependencies [b7064b0]
+- Updated dependencies [ebca2a8]
+  - @opengeni/contracts@6.42.0
+
 ## 6.41.0
 
 ### Patch Changes

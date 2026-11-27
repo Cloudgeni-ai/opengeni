@@ -1,5 +1,85 @@
 # @opengeni/db
 
+## 6.42.0
+
+### Minor Changes
+
+- cd461f0: Add versioned AI provider disclosure and consent for native app requests, with authenticated self-service API and SDK methods to review, grant and withdraw permission.
+- ebca2a8: Add the self-service account deletion API, its SDK methods, and the managed membership and erasure lifecycle behind it.
+
+### Patch Changes
+
+- 81c930e: A turn claimed back from an approval or question pause is marked `resumedFromPause: true` on `SessionTurnForExecution`. Its execution generation still advances, but nothing was interrupted, so the worker no longer tells the model an earlier execution stopped mid-step (which made it repeat completed reads to check state). Re-claims after a real interruption keep that note.
+
+  A Google Drive connect started from a chat's connection card now finishes in that chat when it returns: the connection is turned on and the chat's card asks to allow the personal account, as with other OAuth returns. Before, the chat ignored the Drive return.
+
+- 531532b: The compute agent gateway now renews its open sandbox links in batches. Each tick it groups open sessions by workspace and renews up to 250 of them with a single locked statement, instead of one database transaction per sandbox every 5 seconds. Every claim gets the same answer as before (renewed, superseded, lost or revoked); a lease that is already longer is never shortened. A row another transaction holds is skipped and answered busy, which costs that session one renewal instead of making the batch wait, so overlapping batches never block or deadlock. If a batch fails, its claims are renewed one at a time, so one bad claim ends only its own session. At 2,000 open sandboxes a tick drops from 8,000 statements to 32. On staging, with about 2,100 open sandbox links, these renewals had become the largest write load on the database: about 420 transactions per second.
+
+  `@opengeni/db` exports `renewSandboxAgentLinks` and `SANDBOX_AGENT_LINK_RENEW_BATCH_MAX`. `ComputeAgentLinkStore` gains `renewMany`. `bun scripts/operator/bench-sandbox-link-renewal.ts [sandboxes]` compares the two forms.
+
+- 1b8fd9c: Credit balance reads no longer sum the whole credit ledger: a per-account totals table (`credit_ledger_account_totals`), kept exact by statement-level ledger triggers, holds each account's balance and API spend, and both the balance read and the `credit_balance_by_account` metric use it. The migration installs the triggers without reading the ledger and an online batched backfill completes one account per transaction; until an account is complete, reads recount its ledger. The runtime role can read but not write the totals, a ledger TRUNCATE clears them, and the worker samples accounts each metrics cycle and reports any totals that differ from a recount (`opengeni_credit_ledger_totals_mismatched_accounts`). The subscription plan maintenance inventory reads the same accounts with a cheaper plan, helped by a partial index on verified signup trial grants.
+- 82de8aa: Billing credit emails name the organization in the subject and body, label deployments other than production with their app host, and list the top workspaces by spend (last hour for unusual spending, last day for low or exhausted credits) with links to each shared workspace in organization Billing. Personal workspaces are grouped without names.
+- c79fae8: Checkpoint garbage collection is much cheaper. The claim, the tombstone prune and the due probe check each artifact's lease references with index probes on the private lease projection. Before, every tick read the whole lease table, a large, heavily updated table. The lease liveness and checkpoint state gauges count the projections as well, and report the same counts. New indexes cover the lease references (used by the checkpoint reference validator) and the tombstone prune.
+- 52c2fea: A sandbox whose workspace was already saved, but whose box was gone before the drain could stop it, now finishes draining on the next reaper tick instead of failing every 30 seconds and staying fenced. Leases already stuck this way recover on their own. Warm time is charged up to an earlier attempt's recorded stop cutoff, and not past the last meter tick when there is none. The drain-failure warning names the thrown error's class, and `opengeni_sandbox_provider_gone_after_save_total` counts these drains. A sandbox refused by a running-box or daily limit answers 429 with `Retry-After` so retrying clients back off: a young organization's spent first-day box time names when it is a day old, and the turnless first-day bound is a non-retryable 429.
+
+  Model calls to a customer's own OpenAI-compatible endpoint whose physical request cannot reach it (connection refused or reset, name not found, TLS, socket or timeout) or that answer a client error other than 400, 404, 405, 413 or 422 now count as `customer_provider` failures instead of platform failures. Our own dispatch checkpoint and resolver failures stay platform.
+
+- 9d0896d: Email sign-in can now require the same Turnstile challenge as email sign-up, to stop scripted password guessing. Turn it on with `OPENGENI_SIGN_IN_CHALLENGE_ENABLED=true` (default off; needs the signup challenge on). The client config then reports `signInChallengeRequired`, the Sign in form shows the widget and sends its token, and refusals use sign-up's error codes.
+
+  Failed rows in the missing quiescence-receipt wake repair now log their error class and PostgreSQL SQLSTATE (no IDs or messages), so the worker's repair failures can be diagnosed.
+
+- c00db19: Faster reads for long-running chats, schedule lists and Insights calls. A chat's effective model after a settings change no longer reads every automated run a schedule made in it; listing schedules reads their target chats in one batch instead of once per schedule; and pricing a page of Insights calls looks up each call's ledger debits by source instead of scanning the account's ledger per row. Two indexes are added concurrently.
+- 2f8dd47: Host export pruning and the end-of-turn hands-back check now use indexes, so they no longer read every grace-window outbox row or every active goal.
+- a55b31b: Row policies skip the owner-only capability checks when the caller isn't the table owner, so reads that pass over other tenants' rows no longer run them on every row.
+- bf87544: Support Sign in with Apple as an optional managed sign-in method, including native browser sign-in and personal Security settings. Sign Apple client secrets automatically and expose a token revocation helper for account deletion flows.
+- 27ba8d2: Record a failed automation run when dispatch exhausts its retries, and notify its owner, if any, once without pausing the automation.
+- 3ace70b: Removing a repository from a chat with many sub-sessions answers quickly: the sub-sessions that hold the repository are changed a few at a time, and the rest get their removal record in batches. The Remove button in the confirmation works right away instead of waiting for the unsaved-changes check.
+
+  The settings rail has a fixed, collapsed Advanced section at the end for everyone, holding the rarely used pages (Agent learning, API keys, Developer, Shared, Organization identity, Security & data). It replaces the personal More: pages someone had moved under More show at the top again unless they are now under Advanced. The sidebar layout option `settingsMore` is still accepted and returned for older clients, but ignored.
+
+- b70dfb9: Fix automation admission into an existing chat after its model settings change. The database now validates the same effective model, reasoning effort and latency mode the worker reads, without waiting for another turn.
+- ae08e32: Restoring an archived chat from long-term storage no longer fails forever when one of its inbox updates carried accepted subscription authority (for example a background result caused by a turn accepted before a provider cutover). The restore now copies that authority record again, as when the update was first accepted. Session archive failure logs also keep the database SQLSTATE, never the message.
+- d8d2b46: Apps in the sidebar follow one rule: a pinned app sits in the person's own sidebar links, never in both places.
+
+  - With apps in a section of their own, an app row's Pin adds the app to the person's sidebar (as Customize does), and the Apps section leaves out apps that are already there. Removing the link (now "Unpin" on an app link) brings it back to the Apps section. Only that person's sidebar changes; workspace defaults and other people's sidebars stay as they were.
+  - An app link in the sidebar has Archive in its menu. This is the same personal archive as the app's row in the Sessions list, with Undo.
+  - An app a person archived from their sidebar no longer shows among their sidebar links or live lists (`readSidebarApps` leaves it out for them). The saved link stays, so restoring the app brings it back in place.
+
+  New export from `@opengeni/react`: `withoutSidebarApps(nodes, inSidebar)`. The Chrome setup card now shows the Google Chrome mark.
+
+- 024d5ee: Sleeping compute sandboxes no longer count as running boxes. Compute leases stay warm while their sandbox sleeps, so an organization's idle chats could fill its running-box limit and park every new chat with `organization_sandbox_capacity`. The organization and person running-box limits, viewer-only limits (organization-wide and per workspace), the unpaid fleet cap and fleet pressure now leave out a compute lease whose sandbox is asleep and that no turn holds; a box a turn holds counts even while it naps. Waking a sleeping box that no turn holds is admitted like starting a new one, so the limits still bound how many boxes run. Migration 1575 grants the runtime the managed warm box count, so fleet pressure no longer counts self-hosted or sleeping boxes.
+- 962c6d7: A turn started by another agent's message or steer no longer fails at start with "Personal GitHub repository does not match the accepted selection". It carried the sender's Your GitHub repository list, which named the sender's repositories rather than the receiving chat's. That list is now fitted to the receiving chat's repositories, within what the sender held. When a repository falls outside that, the turn keeps the Your GitHub the same person gave this chat in their latest message, and runs without it otherwise.
+- df9d061: An approval or question answer can no longer stop a session with "Open suffix resume event does not match an interruption".
+
+  - Only an answer recorded for the paused turn resumes it. Previously, a message sent while an earlier turn waited for approval could be resumed by that earlier turn's decision once it paused for its own approval.
+  - The scheduler and the resume claim now share one rule for this.
+  - A resume whose answer no longer matches an open call applies the pause's other decisions and keeps waiting for the rest, instead of failing the turn.
+  - A call that was still waiting for approval when its turn ended (for example because a new message replaced the pause) is now recorded as never run, instead of as an unknown outcome.
+  - The Connected Machine checkpoint note now shows only for sandbox failures.
+
+- Updated dependencies [52c2fea]
+- Updated dependencies [9d0896d]
+- Updated dependencies [bf87544]
+- Updated dependencies [dda9e3b]
+- Updated dependencies [cd461f0]
+- Updated dependencies [f88a948]
+- Updated dependencies [27ba8d2]
+- Updated dependencies [42dc05c]
+- Updated dependencies [826dcce]
+- Updated dependencies [b731e71]
+- Updated dependencies [3ace70b]
+- Updated dependencies [ae08e32]
+- Updated dependencies [b7064b0]
+- Updated dependencies [ebca2a8]
+  - @opengeni/observability@6.42.0
+  - @opengeni/config@6.42.0
+  - @opengeni/contracts@6.42.0
+  - @opengeni/codemode@6.42.0
+  - @opengeni/codex@6.42.0
+  - @opengeni/network@6.42.0
+  - @opengeni/subscriptions@6.42.0
+  - @opengeni/xai-subscription@6.42.0
+
 ## 6.41.0
 
 ### Minor Changes
