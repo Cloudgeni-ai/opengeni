@@ -439,16 +439,21 @@ export async function agentsReadinessPurposes(
     0,
     undefined,
     viewerSubjectId,
-    { agentIds: ids },
+    // Active first, so paused rows never use up the limit ahead of them.
+    { agentIds: ids, activeFirst: true },
   );
-  const triggersByAgent = new Map<string, ScheduledTask[]>();
+  // Its active triggers decide what it needs; with none active, its paused
+  // ones (what turning it on would run); with none at all, the template's.
+  const active = new Map<string, ScheduledTask[]>();
+  const paused = new Map<string, ScheduledTask[]>();
   for (const task of tasks) {
-    // Paused triggers don't run, so they don't decide what it needs.
-    if (task.status === "paused") continue;
     const agentId = task.agentConfig.agentId;
-    if (agentId && ids.includes(agentId))
-      triggersByAgent.set(agentId, [...(triggersByAgent.get(agentId) ?? []), task]);
+    if (!agentId || !ids.includes(agentId)) continue;
+    const into = task.status === "paused" ? paused : active;
+    into.set(agentId, [...(into.get(agentId) ?? []), task]);
   }
+  const triggersByAgent = new Map<string, ScheduledTask[]>(paused);
+  for (const [agentId, own] of active) triggersByAgent.set(agentId, own);
   return await Promise.all(
     agents.map(async (agent) => {
       const template = agent.templateKey ? agentTemplateByKey(agent.templateKey) : undefined;
@@ -485,6 +490,18 @@ function recordUncheckedTrigger(agentId: string, error: unknown): void {
   } catch {
     // Telemetry never changes an outcome.
   }
+}
+
+/** What is missing, said to someone acting for the trigger's owner (an admin's resume). */
+export function ownerMissingMessage(
+  readiness: SetupReadiness,
+  first: SetupReadiness["missing"][number],
+  githubEvents: boolean,
+): string {
+  // For GitHub events the missing piece is the workspace's App, not the owner's GitHub.
+  if (githubEvents && isGitHub(first)) return "A GitHub admin needs to install the GitHub App.";
+  // True whoever may connect it: its owner, or an admin for the workspace.
+  return `Its owner needs to connect ${first.name}, or an admin can connect it for the workspace.`;
 }
 
 /**
@@ -533,10 +550,7 @@ export async function requireAgentTriggerReady(
   throw new HTTPException(409, {
     message:
       options.forOwner && first
-        ? // For GitHub events the missing piece is the workspace's App, not the owner's GitHub.
-          githubEvents && isGitHub(first)
-          ? "A GitHub admin needs to install the GitHub App."
-          : `Its owner needs to connect ${first.name}.`
+        ? ownerMissingMessage(readiness, first, githubEvents)
         : (readiness.reason ?? "This agent isn't ready to turn on yet."),
     cause,
   });

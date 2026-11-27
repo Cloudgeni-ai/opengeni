@@ -2,6 +2,7 @@ import type { ClientVoiceInputConfig, OpenGeniClient } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
 import type { RecorderPlatform } from "@opengeni/sdk/recordings";
 import { useOpenGeniText } from "@opengeni/react/messages";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import {
   useVoiceInput,
   type UseVoiceInputResult,
@@ -23,6 +24,8 @@ export type UseNativeDictationOptions = {
   platform: RecorderPlatform;
   /** Whether this workspace allows voice input. */
   enabled?: boolean | undefined;
+  /** Whether to include purchase remedies in refusal copy. */
+  showPurchasePrompts?: boolean | undefined;
   value: string;
   setValue: (value: string) => void;
   /** The language spoken ("nb", "en"); omitted or null detects it. */
@@ -48,6 +51,7 @@ export type UseNativeDictationOptions = {
  */
 export function useNativeDictation(options: UseNativeDictationOptions): NativeVoiceInput {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts() && options.showPurchasePrompts !== false;
   const voice = useVoiceInput({
     client: options.client,
     workspaceId: options.workspaceId,
@@ -100,7 +104,7 @@ export function useNativeDictation(options: UseNativeDictationOptions): NativeVo
 
   const held = voice.hasRecoverableRecording;
   const status = nativeStatus(voice.status, held);
-  const error = voice.error ? nativeError(voice.error, held, t) : null;
+  const error = voice.error ? nativeError(voice.error, held, t, showPurchasePrompts) : null;
   const { start: startVoice, insertSavedTranscript, retry: retryVoice, discard } = voice;
   const savedTranscript = held ? voice.savedTranscript : null;
 
@@ -178,7 +182,12 @@ function nativeStatus(
   }
 }
 
-function nativeError(code: string, held: boolean, t: ReturnType<typeof useOpenGeniText>): string {
+function nativeError(
+  code: string,
+  held: boolean,
+  t: ReturnType<typeof useOpenGeniText>,
+  showPurchasePrompts = true,
+): string {
   switch (code) {
     case "permission_denied":
       return t("native.voiceInput.allowMicrophoneAccessInSettings");
@@ -187,7 +196,13 @@ function nativeError(code: string, held: boolean, t: ReturnType<typeof useOpenGe
     case "policy_blocked":
       return t("composerTranscriptionControl.voiceInputIsnTAllowed");
     case "insufficient_credits":
-      return t("composerTranscriptionControl.voiceInputNeedsCreditsRecording");
+      if (showPurchasePrompts)
+        return t("composerTranscriptionControl.voiceInputNeedsCreditsRecording");
+      return t(
+        held
+          ? "composerTranscriptionControl.voiceInputNoCreditsRecordingSaved"
+          : "composerTranscriptionControl.voiceInputNoCredits",
+      );
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
       return t("composerTranscriptionControl.usageLimitReachedRecordingSaved");

@@ -1,5 +1,6 @@
 import type { TranscriptionBillingRefusedError } from "@opengeni/core";
 import type { Context } from "hono";
+import { purchaseRefusalMessage } from "../http/native-purchase-presentation";
 
 /**
  * Same body shape as session admission refusals (`code` + `message`, plus
@@ -9,6 +10,15 @@ import type { Context } from "hono";
 export function transcriptionBillingRefusal(
   c: Context,
   error: TranscriptionBillingRefusedError,
+  surface: "voice input" | "live voice",
+  ios: boolean,
 ): Response {
-  return c.json({ code: error.code, message: error.message, ...error.details }, error.status);
+  return c.json(
+    {
+      code: error.code,
+      message: purchaseRefusalMessage(error.code, error.message, surface, ios),
+      ...error.details,
+    },
+    error.status,
+  );
 }

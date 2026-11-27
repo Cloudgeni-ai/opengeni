@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import type { EmbeddedRealtimeSessionClientLike } from "../client";
 import { useEmbeddedRealtimeSession } from "../session-context";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 
 /** An abort reason that works where DOMException is missing (React Native). */
 function abortError(message: string): Error {
@@ -751,6 +752,7 @@ export function useRealtimeModelSelection(options: {
   activeModel?: SessionRealtimeModel | null | undefined;
 }) {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const { client, workspaceId } = useEmbeddedRealtimeSession({
     client: options.client,
     workspaceId: options.workspaceId,
@@ -838,8 +840,23 @@ export function useRealtimeModelSelection(options: {
     if (activeModel) setSelectedModelId(activeModel);
   }, [activeModel]);
 
+  const presentedCatalog = useMemo(
+    () =>
+      showPurchasePrompts
+        ? catalog
+        : catalog.map((model) =>
+            model.unavailableCode === "insufficient_credits" ||
+            model.unavailableCode === "subscription_plan_required"
+              ? {
+                  ...model,
+                  unavailableReason: t("realtime.sessionRealtime.thisVoiceModelIsUnavailable"),
+                }
+              : model,
+          ),
+    [catalog, showPurchasePrompts, t],
+  );
   const selectedModel =
-    catalog.find((model) => model.id === selectedModelId) ??
+    presentedCatalog.find((model) => model.id === selectedModelId) ??
     ({
       ...CODEX_LIVE_MODEL(t),
       available: options.codexConnected,
@@ -909,7 +926,7 @@ export function useRealtimeModelSelection(options: {
         ? "failed"
         : "ready";
   return {
-    models: catalog,
+    models: presentedCatalog,
     selectedModel,
     selectModel,
     catalogReady,

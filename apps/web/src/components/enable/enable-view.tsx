@@ -30,6 +30,9 @@ import {
 
 export type EnableFact = { label: string; description?: string | undefined };
 
+/** How an admin was asked: in their inbox, or by a link the person sends. */
+export type AskedVia = "inbox" | "already" | "link";
+
 export interface EnableViewProps {
   /** "PR reviewer", "Review pull requests". */
   name: string;
@@ -54,8 +57,8 @@ export interface EnableViewProps {
   /** Why Turn on is off, in words; null when it can be pressed. */
   blocker: string | null;
   busy: boolean;
-  /** Providers an admin was asked about from here. */
-  asked: ReadonlySet<string>;
+  /** Providers an admin was asked about from here, and how. */
+  asked: ReadonlyMap<string, AskedVia>;
   onConnect: (connection: SetupConnectionState) => void;
   /** Absent in a Personal workspace, where there is no admin to ask. */
   onAskAdmin?: ((connection: SetupConnectionState) => void) | undefined;
@@ -123,7 +126,7 @@ function ConnectionRow({
   onAskAdmin,
 }: {
   connection: SetupConnectionState;
-  asked: boolean;
+  asked: AskedVia | undefined;
   onConnect: () => void;
   onAskAdmin: (() => void) | undefined;
 }) {
@@ -155,7 +158,11 @@ function ConnectionRow({
         ) : control === "ask-admin" && onAskAdmin ? (
           asked ? (
             <StatusBadge tone="neutral" variant="dot">
-              Link copied
+              {asked === "inbox"
+                ? "Requested"
+                : asked === "already"
+                  ? "Already asked"
+                  : "Link copied"}
             </StatusBadge>
           ) : (
             <RowButton onClick={onAskAdmin}>Ask an admin</RowButton>
@@ -163,7 +170,11 @@ function ConnectionRow({
         ) : undefined
       }
       hint={
-        control === "ask-admin" && asked ? "Send the link to an admin to connect it." : undefined
+        control === "ask-admin" && asked
+          ? asked === "link"
+            ? "Send the link to an admin to connect it."
+            : "Your admins were asked in their inbox."
+          : undefined
       }
     />
   );
@@ -272,7 +283,7 @@ export function EnableView(props: EnableViewProps) {
                 <ConnectionRow
                   key={connection.provider}
                   connection={connection}
-                  asked={asked.has(connection.provider)}
+                  asked={asked.get(connection.provider)}
                   onConnect={() => onConnect(connection)}
                   onAskAdmin={onAskAdmin ? () => onAskAdmin(connection) : undefined}
                 />

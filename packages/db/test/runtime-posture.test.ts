@@ -4279,6 +4279,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     "connections",
     "scheduled_tasks",
     "scheduled_task_blocker_reviews",
+    "account_deletion_requests",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = [
@@ -4293,7 +4294,9 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
     const posture = safePosture();
     // The event fixture's version of a table replaces the safe posture's.
     posture.tables = posture.tables.filter((table) => !deferredTables.includes(table.name));
-    posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
+    posture.tables.push(
+      ...deferredTables.map((name) => eventTable(name, name !== "account_deletion_requests")),
+    );
     posture.privateTables.push(
       ...definerPrivateTables.map((name) => ({ ...eventTable(name, false), policyCount: 0 })),
     );
@@ -4315,10 +4318,13 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
   const eventOptions: RuntimeDatabasePostureOptions = {
     ...options,
     protectedTables: [...(options.protectedTables ?? []), ...deferredTables],
+    protectedNoDirectDmlTables: ["account_deletion_requests"],
     tablePrivileges: {
       ...options.tablePrivileges,
       ...Object.fromEntries(
-        deferredTables.map((name) => [name, ["SELECT", "INSERT", "UPDATE", "DELETE"] as const]),
+        deferredTables
+          .filter((name) => name !== "account_deletion_requests")
+          .map((name) => [name, ["SELECT", "INSERT", "UPDATE", "DELETE"] as const]),
       ),
     },
   };
@@ -4380,6 +4386,9 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "deliver_app_notification_v1(uuid)",
       "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
       "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
+      "account_deletion_user_v1(text, jsonb)",
+      "account_deletion_work_v1(text, jsonb)",
+      "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4394,6 +4403,9 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "sync_subscription_relogin_notice_v1(uuid)",
       "deliver_app_notification_v1(uuid)",
       "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
+      "account_deletion_user_v1(text, jsonb)",
+      "account_deletion_work_v1(text, jsonb)",
+      "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(

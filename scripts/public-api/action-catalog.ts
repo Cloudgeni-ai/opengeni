@@ -61,6 +61,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     pattern: /^\/v1\/me\/ai-processing-consent$/,
     reason: "the person's own cross-organization disclosure and explicit AI processing permission",
   },
+  {
+    pattern: /^\/v1\/me\/account-deletion$/,
+    reason: "the person must request deletion in their own signed-in browser or native app",
+  },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   {
     pattern: /^\/v1\/organizations\/:organizationId\/identity\//,

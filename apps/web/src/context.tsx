@@ -253,6 +253,7 @@ export function RootRouteComponent() {
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
+    pathname === "/account-deletion-requested" ||
     pathname.startsWith("/share/") ||
     pathname === "/setup-account" ||
     pathname === "/account-auth" ||

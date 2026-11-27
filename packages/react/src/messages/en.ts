@@ -1324,6 +1324,9 @@ export const englishMessages = {
     "Voice input is unavailable while the composer is disabled.",
   "composerTranscriptionControl.voiceInputNeedsCreditsRecording":
     "Voice input needs credits. Recording saved; retry after adding credits.",
+  "composerTranscriptionControl.voiceInputNoCredits": "No credits are available for voice input.",
+  "composerTranscriptionControl.voiceInputNoCreditsRecordingSaved":
+    "No credits are available for voice input. Your recording is saved.",
   "composerTranscriptionControl.voiceInputStoppedBecauseAudio":
     "Voice input stopped because audio could not be saved safely.",
   "computerViewer.acting": "Acting",
@@ -3567,6 +3570,7 @@ export const englishMessages = {
   "modelPolicy.models": "Models",
   "modelPolicy.needsCredits": "Not covered by your credits",
   "modelPolicy.needsPlan": "Needs {plan}",
+  "modelPolicy.notOnCurrentPlan": "Not available on your current plan",
   "modelPolicy.notEntitled": "Not entitled",
   "modelPolicy.opengeniCredits": "{product} credits",
   "modelPolicy.opengeniCreditsAutomaticManagedRoute": "{product} credits · automatic managed route",

@@ -13,7 +13,15 @@ import { usePersonalSecurityContext } from "@/lib/personal-security-context";
  * access loads and lists only the account's own pages. Opened from workspace or
  * organization settings, its back link returns to the page it came from.
  */
-export function PersonalSettingsShell({ email, children }: { email: string; children: ReactNode }) {
+export function PersonalSettingsShell({
+  email,
+  children,
+  afterPrivacy,
+}: {
+  email: string;
+  children: ReactNode;
+  afterPrivacy?: ReactNode;
+}) {
   const context = usePersonalSecurityContext();
   const search = useRouterState({
     select: (state) => state.location.search as Record<string, unknown>,
@@ -55,6 +63,7 @@ export function PersonalSettingsShell({ email, children }: { email: string; chil
     >
       {children}
       <PrivacyPreferencesSection analytics={context?.clientConfig.analytics} />
+      {afterPrivacy}
     </SettingsShell>
   );
 }
