@@ -215,6 +215,13 @@ export type NativeRealtimeCall = {
   route: NativeCallAudioRoute | null;
   error: string | null;
   /**
+   * When voice first went live on this call (epoch milliseconds), null before
+   * that and after it ends. The call's elapsed time counts from here, so every
+   * view of the call (the full screen, a minimized pill) shows the same time
+   * however often it mounts, and a reconnect does not restart it.
+   */
+  connectedAt?: number | null | undefined;
+  /**
    * Why the live call is silent on one side, when it is: the microphone picks
    * up no sound, or a reply arrived but did not play. Null while audio flows.
    */
@@ -269,6 +276,7 @@ export function useNativeRealtimeCall(options: {
   const [route, setRoute] = useState<NativeCallAudioRoute | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [systemCall, setSystemCall] = useState(false);
+  const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const callIdRef = useRef<string | null>(null);
   /** The call id the system knows about; null for an in-app call. */
   const systemCallRef = useRef<string | null>(null);
@@ -294,6 +302,7 @@ export function useNativeRealtimeCall(options: {
       systemCallRef.current = null;
       connectedRef.current = null;
       setCallId(null);
+      setConnectedAt(null);
       setEnding(false);
       setSpeakerState(false);
       setSystemCall(false);
@@ -320,6 +329,7 @@ export function useNativeRealtimeCall(options: {
         systemCallRef.current = null;
         connectedRef.current = null;
         setCallId(null);
+        setConnectedAt(null);
         setEnding(false);
         setSystemCall(false);
         void realtimeRef.current.stop().catch(() => undefined);
@@ -330,10 +340,12 @@ export function useNativeRealtimeCall(options: {
   }, [call]);
 
   // The system call shows connected exactly once, when voice first goes live.
+  // The call's elapsed time starts at that same moment.
   useEffect(() => {
     const id = callIdRef.current;
     if (id && status === "active" && connectedRef.current !== id) {
       connectedRef.current = id;
+      setConnectedAt(Date.now());
       if (systemCallRef.current === id) call?.reportConnected(id);
     }
   }, [call, status, callId]);
@@ -437,6 +449,7 @@ export function useNativeRealtimeCall(options: {
     speaker,
     route,
     error,
+    connectedAt,
     notice,
     systemCall,
     canStart: !callId && realtime.canStart,

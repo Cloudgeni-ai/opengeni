@@ -32,21 +32,26 @@ export const DEFAULT_OPENGENI_NATIVE_CALL_LABELS = (t: OpenGeniText): OpenGeniNa
   minimize: t("native.realtime.callView.backToChat"),
 });
 
-function formatDuration(seconds: number): string {
+export function formatNativeCallDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return `${minutes}:${String(rest).padStart(2, "0")}`;
 }
 
-function useCallDuration(active: boolean): number | null {
-  const [since, setSince] = useState<number | null>(null);
+/**
+ * Whole seconds the call has been live, ticking each second while it is live,
+ * or null while it is not. Counted from the call's own `connectedAt`, so a view
+ * that mounts later (expanding a minimized call) shows the true elapsed time.
+ */
+export function useNativeCallDuration(call: NativeRealtimeCall): number | null {
+  const since = call.phase === "active" ? (call.connectedAt ?? null) : null;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!active) return setSince(null);
-    setSince((current) => current ?? Date.now());
+    if (since === null) return;
+    setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [active]);
+  }, [since]);
   return since === null ? null : Math.max(0, Math.floor((now - since) / 1000));
 }
 
@@ -115,7 +120,7 @@ export function OpenGeniNativeCallView({
   const theme = useNativeTimelineTheme();
   const { colors } = theme;
   const labels = { ...DEFAULT_OPENGENI_NATIVE_CALL_LABELS(t), ...labelOverrides };
-  const duration = useCallDuration(call.phase === "active");
+  const duration = useNativeCallDuration(call);
   const status =
     call.phase === "connecting" || call.phase === "idle"
       ? labels.connecting
@@ -165,7 +170,9 @@ export function OpenGeniNativeCallView({
           style={[styles.status, fontStyle(theme, 500), { color: colors["fg-muted"] }]}
           accessibilityLiveRegion="polite"
         >
-          {duration !== null && !call.muted ? `${status} · ${formatDuration(duration)}` : status}
+          {duration !== null && !call.muted
+            ? `${status} · ${formatNativeCallDuration(duration)}`
+            : status}
         </Text>
         {call.error ? (
           <Text style={[styles.error, fontStyle(theme, 400), { color: colors.danger }]}>

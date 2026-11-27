@@ -45,6 +45,8 @@ mock.module("../src/timeline/theme", () => ({ useNativeTimelineTheme: () => ({ c
 mock.module("../src/realtime/call-view", () => ({
   DEFAULT_OPENGENI_NATIVE_CALL_LABELS: () => ({}),
   OpenGeniNativeCallView: () => createElement("div", null, "Call screen"),
+  formatNativeCallDuration: () => "0:00",
+  useNativeCallDuration: () => null,
 }));
 mock.module("@opengeni/react/session", () => ({
   useSessionEvents: () => ({ events: [], initialLoading: false }),

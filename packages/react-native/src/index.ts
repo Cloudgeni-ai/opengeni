@@ -115,6 +115,8 @@ export {
 export {
   DEFAULT_OPENGENI_NATIVE_CALL_LABELS,
   OpenGeniNativeCallView,
+  formatNativeCallDuration,
+  useNativeCallDuration,
   type OpenGeniNativeCallLabels,
 } from "./realtime/call-view";
 export {
