@@ -66,6 +66,7 @@ import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { isIntelligenceEffort } from "../../lib/session-tools";
 import { useSessionRepliesMute } from "../../lib/inbox";
+import { appViewerKey } from "../../lib/viewer-key";
 import { useSessionAdminAccess } from "../session/session-admin-access";
 import { applySessionArchiveProjection } from "../../lib/session-pagination";
 import { notifySessionListChanged } from "../../lib/session-list-invalidation";
@@ -456,6 +457,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   const lineage = useSessionLineage(context.session?.id ?? null, {
     events: sessionEvents,
     pollIntervalMs: 30_000,
+    viewer: appViewerKey(context),
   });
   const ancestors = lineage.lineage?.ancestors ?? [];
 
