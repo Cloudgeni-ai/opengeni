@@ -1,10 +1,11 @@
 import type { ChatClient } from "@opengeni/sdk";
 import { MenuIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type {
   CreatedConversation,
   NewConversationCreateOptions,
 } from "../hooks/use-new-conversation";
+import { useNewConversation } from "../hooks/use-new-conversation";
 import { cn } from "../lib/cn";
 import { notifyObserver } from "../lib/notify-observer";
 import {
@@ -13,7 +14,8 @@ import {
   type HostThemePreference,
 } from "../lib/host-theme";
 import { useOpenGeni, type ClientOverride } from "../session-context";
-import { NewConversation } from "./new-conversation";
+import { ConversationRenderBoundary } from "./conversation-render-boundary";
+import { NewConversationView } from "./new-conversation";
 import { useClientConfigFlags } from "../hooks/use-client-config-flags";
 import { SessionConversation, type SessionConversationProps } from "./session-conversation";
 import { SessionList, type SessionListLabels, type SessionListProps } from "./session-list";
@@ -148,13 +150,16 @@ function Chat({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [listRevision, setListRevision] = useState(0);
   const [handoff, setHandoff] = useState<CreatedConversation | null>(null);
+  // Opening a chat from the new chat while it is being created is navigation,
+  // not the created session arriving: it gets its own conversation.
+  const [creationEpoch, setCreationEpoch] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(root, { theme, surface });
   const config = useClientConfigFlags(context.client);
   // A host creator replaces the proxy route; otherwise trust the proxy's report.
   const canCreate = createSession !== undefined || config.sessionCreation;
 
-  const select = useCallback(
+  const show = useCallback(
     (next: string | null) => {
       setHandoff(null);
       if (controlledSessionId === undefined) setUncontrolled(next);
@@ -163,6 +168,46 @@ function Chat({
     },
     [controlledSessionId, onSessionChange],
   );
+  const select = useCallback(
+    (next: string | null) => {
+      if (selected === null) setCreationEpoch((epoch) => epoch + 1);
+      show(next);
+    },
+    [selected, show],
+  );
+  // Kept above the view switch so the first message can show in the
+  // conversation while its chat is being created. Each visit to the new chat
+  // starts afresh, and leaving it never navigates to a late creation.
+  const creation = useNewConversation({
+    ...scope,
+    attachments: conversationProps?.attachments,
+    modelPicker: conversationProps?.modelPicker,
+    realtimeVoice: conversationProps?.realtimeVoice,
+    enabled: canCreate,
+    createSession,
+    scopeKey: selected ?? undefined,
+    onCreated: (created) => {
+      setListRevision((revision) => revision + 1);
+      show(created.sessionId);
+      setHandoff(created);
+    },
+  });
+  // Also for a conversation that mounts only once the created id is selected,
+  // and while a controlled host has not applied that selection yet.
+  const handoffPrompt = useMemo(
+    () =>
+      handoff?.initialMessage
+        ? { text: handoff.initialMessage, sentAt: handoff.sentAt, resources: handoff.resources }
+        : null,
+    [handoff],
+  );
+  const pendingPrompt =
+    selected === null
+      ? // Newer uploads that must finish before the handoff stay in the new-chat view.
+        ((creation.finishingUploads ? null : creation.pendingPrompt) ?? handoffPrompt)
+      : handoff?.sessionId === selected
+        ? handoffPrompt
+        : null;
 
   useEffect(() => {
     if (!handoff) return;
@@ -245,13 +290,13 @@ function Chat({
           <span className="text-og-sm font-semibold text-og-fg-muted">{labels.heading}</span>
         </div>
         <div className="og-chat-main min-h-0 flex-1 px-3 pb-3 pt-1">
-          {selected ? (
+          {selected || pendingPrompt ? (
+            // The same mounted conversation from Send through the created
+            // session: the message and its startup row show on the next frame.
             <SessionConversation
+              key={creationEpoch}
               {...conversationProps}
-              // The first prompt and its startup row show from the first frame.
-              {...(handoff?.sessionId === selected && handoff.initialMessage
-                ? { pendingPrompt: { text: handoff.initialMessage, sentAt: handoff.sentAt } }
-                : {})}
+              pendingPrompt={pendingPrompt}
               composerOptions={{
                 ...conversationProps?.composerOptions,
                 ...(handoff?.sessionId === selected ? { initialDraft: handoff.draft } : {}),
@@ -277,37 +322,30 @@ function Chat({
               height="100%"
             />
           ) : (
-            <NewConversation
-              {...scope}
-              attachments={conversationProps?.attachments}
-              modelPicker={conversationProps?.modelPicker}
-              modelPickerProps={conversationProps?.modelPickerProps}
-              composerProps={conversationProps?.composerProps}
-              voiceInput={conversationProps?.voiceInput}
-              realtimeVoice={conversationProps?.realtimeVoice}
-              realtimeVoiceProps={conversationProps?.realtimeVoiceProps}
-              labels={{
-                ...(labels.newChatRetry ? { retry: labels.newChatRetry } : {}),
-                ...(labels.newChatPending ? { pending: labels.newChatPending } : {}),
-                ...(labels.newChatFinishingUploads
-                  ? { finishingUploads: labels.newChatFinishingUploads }
-                  : {}),
-                title: labels.newChatTitle,
-                send: labels.send,
-                unavailable: labels.newChatUnavailable,
-                placeholder:
-                  labelOverrides?.newChatPlaceholder ??
-                  conversationProps?.composerProps?.placeholder ??
-                  labels.newChatPlaceholder,
-              }}
-              enabled={canCreate}
-              createSession={createSession}
-              onCreated={(created) => {
-                setListRevision((revision) => revision + 1);
-                select(created.sessionId);
-                setHandoff(created);
-              }}
-            />
+            // A failed or unconfirmed create comes back here with its draft and Retry.
+            <ConversationRenderBoundary resetKey={workspaceId ?? ""}>
+              <NewConversationView
+                creation={creation}
+                modelPickerProps={conversationProps?.modelPickerProps}
+                composerProps={conversationProps?.composerProps}
+                voiceInput={conversationProps?.voiceInput}
+                realtimeVoiceProps={conversationProps?.realtimeVoiceProps}
+                labels={{
+                  ...(labels.newChatRetry ? { retry: labels.newChatRetry } : {}),
+                  ...(labels.newChatPending ? { pending: labels.newChatPending } : {}),
+                  ...(labels.newChatFinishingUploads
+                    ? { finishingUploads: labels.newChatFinishingUploads }
+                    : {}),
+                  title: labels.newChatTitle,
+                  send: labels.send,
+                  unavailable: labels.newChatUnavailable,
+                  placeholder:
+                    labelOverrides?.newChatPlaceholder ??
+                    conversationProps?.composerProps?.placeholder ??
+                    labels.newChatPlaceholder,
+                }}
+              />
+            </ConversationRenderBoundary>
           )}
         </div>
       </main>

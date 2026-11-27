@@ -672,6 +672,31 @@ const client = fakeClient({
           }) as never,
       }
     : {}),
+  // Files attached in the demo, such as to a new chat's first message.
+  uploadFile: async (workspace, input) => {
+    const id = crypto.randomUUID();
+    const data = input.data instanceof Blob ? input.data : new Blob([]);
+    attachedFiles.set(id, {
+      filename: input.filename,
+      contentType: input.contentType,
+      sizeBytes: data.size,
+      url: URL.createObjectURL(data),
+    });
+    return {
+      id,
+      workspaceId: workspace,
+      status: "ready",
+      filename: input.filename,
+      safeFilename: input.filename,
+      contentType: input.contentType,
+      sizeBytes: data.size,
+      sha256: null,
+      bucket: "demo",
+      objectKey: id,
+      createdAt: minutesAgo(0),
+      updatedAt: minutesAgo(0),
+    } as never;
+  },
   getFile: async (workspace, fileId) => {
     const file = attachedFiles.get(fileId);
     if (!file) throw new Error("File not found");

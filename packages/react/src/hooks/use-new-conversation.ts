@@ -25,6 +25,7 @@ import {
 } from "./use-composer";
 import { useFileAttachments } from "./use-file-attachments";
 import { useOpenGeniText } from "../messages/runtime";
+import type { PendingPrompt } from "../lib/session-startup-timeline";
 
 /** Browser choices, not server-owned agent configuration or authority. */
 export type NewConversationCreateOptions = {
@@ -40,8 +41,14 @@ export type CreatedConversation = {
   sessionId: string;
   /** The accepted first message; empty for voice-first creation. */
   initialMessage: string;
-  /** When the person sent it (ISO 8601); pass both as the conversation's `pendingPrompt`. */
+  /**
+   * When the person sent it (ISO 8601). With `initialMessage` and `resources`
+   * it is the controller's `pendingPrompt`, for a conversation that mounts
+   * only now.
+   */
   sentAt: string;
+  /** The files sent with the first message. */
+  resources: FileResourceRef[];
   /** Newer unsent content, or the whole untouched draft for voice-first creation. */
   draft: InitialComposerDraft;
   realtimeModel?: SessionRealtimeModel | undefined;
@@ -76,6 +83,8 @@ type Attempt = {
   initialMessage: string;
   sentAt: string;
   options: NewConversationCreateOptions;
+  /** The person's choice when they sent; an unchanged choice is the created session's own. */
+  choice: Choice;
   textRevision: number;
   clearDraft: boolean;
   realtimeModel?: SessionRealtimeModel | undefined;
@@ -114,7 +123,8 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
   const [text, setText] = useState("");
   const [choice, setChoice] = useState(EMPTY_CHOICE);
   const [, setLevels] = useState(NO_LEVELS);
-  const [sending, setSending] = useState(false);
+  const [delivering, setDelivering] = useState<Attempt | null>(null);
+  const sending = delivering !== null;
   const [error, setError] = useState<{ cause: unknown } | null>(null);
   const [pending, setPending] = useState<Attempt | null>(null);
   const [completion, setCompletion] = useState<Completion | null>(null);
@@ -171,7 +181,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     choiceRef.current = EMPTY_CHOICE;
     setText("");
     setChoice(EMPTY_CHOICE);
-    setSending(false);
+    setDelivering(null);
     setError(null);
     setPending(null);
     setCompletion(null);
@@ -265,9 +275,14 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     const { attempt, sessionId } = accepted;
     const sentFiles = new Set(attempt.options.resources?.map((resource) => resource.fileId) ?? []);
     const selected = showModelPicker ? creationChoice() : EMPTY_CHOICE;
-    const policyChanged = (["model", "reasoningEffort", "latencyMode"] as const).some(
-      (field) => selected[field] !== attempt.options[field],
-    );
+    // Only an edit made after Send can differ from the created session. The
+    // view may be unmounted meanwhile (OpenGeniChat shows the conversation),
+    // so its level configuration is not there to re-derive the sent choice.
+    const policyChanged =
+      choiceRef.current !== attempt.choice &&
+      (["model", "reasoningEffort", "latencyMode"] as const).some(
+        (field) => selected[field] !== attempt.options[field],
+      );
     const draft: InitialComposerDraft = {
       text:
         attempt.clearDraft && textRevision.current === attempt.textRevision ? "" : textRef.current,
@@ -288,6 +303,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       sessionId,
       initialMessage: attempt.initialMessage,
       sentAt: attempt.sentAt,
+      resources: attempt.options.resources ?? [],
       draft,
       ...(attempt.realtimeModel ? { realtimeModel: attempt.realtimeModel } : {}),
     });
@@ -303,7 +319,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     const ownedGeneration = lifetime.generation;
     inFlight.current = true;
     pendingRef.current = attempt;
-    setSending(true);
+    setDelivering(attempt);
     setError(null);
     setPending(null);
     try {
@@ -337,7 +353,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
     } finally {
       if (lifetime.mounted && lifetime.generation === ownedGeneration) {
         inFlight.current = false;
-        setSending(false);
+        setDelivering(null);
       }
     }
   };
@@ -359,6 +375,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       key: crypto.randomUUID(),
       initialMessage,
       sentAt: new Date().toISOString(),
+      choice: choiceRef.current,
       textRevision: textRevision.current,
       clearDraft: explicit === undefined,
       create,
@@ -383,6 +400,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       key: crypto.randomUUID(),
       initialMessage: "",
       sentAt: new Date().toISOString(),
+      choice: choiceRef.current,
       textRevision: textRevision.current,
       clearDraft: false,
       create,
@@ -393,6 +411,22 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       realtimeModel: model,
     });
   };
+  // The first message from Send until `onCreated` or failure, including while
+  // the person's newer uploads finish. Voice-first creation has none.
+  const promptAttempt = delivering ?? completion?.attempt ?? null;
+  const pendingPrompt = useMemo(
+    (): PendingPrompt | null =>
+      promptAttempt && promptAttempt.options.startMode !== "realtime"
+        ? {
+            text: promptAttempt.initialMessage,
+            sentAt: promptAttempt.sentAt,
+            ...(promptAttempt.options.resources?.length
+              ? { resources: promptAttempt.options.resources }
+              : {}),
+          }
+        : null,
+    [promptAttempt],
+  );
   const composer: ComposerState = {
     value: text,
     setValue: updateText,
@@ -449,6 +483,14 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       config.realtimeVoice && (options.realtimeVoice ?? config.realtimeVoiceOffered),
     error,
     finishingUploads: completion !== null,
+    /**
+     * The first message while its chat is being created: from the frame Send
+     * starts until `onCreated` or a failure. Render the conversation with
+     * `sessionId={null}` and this `pendingPrompt`, then pass the id from
+     * `onCreated`; on failure show this new-chat view again, with its draft,
+     * error and Retry.
+     */
+    pendingPrompt,
     pending: pending ? { idempotencyKey: pending.key, realtimeModel: pending.realtimeModel } : null,
     retry: () => (pendingRef.current ? deliver(pendingRef.current) : Promise.resolve(false)),
     startRealtime,
