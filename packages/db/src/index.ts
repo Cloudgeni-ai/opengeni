@@ -17,6 +17,7 @@ import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 export * from "./app-sync";
 export * from "./app-webhooks";
+export * from "./setup-connection-requests";
 export * from "./app-server";
 export * from "./site-tool-data";
 export * from "./app-package-exports";
@@ -22548,8 +22549,12 @@ export async function listScheduledTasks(
    * null reads shared schedules only.
    */
   viewerSubjectId?: string | null,
-  /** Only automations whose runs are chats with this agent, or one of these (`agentConfig.agentId`). */
-  filters: { agentId?: string; agentIds?: readonly string[] } = {},
+  /**
+   * Only automations whose runs are chats with this agent, or one of these
+   * (`agentConfig.agentId`). `activeFirst` lists active ones before paused
+   * ones, so paused rows never use up the limit ahead of active ones.
+   */
+  filters: { agentId?: string; agentIds?: readonly string[]; activeFirst?: boolean } = {},
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -22589,7 +22594,11 @@ export async function listScheduledTasks(
             : []),
         ),
       )
-      .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
+      .orderBy(
+        ...(filters.activeFirst ? [sql`(${schema.scheduledTasks.status} = 'active') DESC`] : []),
+        desc(schema.scheduledTasks.createdAt),
+        desc(schema.scheduledTasks.id),
+      )
       .limit(limit)
       .offset(offset);
     return rows.map(mapScheduledTask);

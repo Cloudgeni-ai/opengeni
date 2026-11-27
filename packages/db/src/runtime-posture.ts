@@ -76,6 +76,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the subscription needs-sign-in notice sync (1503), and the one-statement
  * lookup of the Slack event sources a shared Slack bot reaches (1552), and
  * the inbox notice sync for a blocked automation with no chat (1562), and
+ * the admins' inbox notice when a member asks for a connection (1599), and
  * the deployment-wide checks for connections sharing one provider OAuth
  * grant (1611).
  * Each is
@@ -126,6 +127,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
   "account_deletion_user_v1(text, jsonb)",
   "account_deletion_work_v1(text, jsonb)",
+  "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
   "oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])",
   "oauth_grant_reauth_siblings_v1(uuid, text, text[], text[], text, text[], text[])",
 ] as const;
@@ -180,9 +182,11 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * or resolves a notice, and the person dismisses one left after a reconnect.
  * 1552 withholds the shared Slack bot's one-statement source lookup; until it
  * is granted, a Slack callback keeps 1538's per-workspace probe.
+ * 1599 withholds the admins' notice for a member's connection request; until
+ * it is granted, "Ask an admin" copies a link to the step instead.
  * 1611 withholds the shared OAuth grant checks; until they are granted, a
- * disconnect never revokes at the provider and a refused refresh marks only
- * its own connection.
+ * disconnect never revokes at the provider and a refused refresh checks no
+ * other connection.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -199,6 +203,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
   "account_deletion_user_v1(text, jsonb)",
   "account_deletion_work_v1(text, jsonb)",
+  "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
   "oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])",
   "oauth_grant_reauth_siblings_v1(uuid, text, text[], text[], text, text[], text[])",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
@@ -372,6 +377,12 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "sync_scheduled_task_blocker_inbox_notice_v1(uuid)": [
     "scheduled_tasks",
     "scheduled_task_blocker_reviews",
+    "opengeni_private.inbox_items",
+  ],
+  "request_setup_connection_v1(uuid, uuid, text, text, text, text)": [
+    "workspaces",
+    "organization_memberships",
+    "workspace_memberships",
     "opengeni_private.inbox_items",
   ],
   "deliver_app_notification_v1(uuid)": [

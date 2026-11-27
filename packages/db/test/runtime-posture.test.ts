@@ -4388,6 +4388,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "sync_scheduled_task_blocker_inbox_notice_v1(uuid)",
       "account_deletion_user_v1(text, jsonb)",
       "account_deletion_work_v1(text, jsonb)",
+      "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
       "oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])",
       "oauth_grant_reauth_siblings_v1(uuid, text, text[], text[], text, text[], text[])",
     ]);
@@ -4406,6 +4407,7 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "list_shared_slack_event_sources_v2(uuid, uuid, uuid, text)",
       "account_deletion_user_v1(text, jsonb)",
       "account_deletion_work_v1(text, jsonb)",
+      "request_setup_connection_v1(uuid, uuid, text, text, text, text)",
       "oauth_grant_shared_with_live_connection_v1(uuid, text, text[], text[], text, text[], text[])",
       "oauth_grant_reauth_siblings_v1(uuid, text, text[], text[], text, text[], text[])",
     ]);
