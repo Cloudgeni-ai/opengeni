@@ -5,7 +5,8 @@ import type {
   SessionLineageResponse as FullSessionLineageResponse,
   OpenGeniClient,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { MOUNT_READ_REUSE_MS } from "../lib/mount-read-reuse";
 import {
   useEmbeddedSessionLineage,
   type EmbeddedSessionLineageClientOverride,
@@ -73,6 +74,46 @@ function isSessionCreateToolCallCreated(event: SessionEvent): boolean {
   return name === "session_create" || name.endsWith("__session_create");
 }
 
+type LineageRead = {
+  lineage: SessionLineageResponse;
+  readGeneration: number;
+  settledAt: number;
+};
+
+// The newest settled lineage read per client and session. The chat page, the
+// session rail and the mobile header each read the open chat's lineage; the
+// rail and the header learn the chat moments after the page's read settles.
+// Only reads stamped by the client's shared read clock are kept, so a reader
+// taking one orders it exactly as if it had joined that read in flight.
+const recentLineageReads = new WeakMap<object, Map<string, LineageRead>>();
+
+function lineageReadKey(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}\u0000${sessionId}`;
+}
+
+function recentLineageRead(
+  client: object,
+  workspaceId: string,
+  sessionId: string,
+): LineageRead | null {
+  const read = recentLineageReads.get(client)?.get(lineageReadKey(workspaceId, sessionId));
+  return read && Date.now() - read.settledAt < MOUNT_READ_REUSE_MS ? read : null;
+}
+
+function rememberLineageRead(
+  client: object,
+  workspaceId: string,
+  sessionId: string,
+  read: Omit<LineageRead, "settledAt">,
+): void {
+  let reads = recentLineageReads.get(client);
+  if (!reads) {
+    reads = new Map();
+    recentLineageReads.set(client, reads);
+  }
+  reads.set(lineageReadKey(workspaceId, sessionId), { ...read, settledAt: Date.now() });
+}
+
 /** Read the ancestors + descendant tree for one session. Data-only; no UI state. */
 export function useSessionLineage(
   sessionId: string | null | undefined,
@@ -91,28 +132,38 @@ export function useSessionLineage(
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const nextReadGeneration = useRef(0);
   const beginRead = options.beginRead;
-  const load = useCallback(
-    async (signal?: AbortSignal) => {
+  const load = useMemo(() => {
+    // A reader's first read for this session (on mount or when it learns the
+    // session) takes another reader's read from moments ago; every later read
+    // (refreshes, polls, live events, the page shown again) reads anew.
+    let first = true;
+    return async (signal?: AbortSignal) => {
       if (!sessionId) {
         return {
           lineage: { ancestors: [], children: [], truncated: false },
           readGeneration: 0,
         };
       }
+      const mayReuse = first;
+      first = false;
+      const recent = mayReuse ? recentLineageRead(client, workspaceId, sessionId) : null;
+      if (recent) return { lineage: recent.lineage, readGeneration: recent.readGeneration };
       let readGeneration = 0;
+      let shared = false;
       const lineage = await client.getSessionLineage(workspaceId, sessionId, {
         signal,
         onRequestStart: (sharedReadGeneration) => {
+          shared = sharedReadGeneration !== undefined;
           readGeneration = sharedReadGeneration ?? beginRead?.() ?? ++nextReadGeneration.current;
         },
       });
+      if (shared) rememberLineageRead(client, workspaceId, sessionId, { lineage, readGeneration });
       return {
         lineage,
         readGeneration,
       };
-    },
-    [beginRead, client, workspaceId, sessionId],
-  );
+    };
+  }, [beginRead, client, workspaceId, sessionId]);
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });
   const refresh = state.refresh;
   useEffect(() => {

@@ -45,6 +45,9 @@ const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 = new Set([
   "1b890ad9397f53351e98d62dc8e9973732a3a28596c7fd6ff627632705ee6cf8",
   // 1032 statement 17: patch knowledge_entry_read to use kept collection activity.
   "1a71acab125baec541ce1c3dd514cda222d8c761b90adec97b0797e582ebea01",
+  // 1695 statement 2: patch admit_scheduled_agent_run_execution's turn reads;
+  // its drift anchors quote the routine's old queries.
+  "a7e4c03214a50052b18a228e8116974181856870fdac4194267e39b33a5eeaba",
 ]);
 
 export type BackfillFinding = {

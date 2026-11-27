@@ -11394,6 +11394,12 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     unsettledSession: index("sandbox_workspace_mutation_admissions_unsettled_session_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.settledAt} is null`),
+    // A lease's open requests for the lost-provider session lookup (1696).
+    // Without it a generic plan read every settled request of the lease
+    // through the scoped id index (39k rows on the busiest production lease).
+    unsettledLease: index("sandbox_workspace_mutation_admissions_unsettled_lease_idx")
+      .on(table.accountId, table.workspaceId, table.leaseId)
+      .where(sql`${table.settledAt} is null`),
     attempt: index("sandbox_workspace_mutation_admissions_attempt_idx").on(
       table.workspaceId,
       table.attemptId,

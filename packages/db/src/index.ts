@@ -59888,17 +59888,36 @@ async function linkedLostProviderCommandSessionIdsTx(
       -- A closed, unquiesced owner of an open request on the lost box is woken
       -- by the settlement; lock its session in the canonical prefix first. A
       -- process actor's request (e.g. supervised stdin) pins the attempt that
-      -- owns its process.
+      -- owns its process. The request's own attempt and its process's owner
+      -- are separate arms: under row security a coalesce of the two is not a
+      -- leakproof join key, so it could not probe attempts by id and read
+      -- every attempt of the workspace for each open request.
       select attempt.session_id
       from sandbox_workspace_mutation_admissions admission
-      left join sandbox_retained_processes actor_process
+      join session_turn_attempts attempt
+        on attempt.id = admission.attempt_id
+        and attempt.workspace_id = admission.workspace_id
+      where admission.account_id = ${input.accountId}
+        and admission.workspace_id = ${input.workspaceId}
+        and admission.lease_id = ${input.leaseId}
+        and admission.sandbox_group_id = ${input.sandboxGroupId}
+        and admission.lease_epoch = ${input.lostEpoch}
+        and admission.provider_backend = ${input.lostBackend}
+        and admission.provider_instance_id = ${input.lostInstanceId}
+        and admission.settled_at is null
+        and attempt.state = 'closed' and attempt.quiesced_at is null
+      union
+      select attempt.session_id
+      from sandbox_workspace_mutation_admissions admission
+      join sandbox_retained_processes actor_process
         on admission.actor_kind = 'process'
         and actor_process.id = admission.actor_id
         and actor_process.workspace_id = admission.workspace_id
       join session_turn_attempts attempt
-        on attempt.id = coalesce(admission.attempt_id, actor_process.owner_attempt_id)
+        on attempt.id = actor_process.owner_attempt_id
         and attempt.workspace_id = admission.workspace_id
-      where admission.account_id = ${input.accountId}
+      where admission.attempt_id is null
+        and admission.account_id = ${input.accountId}
         and admission.workspace_id = ${input.workspaceId}
         and admission.lease_id = ${input.leaseId}
         and admission.sandbox_group_id = ${input.sandboxGroupId}

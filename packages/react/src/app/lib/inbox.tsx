@@ -121,6 +121,18 @@ export class InboxStore {
     return await this.refresh();
   };
 
+  /**
+   * The shown list's items when it was read under `maxAgeMs` ago, after the
+   * read in flight if there is one; null when there is no such list, so the
+   * caller reads its own.
+   */
+  recentItems = async (maxAgeMs: number): Promise<InboxEntry[] | null> => {
+    if (!this.active) return null;
+    if (this.inFlight) await this.inFlight;
+    if (!this.active || this.loadedAt === null || !this.state.data) return null;
+    return Date.now() - this.loadedAt < maxAgeMs ? this.state.data.items : null;
+  };
+
   /** Retire the old viewer's cache and pending responses before exposing a new viewer. */
   retire() {
     this.active = false;
@@ -316,9 +328,13 @@ export function useReadSessionInbox(sessionId: string) {
   const store = inboxStoreFor(context);
   useEffect(() => {
     if (!personal) return;
-    const read = async () => {
-      const data = await client.listInbox().catch(() => null);
-      const unread = (data?.items ?? []).filter(
+    // Opening the chat takes the rail's list when it was read moments ago (a
+    // deep link reads both at once); leaving always reads anew.
+    const read = async (opening: boolean) => {
+      const recent = opening ? await store.recentItems(MOUNT_READ_REUSE_MS) : null;
+      const listed: readonly InboxEntry[] | undefined =
+        recent ?? (await client.listInbox().catch(() => null))?.items;
+      const unread = (listed ?? []).filter(
         (item) =>
           item.sessionId === sessionId &&
           item.unread &&
@@ -336,8 +352,8 @@ export function useReadSessionInbox(sessionId: string) {
         ),
       );
     };
-    void read();
-    return () => void read();
+    void read(true);
+    return () => void read(false);
   }, [client, personal, sessionId, store]);
 }
 
