@@ -6,7 +6,7 @@ import type { Session } from "@opengeni/sdk";
 import { useLayoutEffect, useRef, useState } from "react";
 import { NewConversationView } from "../src/components/new-conversation";
 import { OpenGeniChat } from "../src/components/open-geni-chat";
-import { useNewConversation } from "../src/hooks/use-new-conversation";
+import { useNewConversation, type CreatedConversation } from "../src/hooks/use-new-conversation";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { LEVEL_MODELS, LEVELS } from "./fixtures/level-models";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
@@ -239,6 +239,45 @@ describe("OpenGeniChat new-chat composer", () => {
           reasoningEffort: "high",
         },
       ]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an unchanged level choice hands no policy over when the view unmounts during creation", async () => {
+    const { client } = chatClient({ defaultModel: "codex/deep" }, LEVEL_MODELS);
+    let finish!: (id: string) => void;
+    const created: CreatedConversation[] = [];
+    const sent: unknown[] = [];
+    // As in OpenGeniChat: the conversation replaces the new-chat view from Send.
+    function Host() {
+      const creation = useNewConversation({
+        client,
+        workspaceId: WORKSPACE_ID,
+        modelPicker: true,
+        createSession: (_message, _key, options) => {
+          sent.push(options);
+          return new Promise((resolve) => (finish = resolve));
+        },
+        onCreated: (result) => created.push(result),
+      });
+      return creation.pendingPrompt ? null : (
+        <NewConversationView creation={creation} modelPickerProps={{ levels: LEVELS }} />
+      );
+    }
+    const view = await renderComponent(<Host />);
+    try {
+      await flush(80);
+      const form = view.container.querySelector<HTMLFormElement>("[data-og-new-chat-composer]")!;
+      await actRun(() => typeInto(form.querySelector("textarea")!, "Start a draft"));
+      await actRun(() => form.requestSubmit());
+      expect(view.container.querySelector("[data-og-new-chat-composer]")).toBeNull();
+      await actRun(() => finish(CREATED));
+      await flush(20);
+      expect(sent).toEqual([{ model: "codex/everyday", reasoningEffort: "high" }]);
+      // The created session already runs the sent level; nothing replaces it.
+      expect(created).toHaveLength(1);
+      expect(created[0]!.draft.policy).toBeUndefined();
     } finally {
       await view.unmount();
     }

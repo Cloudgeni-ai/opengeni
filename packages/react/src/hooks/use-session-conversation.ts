@@ -1,6 +1,6 @@
 import type { ChatClient } from "@opengeni/sdk";
 import type { SendMessageInput } from "@opengeni/sdk";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import { projectPendingApprovals } from "../approvals";
 import { conversationTimeline } from "../conversation-timeline";
 import { useSessionStartupTimeline, type PendingPrompt } from "../lib/session-startup-timeline";
@@ -56,7 +56,11 @@ export type UseSessionConversationOptions = ClientOverride<ChatClient> & {
    * The conversation shows it with the startup row from the first frame,
    * keeps them while the session id is still `null` and history loads, and
    * then hands over to the live timeline without a blank frame or a second
-   * loading style. Read once per conversation; later changes are ignored.
+   * loading style. While the id is `null` the conversation shows the prompt
+   * the host currently passes, such as `useNewConversation`'s
+   * `pendingPrompt`, so one mounted controller shows each new conversation's
+   * own first prompt. When the id arrives it keeps the prompt passed then, or
+   * the last one passed while the id was `null`, and ignores later changes.
    * While the id is `null` nothing can be sent, and the stock view disables
    * its composer; a custom layout should disable its composer too, since a
    * draft written then is not carried into the created session.
@@ -80,16 +84,17 @@ export function useSessionConversation(
   sessionId: string | null,
   options: UseSessionConversationOptions = {},
 ) {
-  // Captured once: hosts often drop the prompt after the first render. It
-  // belongs to the first conversation only (see `usePendingPrompt`).
-  const [initialPrompt] = useState(() => options.pendingPrompt ?? null);
   const context = useOpenGeni(options);
   const scope = { client: context.client, workspaceId: context.workspaceId };
   const config = useClientConfigFlags(context.client);
   const showModelPicker = options.modelPicker ?? config.modelSelection;
   const catalog = useWorkspaceModelCatalog({ ...scope, enabled: showModelPicker });
   const feed = useSessionEvents(sessionId, scope);
-  const pendingPrompt = usePendingPrompt(initialPrompt, sessionId, feed.initialHistoryReady);
+  const pendingPrompt = usePendingPrompt(
+    options.pendingPrompt ?? null,
+    sessionId,
+    feed.initialHistoryReady,
+  );
   const eventOptions = { ...scope, events: feed.events };
   const detail = useSession(sessionId, eventOptions);
   const queue = useTurnQueue(sessionId, eventOptions);
@@ -235,7 +240,10 @@ export function useSessionConversation(
 
 /**
  * The first prompt belongs to the conversation it was sent in: the session
- * that is still being created (`null`) and the id it then gets. It retires
+ * that is still being created (`null`) and the id it then gets. While the id
+ * is `null` it is whatever the host passes now, so each new conversation in a
+ * mounted controller shows its own. From the id on it is fixed: hosts often
+ * drop the prompt in the same render the id arrives, or after it. It retires
  * once that session's history is readable, or when the conversation moves to
  * any other session, so no later session can show it.
  */
@@ -244,15 +252,15 @@ function usePendingPrompt(
   sessionId: string | null,
   historyReady: boolean,
 ): PendingPrompt | null {
-  const owner = useRef<{ sessionId: string | null; retired: boolean }>({
-    sessionId,
-    retired: prompt === null,
-  });
+  const owner = useRef<{ sessionId: string | null; prompt: PendingPrompt | null } | null>(null);
+  owner.current ??= { sessionId, prompt };
   const current = owner.current;
-  if (!current.retired && current.sessionId !== sessionId) {
-    if (current.sessionId === null) current.sessionId = sessionId;
-    else current.retired = true;
-  }
-  if (!current.retired && sessionId !== null && historyReady) current.retired = true;
-  return current.retired ? null : prompt;
+  // Still creating: follow the host, and keep its last prompt when the id arrives.
+  if (current.sessionId === null)
+    current.prompt = sessionId === null ? prompt : (prompt ?? current.prompt);
+  // A new conversation (`null` again) takes the host's prompt; another session has none.
+  else if (current.sessionId !== sessionId) current.prompt = sessionId === null ? prompt : null;
+  current.sessionId = sessionId;
+  if (sessionId !== null && historyReady) current.prompt = null;
+  return current.prompt;
 }

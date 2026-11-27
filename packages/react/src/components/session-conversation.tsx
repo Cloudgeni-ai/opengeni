@@ -135,7 +135,7 @@ export type SessionConversationProps = ClientOverride<ChatClient> &
      * so the prompt and its startup row stay put and nothing flashes.
      */
     sessionId: string | null;
-    /** See `useSessionConversation`'s `pendingPrompt`. Read once per conversation. */
+    /** See `useSessionConversation`'s `pendingPrompt`. Kept from the id on, once per conversation. */
     pendingPrompt?: UseSessionConversationOptions["pendingPrompt"];
     /** Product-owned desktop connection flow for computer offers. No console URLs or shell commands are assumed. */
     computerConnection?: Omit<ThisComputerCardProps, "rationale">;

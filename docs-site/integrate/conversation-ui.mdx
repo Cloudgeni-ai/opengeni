@@ -33,7 +33,9 @@ The indicator shown while the agent starts says "Thinking…". Use `conversation
 
 While a new chat's first turn starts, the conversation shows a startup row with the current step (queued, preparing the sandbox, contacting the model), the same row the Opengeni web app shows.
 
-If your server creates the session itself, render the conversation as soon as the person sends, before that call returns: pass `sessionId={null}` and `pendingPrompt={{ text, sentAt }}`, then pass the session ID once you have it. It is the same conversation throughout, so their message and the startup row stay put and nothing flashes while history loads. The composer is disabled until the session exists. Pass `pendingPrompt` only for the prompt that creates the session; the conversation drops it once that session's history loads or it opens a different session.
+`OpenGeniChat` shows the conversation the moment the person sends their first message: their message, its attachments and the startup row appear on the next frame, while the server is still creating the chat. If that fails, the new-chat composer comes back with their text, the reason, and Retry when the outcome is unknown.
+
+If your server creates the session itself, do the same in your own layout: render the conversation as soon as the person sends, before that call returns, with `sessionId={null}` and `pendingPrompt={{ text, sentAt, resources }}`, then pass the session ID once you have it. It is the same conversation throughout, so their message and the startup row stay put and nothing flashes while history loads. The composer is disabled until the session exists. Pass `pendingPrompt` only for the prompt that creates the session; the conversation drops it once that session's history loads or it opens a different session.
 
 ```tsx
 <SessionConversation
@@ -41,6 +43,19 @@ If your server creates the session itself, render the conversation as soon as th
   sessionId={createdSessionId ?? null}
   pendingPrompt={{ text: sentText, sentAt: sentAtIso }}
 />
+```
+
+With `useNewConversation`, its `pendingPrompt` is exactly that prompt: set from the frame Send starts (including a prepared `creation.composer.send(text)`) until `onCreated` or a failure, otherwise `null`. A host that keeps one `useSessionConversation` mounted across chats passes it on every render; while the session ID is `null` the conversation shows whatever prompt you pass now, so each new chat shows its own first message, and once the ID arrives it keeps that prompt even though the controller has dropped it.
+
+```tsx
+const creation = useNewConversation({ onCreated: ({ sessionId }) => setSessionId(sessionId) });
+const conversation = useSessionConversation(sessionId, { pendingPrompt: creation.pendingPrompt });
+// sessionId === null: the conversation while creating, the new-chat view otherwise.
+return sessionId !== null || creation.pendingPrompt ? (
+  <SessionConversationView conversation={conversation} />
+) : (
+  <NewConversationView creation={creation} />
+);
 ```
 
 For anonymous visitors on a public site, return `visitor: true` from the proxy's `resolve`. Visitors get no attach button (the proxy also refuses their uploads) unless you set `visitorUploads: true`.
@@ -266,9 +281,11 @@ from newer edits. A typed `OpenGeniApiError` with `outcomeUnknown: false`
 releases a definitively rejected attempt. `onCreated` receives newer unsent
 content in `draft`: pass it as `composerOptions.initialDraft` to the selected
 conversation. The real server draft supplies its persistence revision. It also
-receives `realtimeModel` for the optional voice-autostart handoff. `OpenGeniChat`
-already handles both. New uploads added during creation must finish, be retried,
-or be removed before the stock view switches to the created chat.
+receives `realtimeModel` for the optional voice-autostart handoff, and the first
+message as `initialMessage`, `sentAt` and `resources` for a conversation that
+mounts only after creation. `OpenGeniChat` already handles all of them. New
+uploads added during creation must finish, be retried, or be removed before the
+stock view switches to the created chat; `finishingUploads` is true meanwhile.
 
 `scopeKey` resets a controller's new draft when your host record changes. Changing
 scope or unmounting never cancels a server-side creation or navigates another

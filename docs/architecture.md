@@ -3072,7 +3072,10 @@ not change accepted delivery. The lazy embedded voice entry reuses
 `SessionRealtimeControl` and its catalog rather than owning another call flow.
 
 `OpenGeniChat` uses the reusable `useNewConversation`/`NewConversationView`
-pair (`NewConversation` is the standalone assembled component). The stock
+pair (`NewConversation` is the standalone assembled component), keeping the
+controller above its view switch: from Send until creation settles it renders
+the conversation with a `null` id and the controller's `pendingPrompt`, and the
+same mounted conversation continues with the created id. The stock
 controller owns a click's immutable request/idempotency key, uncertain retry,
 scope fences, and unsent draft/file/policy handoff. `initialDraft` on the native
 composer seeds local content without inventing its server revision. Host
