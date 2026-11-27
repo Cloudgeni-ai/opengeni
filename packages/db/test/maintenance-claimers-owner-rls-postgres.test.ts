@@ -346,6 +346,8 @@ async function seed() {
       now() + interval '10 minutes', 1, 1, now(), now() + interval '1 hour')`;
 
   await Bun.sleep(150);
+  const [interaction] = await shared.admin<{ revision: number }[]>`
+    select revision::int from workspace_interaction_revisions where workspace_id = ${workspaceId}`;
   return {
     accountId,
     workspaceId,
@@ -361,6 +363,7 @@ async function seed() {
     leaseId,
     sandboxGroupId,
     descriptor,
+    interactionRevision: interaction!.revision,
   };
 }
 
@@ -470,7 +473,8 @@ test("the maintenance claimers find the same rows under either owner posture", a
           upload: "deleting",
           operation: "outcome_unknown:browser_state_upload_expired",
           browser: "lost:browser_state_upload_expired",
-          revision: expect.any(Number),
+          // Cleanup advances the workspace interaction revision exactly once.
+          revision: scope.interactionRevision + 1,
         },
       ],
       after: noLeftovers,
