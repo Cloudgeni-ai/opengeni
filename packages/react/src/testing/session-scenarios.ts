@@ -14,6 +14,7 @@ export type LabScenarioId =
   | "previewing"
   | "math"
   | "links"
+  | "voice"
   | "options"
   | "writing-options"
   | "updates"
@@ -456,6 +457,56 @@ function links(): LabScenario {
   return { id: "links", title: "Links", events: r.events, running: false };
 }
 
+/** A request spoken in a realtime voice call, then the call's handoff when it ends. */
+function voice(): LabScenario {
+  const r = recorder("lab-voice");
+  const a = "turn-voice-1";
+  const b = "turn-voice-2";
+  r.push(
+    "user.message",
+    {
+      text: "Check whether the nightly export finished and tell me how many rows it wrote.",
+      presentation: {
+        kind: "realtime_voice",
+        context: [
+          "<realtime_delegation>",
+          "  <input>Check whether the nightly export finished and tell me how many rows it wrote.</input>",
+          "  <transcript_delta>user: did the export run last night?</transcript_delta>",
+          "</realtime_delegation>",
+        ].join("\n"),
+      },
+    },
+    a,
+  );
+  r.push("turn.started", {}, a, 400);
+  const text = "The nightly export finished at 02:14 and wrote 48 210 rows.";
+  r.push("agent.message.delta", { text }, a, 2_500);
+  r.push("agent.message.completed", { text }, a, 300);
+  r.push("turn.completed", { output: text }, a, 200);
+  r.push(
+    "user.message",
+    {
+      text: "Voice session ended. Remaining conversation context was sent to the agent.",
+      presentation: {
+        kind: "realtime_voice_handoff",
+        context: [
+          "<realtime_delegation>",
+          "  <transcript_delta>user: thanks, and send the row count to the team channel</transcript_delta>",
+          "</realtime_delegation>",
+        ].join("\n"),
+      },
+    },
+    b,
+    20_000,
+  );
+  r.push("turn.started", {}, b, 400);
+  const handoffText = "Posted the row count to the team channel.";
+  r.push("agent.message.delta", { text: handoffText }, b, 2_000);
+  r.push("agent.message.completed", { text: handoffText }, b, 300);
+  r.push("turn.completed", { output: handoffText }, b, 200);
+  return { id: "voice", title: "Voice call", events: r.events, running: false };
+}
+
 const OPTIONS_BODY = JSON.stringify(
   {
     title: "Light laptops for travel",
@@ -551,6 +602,7 @@ export function labScenarios(): LabScenario[] {
     previewing(),
     math(),
     links(),
+    voice(),
     options(),
     writingOptions(),
     updates(),

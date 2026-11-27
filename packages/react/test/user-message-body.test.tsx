@@ -9,6 +9,7 @@ import {
   type UserMessageDisclosureLabels,
 } from "../src";
 import type { UserMessageDisclosureLabels as SessionUiDisclosureLabels } from "../src/session-ui";
+import { OpenGeniMessagesProvider } from "../src/messages";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -479,7 +480,7 @@ describe("MessageTimeline user-message disclosure", () => {
     await r.unmount();
   });
 
-  test("keeps voice identity and attachments outside the collapsed text region", async () => {
+  test("keeps the shared voice marker and attachments outside the collapsed text region", async () => {
     const text = longMarkdown();
     const voiceItem: TimelineItem = {
       ...user("voice-user", text),
@@ -497,7 +498,6 @@ describe("MessageTimeline user-message disclosure", () => {
         renderMessageText={(messageText, item) =>
           item.kind === "user-message" ? (
             <div data-testid="custom-user-message">
-              <div data-testid="voice-identity">Voice handoff</div>
               <div data-testid="attachments">
                 {item.resources.map((resource) =>
                   resource.kind === "repository" ? resource.uri : resource.fileId,
@@ -506,7 +506,6 @@ describe("MessageTimeline user-message disclosure", () => {
               <UserMessageBody messageId={item.id} text={messageText}>
                 <Markdown>{messageText}</Markdown>
               </UserMessageBody>
-              <div data-testid="voice-context">{item.presentation?.context}</div>
             </div>
           ) : (
             messageText
@@ -516,18 +515,56 @@ describe("MessageTimeline user-message disclosure", () => {
     );
     await flush();
     const clip = r.container.querySelector("[data-og-user-message-clip]")!;
-    const voice = r.container.querySelector("[data-testid='voice-identity']")!;
+    const voice = r.container.querySelector("[data-og-user-message-voice]")!;
     const attachments = r.container.querySelector("[data-testid='attachments']")!;
-    const context = r.container.querySelector("[data-testid='voice-context']")!;
+    const context = r.container.querySelector("[data-og-user-message-voice-context]")!;
     expect(clip.contains(voice)).toBe(false);
     expect(clip.contains(attachments)).toBe(false);
     expect(clip.contains(context)).toBe(false);
+    // A host's own text renderer still gets the marker, exactly once.
+    expect(r.container.querySelectorAll("[data-og-user-message-voice]")).toHaveLength(1);
+    expect(voice.getAttribute("data-og-user-message-voice")).toBe("realtime_voice_handoff");
     expect(voice.textContent).toBe("Voice handoff");
     expect(attachments.textContent).toContain("repository.git");
-    expect(context.textContent).toBe("Complete voice execution context");
+    expect(context.tagName).toBe("DETAILS");
+    expect(context.hasAttribute("open")).toBe(false);
+    expect(context.querySelector("summary")?.textContent).toBe("Context sent to agent");
+    expect(context.querySelector("pre")?.textContent).toBe("Complete voice execution context");
     expect(
       r.container.querySelector("[data-og-user-message-disclosure]")?.getAttribute("aria-expanded"),
     ).toBe("false");
+    await r.unmount();
+  });
+
+  test("the default renderer marks a spoken request, in the host's language, and leaves typed ones alone", async () => {
+    const spoken: TimelineItem = {
+      ...user("spoken", "Check the nightly export."),
+      presentation: { kind: "realtime_voice", context: "<realtime_delegation />" },
+    };
+    const typed: TimelineItem = { ...user("typed", "And the weekly one?"), id: "typed" };
+    const r = await renderComponent(
+      <OpenGeniMessagesProvider
+        locale="nb"
+        messages={{
+          "messageTimeline.voiceRequest": "Taleforespørsel",
+          "messageTimeline.voiceContextSent": "Kontekst sendt til agenten",
+        }}
+      >
+        <MessageTimeline items={[spoken, typed]} />
+      </OpenGeniMessagesProvider>,
+    );
+    await flush();
+    const markers = r.container.querySelectorAll("[data-og-user-message-voice]");
+    expect(markers).toHaveLength(1);
+    expect(markers[0]!.getAttribute("data-og-user-message-voice")).toBe("realtime_voice");
+    expect(markers[0]!.textContent).toBe("Taleforespørsel");
+    expect(markers[0]!.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+    const spokenRow = r.container.querySelector("[data-og-search-item='spoken']")!.parentElement!;
+    expect(spokenRow.contains(markers[0]!)).toBe(true);
+    const contexts = r.container.querySelectorAll("[data-og-user-message-voice-context]");
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]!.querySelector("summary")?.textContent).toBe("Kontekst sendt til agenten");
+    expect(contexts[0]!.querySelector("pre")?.textContent).toBe("<realtime_delegation />");
     await r.unmount();
   });
 });

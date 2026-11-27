@@ -128,6 +128,10 @@ describe("long sent user-message browser acceptance", () => {
           const clipNode = node.querySelector<HTMLElement>("[data-og-user-message-clip]")!;
           const shadowNode = node.querySelector<HTMLElement>("[data-hidden-shadow-control]")!;
           const zeroSizeNode = node.querySelector<HTMLElement>("[data-zero-size-message-action]")!;
+          // The voice marker and its context belong to the shared bubble, not the text body.
+          const bubble = node.closest("[data-og-search-item]")?.parentElement;
+          const voiceNode = bubble?.querySelector("[data-og-user-message-voice]");
+          const contextNode = bubble?.querySelector("[data-og-user-message-voice-context]");
           const root = document.documentElement;
           const clipRect = clipNode.getBoundingClientRect();
           const shadowRect = shadowNode.getBoundingClientRect();
@@ -144,8 +148,8 @@ describe("long sent user-message browser acceptance", () => {
             attachmentOutsideClip: !clipNode.contains(
               node.querySelector("[data-message-attachments]"),
             ),
-            voiceOutsideClip: !clipNode.contains(node.querySelector("[data-voice-identity]")),
-            contextOutsideClip: !clipNode.contains(node.querySelector("[data-voice-context]")),
+            voiceOutsideClip: Boolean(voiceNode) && !clipNode.contains(voiceNode!),
+            contextOutsideClip: Boolean(contextNode) && !clipNode.contains(contextNode!),
             pageOverflow: root.scrollWidth - window.innerWidth,
             shadowTop: shadowRect.top,
             zeroSizeTop: zeroSizeRect.top,

@@ -45,6 +45,7 @@ import {
   ArrowDownIcon,
   ArrowRightIcon,
   ArrowUpIcon,
+  AudioLinesIcon,
   BotIcon,
   CalendarClockIcon,
   CheckCircle2Icon,
@@ -4523,6 +4524,48 @@ function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
   );
 }
 
+/**
+ * Marks a message the person spoke in a realtime voice call (or the call's
+ * closing handoff), so a reader can tell it apart from a typed one. It sits
+ * outside the message text, so a host's own text renderer keeps it.
+ */
+function UserMessageVoiceMarker({
+  kind,
+}: {
+  kind: NonNullable<UserMessageItem["presentation"]>["kind"];
+}) {
+  const t = useOpenGeniText();
+  return (
+    <div
+      data-og-user-message-voice={kind}
+      className="mb-1.5 inline-flex items-center gap-1 text-og-xs font-medium text-og-fg-muted"
+    >
+      <AudioLinesIcon aria-hidden="true" className="size-3.5" />
+      {kind === "realtime_voice_handoff"
+        ? t("messageTimeline.voiceHandoff")
+        : t("messageTimeline.voiceRequest")}
+    </div>
+  );
+}
+
+/** The full context a voice call sent with the message, closed until asked for. */
+function UserMessageVoiceContext({ context }: { context: string }) {
+  const t = useOpenGeniText();
+  return (
+    <details
+      data-og-user-message-voice-context=""
+      className="group mt-2 border-t border-og-border/60 pt-1.5 text-og-xs text-og-fg-muted"
+    >
+      <summary className="cursor-pointer select-none list-none hover:text-og-fg [&::-webkit-details-marker]:hidden">
+        {t("messageTimeline.voiceContextSent")}
+      </summary>
+      <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-og-sm bg-og-fg/5 p-2 font-mono text-og-xs leading-relaxed text-og-fg-muted">
+        {context}
+      </pre>
+    </details>
+  );
+}
+
 function UserMessageRow({
   item,
   renderMessageActions,
@@ -4564,6 +4607,7 @@ function UserMessageRow({
           }
         >
           <div className={MESSAGE_BUBBLE_CLASS}>
+            {item.presentation ? <UserMessageVoiceMarker kind={item.presentation.kind} /> : null}
             {item.text ? (
               <div
                 data-og-search-item={item.id}
@@ -4583,6 +4627,9 @@ function UserMessageRow({
                 annotations={item.annotations ?? []}
                 className={item.text ? "mt-2" : undefined}
               />
+            ) : null}
+            {item.presentation ? (
+              <UserMessageVoiceContext context={item.presentation.context} />
             ) : null}
           </div>
         </CopyHoverFrame>
