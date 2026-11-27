@@ -2104,7 +2104,9 @@ function Apps() {
       workspaceId={workspaceId}
       fromSession={fromSession}
       onChooseReadyMade={(templateKey) =>
-        void navigate({ href: enableHref(workspaceId, { kind: "app", templateKey }) })
+        void navigate({
+          href: enableHref(workspaceId, { kind: "app", templateKey }, undefined, { fromSession }),
+        })
       }
     />
   );

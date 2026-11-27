@@ -321,7 +321,10 @@ is added, also from Get started and the first-run sidebar: the app's
 description and a [preview](#preview), what it adds (the app, each Skill with
 its one line, automations added off), demo data when the package has some,
 and **Turn on**, which installs it with `installAppPackage` under the
-ready-made key. A host that embeds the Apps page without Enable (no
+ready-made key. When an active app from the same package is already here,
+the page shows it as on with **Open app** instead of adding another. A
+ready-made app keeps one tile hue, seeded from its package id, in
+Available, on Enable and once added. A host that embeds the Apps page without Enable (no
 `onChooseReadyMade`) gets the install dialog instead. A file opens the install
 dialog: installing adds the app and its Skills for agents, names each Skill,
 lists automations (added off), offers demo data, and has one **Install**

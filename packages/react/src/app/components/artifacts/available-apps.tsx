@@ -58,6 +58,31 @@ export function availableTemplates(
   });
 }
 
+function templatePackageId(template: AppTemplate): string | null {
+  const { packageId } = template.package as { packageId?: unknown };
+  return typeof packageId === "string" ? packageId : null;
+}
+
+/**
+ * A ready-made app's tile seed: its package, so its hue stays the same in
+ * Available, on its Enable page and once added (the installed row seeds
+ * from the same package).
+ */
+export function readyMadeAppTileSeed(template: AppTemplate): string {
+  return templatePackageId(template) ?? template.key;
+}
+
+/** The active app here added from this ready-made app's package, if any. */
+export function addedReadyMadeApp(
+  template: AppTemplate,
+  installed: Iterable<AppPackageStatus>,
+): AppPackageStatus | null {
+  const packageId = templatePackageId(template);
+  if (!packageId) return null;
+  for (const app of installed) if (app.packageId === packageId && !app.archived) return app;
+  return null;
+}
+
 export function AvailableApps({
   workspaceId,
   installed,
@@ -108,9 +133,9 @@ export function AvailableApps({
             name={template.name}
             description={template.description}
             title={template.description}
-            icon={<ArtifactKindTile kind="site" seed={template.key} />}
+            icon={<ArtifactKindTile kind="site" seed={readyMadeAppTileSeed(template)} />}
             status="available"
-            statusLabel={`Preview ${template.name}`}
+            statusLabel={onChoose ? `Set up ${template.name}` : `Preview ${template.name}`}
             onOpen={() => choose(template)}
           />
         ))}

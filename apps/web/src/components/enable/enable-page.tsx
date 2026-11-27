@@ -29,6 +29,10 @@ import {
   type ChosenAppPackage,
 } from "@opengeni/react/app/components/artifacts/app-package";
 import { AppTemplatePreview } from "@opengeni/react/app/components/artifacts/app-template-preview";
+import {
+  addedReadyMadeApp,
+  readyMadeAppTileSeed,
+} from "@opengeni/react/app/components/artifacts/available-apps";
 import { ArtifactTypeIcon } from "@opengeni/react/app/components/artifacts/artifact-page-chrome";
 import { t } from "@opengeni/react/app/lib/console-text";
 import { githubConnectedOf } from "@opengeni/react/app/lib/github-connect";
@@ -37,13 +41,15 @@ import { useNavigate } from "@opengeni/react/app/lib/navigation";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { installReadyMadeApp } from "@opengeni/react/app/lib/ready-made-apps";
 import { toast } from "@opengeni/react/app/lib/toast";
-import { invalidateAppPackageStatus } from "@opengeni/react/app/lib/use-app-package-status";
+import {
+  invalidateAppPackageStatus,
+  useAppPackageStatus,
+} from "@opengeni/react/app/lib/use-app-package-status";
 import { invalidateArtifactCatalog } from "@opengeni/react/app/lib/use-artifact-catalog";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import type { DetailBackLink } from "@opengeni/react/ui/detail-page";
 import { logoTileHue } from "@opengeni/react/ui/logo-tile";
-import { SettingRow } from "@opengeni/react/ui/setting-row";
-import { Switch } from "@opengeni/react/ui/switch";
+import { CheckboxField } from "@opengeni/react/ui/field";
 
 import { agentForSetup, catalogConnectHref, setupTriggerTask } from "../get-started/guided-setups";
 import {
@@ -592,6 +598,20 @@ function AppEnable({
       live = false;
     };
   }, [client, revision, subject.templateKey, workspaceId]);
+  // The package as the install dialog reads it: its page for the preview,
+  // whether it has demo data, its Skills and automations.
+  const chosen = useMemo<ChosenAppPackage | null>(() => {
+    try {
+      return template ? chosenAppPackage(template.package) : null;
+    } catch {
+      return null;
+    }
+  }, [template]);
+  // Already added here (opened again from Get started or the sidebar): it
+  // opens that app instead of adding another.
+  const packages = useAppPackageStatus(client, workspaceId);
+  const added = template ? addedReadyMadeApp(template, packages.apps.values()) : null;
+  const shownAppId = appId ?? added?.appId ?? null;
   const pagePath =
     returnPath ??
     enableHref(workspaceId, { kind: "app", templateKey: subject.templateKey }, "connect");
@@ -611,7 +631,7 @@ function AppEnable({
           readiness,
           canAdd,
           canEdit: true,
-          added: false,
+          added: shownAppId !== null,
           triggerFound: true,
           subjectName: name,
         });
@@ -621,7 +641,7 @@ function AppEnable({
       params: { workspaceId, appId: id, _splat: "" },
     });
   const turnOn = async () => {
-    if (!template || busy || blocker) return;
+    if (!template || busy || blocker || shownAppId) return;
     setBusy(true);
     try {
       const installed = await installReadyMadeApp(
@@ -644,15 +664,6 @@ function AppEnable({
       setBusy(false);
     }
   };
-  // The package as the install dialog reads it: its page for the preview,
-  // whether it has demo data, its Skills and automations.
-  const chosen = useMemo<ChosenAppPackage | null>(() => {
-    try {
-      return template ? chosenAppPackage(template.package) : null;
-    } catch {
-      return null;
-    }
-  }, [template]);
   // What installing adds.
   const facts = useMemo<EnableFact[]>(() => {
     const list: EnableFact[] = [{ label: "App", description: `Adds ${name} to Apps.` }];
@@ -671,7 +682,11 @@ function AppEnable({
       description={description ?? template?.description ?? ""}
       // The Apps list's tile for it: the app icon in its own hue.
       icon={icon ?? <ArtifactTypeIcon kind="site" />}
-      hue={icon ? undefined : logoTileHue(subject.templateKey)}
+      hue={
+        icon
+          ? undefined
+          : logoTileHue(template ? readyMadeAppTileSeed(template) : subject.templateKey)
+      }
       back={back}
       step={step}
       readiness={readiness}
@@ -685,19 +700,15 @@ function AppEnable({
       }
       options={
         chosen?.hasDemoData ? (
-          <SettingRow
+          // Taken when Turn on adds it, so a checkbox rather than a switch.
+          <CheckboxField
             label="Include demo data"
-            control={
-              <Switch
-                checked={demoData}
-                onCheckedChange={setDemoData}
-                aria-label="Include demo data"
-              />
-            }
+            checked={demoData}
+            onCheckedChange={setDemoData}
           />
         ) : null
       }
-      stage={appId ? "on" : "turn-on"}
+      stage={shownAppId ? "on" : "turn-on"}
       blocker={failed ?? blocker}
       busy={busy}
       asked={asked}
@@ -706,8 +717,9 @@ function AppEnable({
       onTurnOn={() => void turnOn()}
       done={{
         title: `${name} is ready.`,
-        open: { label: "Open app", onClick: () => appId && openApp(appId) },
-        firstJob: firstJob && appId ? { text: firstJob, onStart: () => openApp(appId) } : null,
+        open: { label: "Open app", onClick: () => shownAppId && openApp(shownAppId) },
+        firstJob:
+          firstJob && shownAppId ? { text: firstJob, onStart: () => openApp(shownAppId) } : null,
       }}
     />
   );

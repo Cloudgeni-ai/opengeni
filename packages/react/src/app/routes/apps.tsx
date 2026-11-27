@@ -105,7 +105,7 @@ export function appPackageExtras(
       ) : null}
     </>
   ) : null;
-  return { badges, menu };
+  return status.packageId ? { badges, menu, seed: status.packageId } : { badges, menu };
 }
 
 function AppsPage({

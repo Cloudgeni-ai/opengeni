@@ -93,6 +93,7 @@ const client = {
   getGitHubApp: mock(async () => ({ status: "unbound", configured: true, linkUrl: null })),
   requestSetupConnection: mock(async () => ({ status: "requested", adminsAsked: 2 })),
   listAppTemplates: mock(async () => appTemplates),
+  listAppPackageStatus: mock(async () => installedApps),
   installAppPackage: mock(async (_workspaceId: string, _request: Record<string, unknown>) => ({
     app: { id: "app-1", status: "active", title: "Work summary" },
     replayed: false,
@@ -100,6 +101,7 @@ const client = {
   })),
 };
 let appTemplates: unknown[] = [];
+let installedApps: unknown[] = [];
 const connectPersonalGitHub = mock(async (_workspaceId: string) => undefined);
 const context: Record<string, unknown> = {
   client,
@@ -471,7 +473,7 @@ test("a ready-made app: its preview, its demo data choice, and Turn on installs 
   expect(container.querySelector("[data-app-template-preview] iframe")).not.toBeNull();
   expect(container.textContent).toContain("Adds Work summary to Apps.");
   expect(client.installAppPackage).not.toHaveBeenCalled();
-  const demo = container.querySelector<HTMLButtonElement>("[aria-label='Include demo data']")!;
+  const demo = container.querySelector<HTMLInputElement>("input[type='checkbox']")!;
   await act(async () => demo.click());
   await act(async () => turnOnButton(container).click());
   await settle();
@@ -486,5 +488,44 @@ test("a ready-made app: its preview, its demo data choice, and Turn on installs 
     workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["sessions:create"] }],
   };
   appTemplates = [];
+  root.unmount();
+});
+
+test("a ready-made app already added here: it offers Open app and never installs again", async () => {
+  appTemplates = [workSummary];
+  installedApps = [
+    {
+      appId: "app-7",
+      title: "Work summary",
+      packageId: workSummary.package.packageId,
+      packageVersion: workSummary.package.packageVersion,
+      archived: false,
+      customized: false,
+      skills: [],
+      automations: [],
+      previous: null,
+      update: null,
+    },
+  ];
+  context.accessContext = {
+    workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["artifacts:publish"] }],
+  };
+  client.installAppPackage.mockClear();
+  navigations.length = 0;
+  const { container, root } = await render({ kind: "app", templateKey: "work-summary" });
+  expect(container.textContent).toContain("Work summary is ready.");
+  const open = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Open app",
+  )!;
+  await act(async () => open.click());
+  expect(navigations).toContainEqual(
+    expect.objectContaining({ params: expect.objectContaining({ appId: "app-7" }) }),
+  );
+  expect(client.installAppPackage).not.toHaveBeenCalled();
+  context.accessContext = {
+    workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["sessions:create"] }],
+  };
+  appTemplates = [];
+  installedApps = [];
   root.unmount();
 });

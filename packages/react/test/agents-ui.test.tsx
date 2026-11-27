@@ -2466,10 +2466,10 @@ test("in the Opengeni app, choosing a ready-made app opens its Enable page, the 
     </AgentsTestHost>,
   );
   const row = container.querySelector<HTMLButtonElement>("[data-ready-made-app='issue-tracker']")!;
-  // Each ready-made app has its own hue, from its key.
+  // Each ready-made app has its own hue, from its package (the same once added).
   expect(
     row.querySelector<HTMLElement>("[data-hued]")?.style.getPropertyValue("--og-tile-hue"),
-  ).toBe(String(logoTileHue("issue-tracker")));
+  ).toBe(String(logoTileHue(APP_PACKAGE_ID)));
   await act(async () => row.click());
   await flush();
   expect(chosen).toEqual(["issue-tracker"]);

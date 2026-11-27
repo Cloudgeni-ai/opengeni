@@ -20,10 +20,17 @@ export function EnableRoute({
   const navigate = useNavigate();
   const subject = enableSubjectOf(search);
   const backTo = subject?.kind === "app" ? "apps" : "agents";
+  // Apps opened from a chat keeps that chat's way back.
+  const backSearch =
+    subject?.kind === "app" && search.fromSession
+      ? `?${new URLSearchParams({ fromSession: search.fromSession }).toString()}`
+      : "";
   const back = {
     label: subject?.kind === "app" ? "Apps" : "Agents",
     onClick: () =>
-      void navigate({ href: `/workspaces/${encodeURIComponent(workspaceId)}/${backTo}` }),
+      void navigate({
+        href: `/workspaces/${encodeURIComponent(workspaceId)}/${backTo}${backSearch}`,
+      }),
   };
   return (
     <ContentPage width="standard" className={PAGE_FRAME}>

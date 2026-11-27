@@ -28,6 +28,7 @@ type State =
   | "enable-ready"
   | "enable-ask-admin"
   | "enable-app"
+  | "enable-app-added"
   | "apps-available"
   | "onboarding";
 
@@ -37,6 +38,7 @@ const STATES: { value: State; label: string }[] = [
   { value: "enable-ready", label: "Enable: ready" },
   { value: "enable-ask-admin", label: "Enable: ask an admin" },
   { value: "enable-app", label: "Enable: ready-made app" },
+  { value: "enable-app-added", label: "Enable: app already added" },
   { value: "apps-available", label: "Apps: available" },
   { value: "onboarding", label: "First run" },
 ];
@@ -170,6 +172,24 @@ function fixtureClient(state: State) {
   const client = {
     listAgentTemplates: async () => TEMPLATES,
     listAppTemplates: async () => APP_TEMPLATES,
+    // Work summary is already added in "enable-app-added".
+    listAppPackageStatus: async () =>
+      state === "enable-app-added"
+        ? [
+            {
+              appId: "kit-work-summary",
+              title: workSummary.name,
+              packageId: workSummary.package.packageId,
+              packageVersion: workSummary.package.packageVersion,
+              archived: false,
+              customized: false,
+              skills: [],
+              automations: [],
+              previous: null,
+              update: null,
+            },
+          ]
+        : [],
     getAgentTemplateReadiness: async () =>
       readiness(state === "enable-ready", state !== "enable-ask-admin"),
     requestSetupConnection: async () => ({ status: "requested", adminsAsked: 2 }),
@@ -243,7 +263,7 @@ export default function EnableSection() {
                   onChoose={() => undefined}
                 />
               </div>
-            ) : state === "enable-app" ? (
+            ) : state === "enable-app" || state === "enable-app-added" ? (
               <EnablePage
                 workspaceId={WORKSPACE_ID}
                 subject={{ kind: "app", templateKey: "work-summary" }}
