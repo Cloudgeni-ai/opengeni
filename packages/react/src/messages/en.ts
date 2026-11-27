@@ -3475,6 +3475,7 @@ export const englishMessages = {
   "messageTimeline.toolCallNotReplayedAfterReconnecting":
     "This tool call wasn't replayed. After reconnecting, send a new message to try again.",
   "messageTimeline.videoGenerationFailed": "Video generation failed",
+  "messageTimeline.voiceContextSent": "Context sent to agent",
   "messageTimeline.voiceHandoff": "Voice handoff",
   "messageTimeline.voiceRequest": "Voice request",
   /** A step-up card's button while the consent page of {consent} ("Google") is open. */

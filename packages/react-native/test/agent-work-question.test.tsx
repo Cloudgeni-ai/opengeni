@@ -2,13 +2,16 @@ import { expect, mock, test } from "bun:test";
 import { act, createElement, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import type { SessionEvent } from "@opengeni/sdk";
 import { registerDom, renderComponent } from "../../react/test/render-hook";
+import { OpenGeniMessagesProvider } from "@opengeni/react/messages";
+import { labScenarios } from "@opengeni/react/testing";
 
 /*
  * The native timeline draws a question the parent agent answered as one quiet
  * row inside the turn's work, and keeps a person's answer in the conversation.
  * An automation run is one plain line and its answer: never its instructions,
  * nothing for a run with nothing to say, and no work row for a reader who
- * never sees the agent's work. Host components are DOM stand-ins.
+ * never sees the agent's work. A message spoken in a voice call carries the
+ * same voice marker as on web. Host components are DOM stand-ins.
  */
 type Recorded = { props: Record<string, unknown>; clears: number };
 const inputs = new Map<string, Recorded>();
@@ -630,6 +633,61 @@ test("an ID in what the event says goes with its label, never leaving it danglin
     expect(text).toContain("Ticket assigned to you: T-4907 Refund request.");
     expect(text).not.toContain("Organisation");
     expect(text).not.toContain("3f2b8c1e");
+  } finally {
+    await view.unmount();
+  }
+});
+
+function voiceEvents(): SessionEvent[] {
+  return labScenarios().find((scenario) => scenario.id === "voice")!.events;
+}
+
+test("a message spoken in a voice call carries the voice marker, and a typed one does not", async () => {
+  const typed = subSession("human");
+  const view = await renderComponent(<MessageTimeline events={[...voiceEvents()]} />);
+  const plain = await renderComponent(<MessageTimeline events={typed} />);
+  try {
+    const markers = [...view.container.querySelectorAll("[data-testid='user-message-voice']")];
+    expect(markers.map((marker) => marker.textContent)).toEqual(["Voice request", "Voice handoff"]);
+    expect(plain.container.querySelector("[data-testid='user-message-voice']")).toBeNull();
+    expect(plain.container.querySelector("[data-testid='user-message-voice-context']")).toBeNull();
+
+    // The context the call sent stays closed until asked for.
+    const contexts = view.container.querySelectorAll("[data-testid='user-message-voice-context']");
+    expect(contexts).toHaveLength(2);
+    expect(view.container.textContent).not.toContain("did the export run last night?");
+    const toggle = contexts[0]!.querySelector("button")!;
+    expect(toggle.textContent).toBe("Context sent to agent");
+    await act(async () => toggle.click());
+    expect(contexts[0]!.textContent).toContain("did the export run last night?");
+    // Each message's context opens on its own.
+    expect(contexts[1]!.textContent).not.toContain("send the row count");
+  } finally {
+    await view.unmount();
+    await plain.unmount();
+  }
+});
+
+test("the voice marker reads in the host's language", async () => {
+  const view = await renderComponent(
+    <OpenGeniMessagesProvider
+      locale="nb"
+      messages={{
+        "messageTimeline.voiceRequest": "Taleforespørsel",
+        "messageTimeline.voiceHandoff": "Taleoverlevering",
+        "messageTimeline.voiceContextSent": "Kontekst sendt til agenten",
+      }}
+    >
+      <MessageTimeline events={[...voiceEvents()]} />
+    </OpenGeniMessagesProvider>,
+  );
+  try {
+    const markers = [...view.container.querySelectorAll("[data-testid='user-message-voice']")];
+    expect(markers.map((marker) => marker.textContent)).toEqual([
+      "Taleforespørsel",
+      "Taleoverlevering",
+    ]);
+    expect(view.container.textContent).toContain("Kontekst sendt til agenten");
   } finally {
     await view.unmount();
   }

@@ -170,11 +170,6 @@ function Harness() {
     }
     return (
       <div data-user-message-shell={item.id}>
-        {item.presentation ? (
-          <div data-voice-identity="" className="mb-2 text-og-sm font-medium text-og-fg-muted">
-            Voice handoff
-          </div>
-        ) : null}
         {item.resources.length > 0 ? (
           <div
             data-message-attachments=""
@@ -215,12 +210,6 @@ function Harness() {
             ) : null}
           </div>
         </UserMessageBody>
-        {item.presentation ? (
-          <details data-voice-context="" className="mt-2 border-t border-og-border pt-2 text-og-sm">
-            <summary>Context sent to agent</summary>
-            <p>{item.presentation.context}</p>
-          </details>
-        ) : null}
       </div>
     );
   }, []);

@@ -79,7 +79,12 @@ import {
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
 import { Icon } from "./icon";
-import { ActivityDisclosure, ReleaseFollowProvider, withAlpha } from "./primitives";
+import {
+  ActivityDisclosure,
+  ReleaseFollowProvider,
+  useReleaseFollow,
+  withAlpha,
+} from "./primitives";
 import { NativeAuthNeededRow } from "./in-chat-connect";
 import {
   NativeAllowanceExhaustedRow,
@@ -1560,6 +1565,95 @@ function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () =
   );
 }
 
+/**
+ * Marks a message the person spoke in a realtime voice call (or the call's
+ * closing handoff), as on web, so it reads apart from a typed one.
+ */
+function UserMessageVoiceMarker({
+  kind,
+}: {
+  kind: NonNullable<UserMessageItem["presentation"]>["kind"];
+}) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  return (
+    <View
+      testID="user-message-voice"
+      style={{ flexDirection: "row", alignItems: "center", gap: 4, marginBottom: 6 }}
+    >
+      <Icon name="audio-lines" size={14} color={theme.colors["fg-muted"]} />
+      <Text
+        style={{
+          ...fontStyle(theme, 500),
+          fontSize: theme.size.xs,
+          color: theme.colors["fg-muted"],
+        }}
+      >
+        {kind === "realtime_voice_handoff"
+          ? t("messageTimeline.voiceHandoff")
+          : t("messageTimeline.voiceRequest")}
+      </Text>
+    </View>
+  );
+}
+
+/** The full context a voice call sent with the message, closed until asked for. */
+function UserMessageVoiceContext({ context }: { context: string }) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const releaseFollow = useReleaseFollow();
+  const c = theme.colors;
+  const [open, setOpen] = useState(false);
+  return (
+    <View
+      testID="user-message-voice-context"
+      style={{
+        marginTop: 8,
+        paddingTop: 6,
+        borderTopWidth: 1,
+        borderTopColor: withAlpha(c.border, 0.6),
+      }}
+    >
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        onPress={() => {
+          // Opening it must not pull the reader to the newest message.
+          releaseFollow();
+          setOpen((value) => !value);
+        }}
+        hitSlop={8}
+        style={{ flexDirection: "row", alignItems: "center", gap: 4 }}
+      >
+        <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
+          <Icon name="chevron-right" size={12} color={c["fg-muted"]} />
+        </View>
+        <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["fg-muted"] }}>
+          {t("messageTimeline.voiceContextSent")}
+        </Text>
+      </Pressable>
+      {open ? (
+        <Text
+          selectable
+          style={{
+            ...fontStyle(theme, 400, "mono"),
+            marginTop: 8,
+            padding: 8,
+            borderRadius: theme.radius.sm,
+            overflow: "hidden",
+            backgroundColor: withAlpha(c.fg, 0.05),
+            fontSize: theme.size.xs,
+            lineHeight: 18,
+            color: c["fg-muted"],
+          }}
+        >
+          {context}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
 function UserMessageRow({ item, context }: { item: UserMessageItem; context: GroupContext }) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
@@ -1587,6 +1681,7 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
               paddingVertical: 10,
             }}
           >
+            {item.presentation ? <UserMessageVoiceMarker kind={item.presentation.kind} /> : null}
             {item.text ? (
               <CollapsibleUserText>
                 <AnnotationSourceView
@@ -1618,6 +1713,9 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
                   onReveal={context.onRevealAnnotation}
                 />
               </View>
+            ) : null}
+            {item.presentation ? (
+              <UserMessageVoiceContext context={item.presentation.context} />
             ) : null}
           </View>
         ) : null}

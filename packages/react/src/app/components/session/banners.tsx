@@ -1,4 +1,4 @@
-import { AlertTriangleIcon, ArrowLeftIcon, AudioLinesIcon, TerminalIcon } from "lucide-react";
+import { AlertTriangleIcon, ArrowLeftIcon, TerminalIcon } from "lucide-react";
 import { UserMessageBody as CollapsibleUserMessageBody } from "../../../components/user-message-body";
 import type { UserMessageItem } from "../../../timeline";
 import type { TimelineSearchTarget } from "../../../components/timeline-search";
@@ -7,7 +7,6 @@ import { Button } from "../../../ui/button";
 import { formatTimestamp } from "../../lib/format";
 import type { Session } from "../../types";
 import { MessageRepositoryChips } from "./message-resource-placeholders";
-import { useOpenGeniText } from "../../../messages/runtime";
 
 export function TerminalSessionBanner(props: { session: Session; onNewSession: () => void }) {
   return (
@@ -59,7 +58,8 @@ export function TerminalSessionArchive(props: { session: Session; eventCount: nu
 
 /**
  * Repository chips + markdown body inside the user bubble. The timeline shows
- * the message's attached files above the bubble.
+ * the message's attached files above the bubble, and the shared timeline row
+ * draws a spoken message's voice marker and the context it sent.
  */
 export function UserMessageBody({
   item,
@@ -68,18 +68,8 @@ export function UserMessageBody({
   item: UserMessageItem;
   searchTarget?: TimelineSearchTarget | null | undefined;
 }) {
-  const t = useOpenGeniText();
-
   return (
     <div data-testid="timeline-user">
-      {item.presentation ? (
-        <div className="mb-1.5 inline-flex items-center gap-1 text-xs font-medium text-fg-muted">
-          <AudioLinesIcon className="size-3.5" />
-          {item.presentation.kind === "realtime_voice_handoff"
-            ? t("messageTimeline.voiceHandoff")
-            : t("messageTimeline.voiceRequest")}
-        </div>
-      ) : null}
       {item.resources.some((resource) => resource.kind === "repository") ? (
         <div className="mb-2 flex flex-wrap gap-1.5">
           <MessageRepositoryChips resources={item.resources} />
@@ -89,17 +79,6 @@ export function UserMessageBody({
       <CollapsibleUserMessageBody messageId={item.id} text={item.text}>
         <MarkdownText text={item.text} compact softLineBreaks searchTarget={searchTarget} />
       </CollapsibleUserMessageBody>
-
-      {item.presentation ? (
-        <details className="group mt-2 border-t border-border/60 pt-1.5 text-xs text-fg-muted">
-          <summary className="cursor-pointer select-none list-none hover:text-fg [&::-webkit-details-marker]:hidden">
-            Context sent to agent
-          </summary>
-          <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface-2 p-2 font-mono text-[11px] leading-relaxed text-fg-muted">
-            {item.presentation.context}
-          </pre>
-        </details>
-      ) : null}
     </div>
   );
 }
