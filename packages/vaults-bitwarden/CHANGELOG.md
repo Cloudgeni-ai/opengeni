@@ -1,5 +1,12 @@
 # @opengeni/vaults-bitwarden
 
+## 6.42.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.42.1
+- @opengeni/vaults@6.42.1
+
 ## 6.42.0
 
 ### Patch Changes

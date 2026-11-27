@@ -1,5 +1,12 @@
 # @opengeni/codex
 
+## 6.42.1
+
+### Patch Changes
+
+- @opengeni/contracts@6.42.1
+- @opengeni/network@6.42.1
+
 ## 6.42.0
 
 ### Patch Changes

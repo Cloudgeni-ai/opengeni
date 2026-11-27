@@ -1,5 +1,45 @@
 # @opengeni/worker-bundle
 
+## 6.42.1
+
+### Patch Changes
+
+- 335184d: Writing a turn's terminal event no longer re-reads every model call of the turn to attach its `usage`. Running per-turn credit totals (`session_turn_credit_totals`, `session_turn_credit_calls`), kept exact by triggers on `session_events` and `usage_events`, hold what the previous full sum computed, and the terminal trigger reads them; a turn whose totals are not ready (it predates the migration, has a refund row, or had a counted row updated) still gets the previous full sum, so `usage` is unchanged. The migrations install the triggers one table per migration, each with a short lock wait retried with jitter, without reading history, and a batched backfill recounts earlier turns one per transaction while writers continue. Application statements write the totals only through the triggers (a role running its own SQL could still write its own account's rows through a temporary trigger; that changes only the shown `usage`, never a charge, and the drift check reports it). Reads outside the triggers are limited to the workspace and to sessions the person may see; deleting a session deletes its rows, and a TRUNCATE of either source clears them. The worker compares one bounded turn of a few accounts each metrics cycle with a full recount (`opengeni_session_turn_credit_totals_checked_turns`, `opengeni_session_turn_credit_totals_skipped_turns`, `opengeni_session_turn_credit_totals_mismatched_turns`; all -1 when the check fails).
+
+  Readiness probes no longer fingerprint the database catalogs every 10 seconds: a passing runtime posture inspection stands for 60 seconds per process, with only a connectivity check in between, and any failed probe inspects in full again until one passes.
+
+- Updated dependencies [a28280a]
+- Updated dependencies [7508c74]
+- Updated dependencies [d13b53d]
+- Updated dependencies [335184d]
+  - @opengeni/db@6.42.1
+  - @opengeni/core@6.42.1
+  - @opengeni/documents@6.42.1
+  - @opengeni/events@6.42.1
+  - @opengeni/agent-proto@6.42.1
+  - @opengeni/capabilities@6.42.1
+  - @opengeni/codemode@6.42.1
+  - @opengeni/codex@6.42.1
+  - @opengeni/config@6.42.1
+  - @opengeni/contracts@6.42.1
+  - @opengeni/decisions@6.42.1
+  - @opengeni/github@6.42.1
+  - @opengeni/interaction@6.42.1
+  - @opengeni/jev@6.42.1
+  - @opengeni/network@6.42.1
+  - @opengeni/observability@6.42.1
+  - @opengeni/runtime@6.42.1
+  - @opengeni/sdk@6.42.1
+  - @opengeni/storage@6.42.1
+  - @opengeni/subscriptions@6.42.1
+  - @opengeni/tool-gateway@6.42.1
+  - @opengeni/vaults@6.42.1
+  - @opengeni/vaults-bitwarden@6.42.1
+  - @opengeni/vaults-keeper@6.42.1
+  - @opengeni/vaults-onepassword@6.42.1
+  - @opengeni/vaults-protonpass@6.42.1
+  - @opengeni/xai-subscription@6.42.1
+
 ## 6.42.0
 
 ### Patch Changes
