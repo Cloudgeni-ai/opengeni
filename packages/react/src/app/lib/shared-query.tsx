@@ -15,6 +15,7 @@ import { invalidateSharedQueries, retainSharedQueries } from "../../hooks/shared
 
 export {
   clearSharedQueries,
+  fetchSharedQuery,
   invalidateSharedQueries,
   isSharedQueryAccessRefusal,
   peekSharedQuery,

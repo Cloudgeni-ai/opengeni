@@ -12,6 +12,7 @@ import {
   TRANSIENT_RECONNECT_INTERVAL_MS,
   TRANSIENT_RETRY_DELAYS_MS,
 } from "../../lib/transient-retry";
+import { loadConnectionHealthAccounts } from "../../lib/shared-catalog-reads";
 import {
   isLapsedAccount,
   selectedConnectionAccounts,
@@ -109,11 +110,18 @@ export function useConnectionAccounts(
   const request = useRef(0);
   /** When the last inventory read started, for re-reading a stale one on return. */
   const lastRead = useRef(0);
+  /**
+   * Only the hook's first account read may reuse a recent one; later reads
+   * follow a change. Set when a read is sent: a catalog with no connector
+   * that needs accounts (still loading, say) sends none.
+   */
+  const firstReadStarted = useRef(false);
   const refresh = useCallback(
-    async (quietRetries = true): Promise<ConnectedAccountGroup[] | null> => {
+    async (quietRetries = true, reuseRecent = false): Promise<ConnectedAccountGroup[] | null> => {
       if (scope.current.epoch !== epoch) return null;
       const invocation = scope.current;
       if (invocation.canReadConnections !== true) return null;
+      const reuse = reuseRecent && !firstReadStarted.current;
       const revision = ++request.current;
       lastRead.current = Date.now();
       const current = () =>
@@ -131,6 +139,16 @@ export function useConnectionAccounts(
               invocation.client,
               invocation.session.workspaceId,
               invocation.catalog,
+              undefined,
+              // The client's shared account read, which the composer also uses.
+              async () => {
+                firstReadStarted.current = true;
+                return await loadConnectionHealthAccounts(
+                  invocation.client,
+                  invocation.session.workspaceId,
+                  { reuseRecent: reuse },
+                );
+              },
             ),
           { shouldContinue: current, delaysMs: quietRetries ? retryDelaysMs : [] },
         );
@@ -169,7 +187,9 @@ export function useConnectionAccounts(
   );
   useEffect(() => {
     const counter = request;
-    void refresh();
+    // The first read may take the composer's, read a moment ago. A re-run
+    // after a catalog change reads afresh.
+    void refresh(true, true);
     return () => {
       counter.current++;
     };

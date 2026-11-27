@@ -458,6 +458,60 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await rendered.unmount();
   });
 
+  test("the interaction event already held at mount reads capabilities once, a later one again", async () => {
+    let capabilityReads = 0;
+    const { client } = coldClient({
+      getStreamCapabilities: async () => {
+        capabilityReads += 1;
+        return fakeColdCapabilities();
+      },
+    });
+    const interaction = (revision: number) => ({
+      workspaceId: WORKSPACE_ID,
+      sequence: revision,
+      revision,
+      type: "workspace.interaction.changed" as const,
+      occurredAt: "2026-08-13T10:00:00.000Z",
+    });
+
+    function Harness({ revision }: { revision: number }) {
+      const context = useMemo<OpenGeniContextValue<ChatClient>>(
+        () => ({
+          client,
+          workspaceId: WORKSPACE_ID,
+          workspaceControlEvent: null,
+          workspaceControlConnectionState: "idle",
+          // The workspace stream delivers its latest revision when it connects,
+          // long before a chat opens.
+          workspaceInteractionEvent: interaction(revision),
+          workspaceInteractionConnectionState: "live",
+          registerSessionReconciler: () => () => undefined,
+          reconcileSession: async () => undefined,
+        }),
+        [revision],
+      );
+      return (
+        <OpenGeniContext.Provider value={context}>
+          <Probe />
+        </OpenGeniContext.Provider>
+      );
+    }
+
+    function Probe() {
+      useSandboxWorkspaceTabs({ sessionId: SESSION_ID, events: [] });
+      return null;
+    }
+
+    const rendered = await renderComponent(<Harness revision={15} />);
+    await flush(60);
+    expect(capabilityReads).toBe(1);
+
+    await rendered.rerender(<Harness revision={16} />);
+    await flush(60);
+    expect(capabilityReads).toBe(2);
+    await rendered.unmount();
+  });
+
   test("pending capability negotiation cannot replay captured history into Channel-A", async () => {
     const historicalEvents = [
       fakeEvent(1, "git.changed", { revision: 3 }),

@@ -248,7 +248,12 @@ export type AppContextValue = {
     workspaceId: string,
     repository: PersonalGitHubRepositoryCatalogItem,
   ) => Promise<void>;
-  refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
+  /** Re-read the workspace's tools; `reuseRecent` (a first load) may take a read a moment old. */
+  refreshWorkspaceMcpServers: (
+    workspaceId: string,
+    signal?: AbortSignal,
+    options?: { reuseRecent?: boolean | undefined },
+  ) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
   /** Resolves true when the unlink succeeded; failures self-toast and resolve false. */
   disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<boolean>;

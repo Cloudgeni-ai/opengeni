@@ -21,10 +21,13 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { formatRelativeTime, inSentence } from "../../../ui/time-format";
+import { latestSequenceAfter } from "../../../hooks/use-live-session-events";
 import { useAppContext } from "../../app-context";
 import { cn } from "../../lib/utils";
 
 const POLL_MS = 60_000;
+
+const isLinksChange = (event: Pick<SessionEvent, "type">) => event.type === "session.links.changed";
 
 type LinksState = {
   links: SessionLinkWithStatus[];
@@ -59,14 +62,27 @@ export function latestLinksChange(events: readonly Pick<SessionEvent, "type" | "
   return 0;
 }
 
-/** The chat's links with live status, re-read on change and every minute while shown. */
+/**
+ * The chat's links with live status, re-read on change and every minute while shown.
+ * With `historyBaseline`, the first read waits for the history and only link
+ * changes after it re-read; older history arriving later re-reads nothing.
+ */
 export function useSessionLinks(input: {
   workspaceId: string;
   sessionId: string;
   events: readonly SessionEvent[];
+  historyBaseline?: number | null | undefined;
 }): LinksState & { remove: (linkId: string) => Promise<void>; reload: () => void } {
   const { client } = useAppContext();
-  const changed = useMemo(() => latestLinksChange(input.events), [input.events]);
+  const gated = input.historyBaseline !== undefined;
+  const baseline = input.historyBaseline ?? null;
+  const changed = useMemo(
+    () =>
+      gated
+        ? latestSequenceAfter(input.events, baseline, isLinksChange)
+        : latestLinksChange(input.events),
+    [gated, baseline, input.events],
+  );
   const [state, setState] = useState<LinksState & { sessionId: string }>({
     sessionId: input.sessionId,
     links: [],
@@ -74,6 +90,7 @@ export function useSessionLinks(input: {
   });
   const [tick, setTick] = useState(0);
   useEffect(() => {
+    if (changed === null) return;
     let live = true;
     client
       .listSessionLinks(input.workspaceId, input.sessionId)

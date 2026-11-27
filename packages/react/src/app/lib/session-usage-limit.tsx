@@ -514,17 +514,22 @@ export function useSessionUsageLimit(options: UseSessionUsageLimitOptions): Sess
     };
   }, [driving, refresh]);
 
-  // Reconnected after a drop: read once.
+  // Reconnected after a drop: read once. The stream's first connect for this
+  // task is not a reconnect; the first read on mount already covers it.
   const connectionState = live?.connectionState;
   const previousConnection = useRef(connectionState);
+  const liveFor = useRef<string | null>(connectionState === "live" ? key : null);
   useEffect(() => {
     const previous = previousConnection.current;
     previousConnection.current = connectionState;
-    if (!driving || connectionState !== "live" || previous === undefined || previous === "live") {
+    if (connectionState !== "live") return;
+    const reconnected = liveFor.current === key && previous !== undefined && previous !== "live";
+    liveFor.current = key;
+    if (!driving || !reconnected) {
       return;
     }
     void refresh();
-  }, [connectionState, driving, refresh]);
+  }, [connectionState, driving, key, refresh]);
 
   return { ...snapshot, refresh, apply };
 }

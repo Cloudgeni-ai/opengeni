@@ -59,7 +59,8 @@ describe("useChannels shared cache", () => {
     const client = fakeClient({
       listChannels: async () => {
         listCalls += 1;
-        return listCalls <= 2 ? [] : await refreshResult.promise;
+        // The two consumers share one mount read; the next read is the refresh.
+        return listCalls <= 1 ? [] : await refreshResult.promise;
       },
       createChannel: async () => created,
     });
@@ -72,6 +73,7 @@ describe("useChannels shared cache", () => {
       undefined,
     );
     await flush();
+    expect(listCalls).toBe(1);
     expect(sidebar.result.current.channels).toEqual([]);
     expect(composer.result.current.channels).toEqual([]);
 

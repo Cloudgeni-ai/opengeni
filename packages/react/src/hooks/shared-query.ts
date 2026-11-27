@@ -7,6 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { normalizeError } from "../lib/error-message";
+import { MOUNT_READ_REUSE_MS } from "../lib/mount-read-reuse";
 import { usePageLiveActivity } from "./internal";
 
 /**
@@ -85,7 +86,6 @@ export type SharedQueryResult<T> = SharedQuerySnapshot<T> & {
 /** Records data read some other way; false when the write was refused. */
 export type SharedQueryWriter = <T>(parts: SharedQueryKey, data: T) => boolean;
 
-const DEFAULT_STALE_TIME_MS = 10_000;
 const DEFAULT_RETAIN_MS = 10 * 60_000;
 
 type Loader<T> = (signal: AbortSignal) => Promise<T>;
@@ -487,6 +487,105 @@ export function peekSharedQuery<T>(
   );
 }
 
+export type FetchSharedQueryOptions = {
+  /** Data younger than this is returned without a request. Default 10s. */
+  staleTimeMs?: number | undefined;
+  /** Always read (a reload after a change); the result is kept for the next reader. */
+  fresh?: boolean | undefined;
+};
+
+/**
+ * Read one key outside React through the same entries the hooks use, for
+ * imperative consumers that mount together (a page's catalog and its
+ * composer's connector list): a read in flight is joined and data younger than
+ * `staleTimeMs` is returned without a request. A read that fails rejects for
+ * its caller and is never kept. A scope that no host retains keeps nothing
+ * beyond its mounted readers, so there the read just runs.
+ */
+export async function fetchSharedQuery<T>(
+  scope: object,
+  parts: SharedQueryKey,
+  load: Loader<T>,
+  options: FetchSharedQueryOptions = {},
+): Promise<T> {
+  const state = scopes.get(scope);
+  const key = serialize(parts);
+  const existing = state?.entries.get(key);
+  if (!state || (!existing && state.retainers === 0)) {
+    return await load(new AbortController().signal);
+  }
+  const entry = existing ?? getOrCreate(scope, key, false);
+  if (!options.fresh) {
+    // A read in flight is newer than retained data (for example a fresh read
+    // after a change), so join it before reusing what is retained.
+    while (entry.inFlight) {
+      const generation = entry.generation;
+      await entry.inFlight.catch(() => undefined);
+      // A newer read replaced the one joined: wait for that one instead.
+      const newer = entry.inFlight as Promise<void> | null;
+      if (entry.generation !== generation && newer) continue;
+      if (
+        entry.generation === generation &&
+        entry.snapshot.error === null &&
+        entry.snapshot.data !== null &&
+        !entry.invalidated
+      ) {
+        return entry.snapshot.data as T;
+      }
+      break;
+    }
+    const staleTimeMs = options.staleTimeMs ?? MOUNT_READ_REUSE_MS;
+    if (!entry.inFlight && entry.snapshot.data !== null && !isStale(entry, staleTimeMs)) {
+      return entry.snapshot.data as T;
+    }
+  }
+  return await readInto(state, entry, load);
+}
+
+/** One imperative read recorded on `entry`; newer than any read already in flight. */
+function readInto<T>(state: Scope, entry: Entry, load: Loader<T>): Promise<T> {
+  // A read already in flight started earlier: its result is discarded, but it
+  // is not aborted, because another imperative caller may be awaiting it.
+  const ticket = ++entry.generation;
+  entry.trailing = null;
+  entry.invalidated = false;
+  if (!entry.snapshot.fetching) setSnapshot(entry, { ...entry.snapshot, fetching: true });
+  const read = load(new AbortController().signal);
+  let settled!: Promise<void>;
+  settled = read
+    .then(
+      (data) => {
+        if (ticket !== entry.generation) return;
+        setSnapshot(entry, {
+          data,
+          loading: false,
+          fetching: false,
+          error: null,
+          updatedAt: Date.now(),
+        });
+      },
+      (cause: unknown) => {
+        if (ticket !== entry.generation) return;
+        const refused = isSharedQueryAccessRefusal(cause);
+        setSnapshot(entry, {
+          data: refused ? null : entry.snapshot.data,
+          loading: false,
+          fetching: false,
+          error: normalizeError(cause),
+          updatedAt: null,
+        });
+      },
+    )
+    .finally(() => {
+      if (entry.inFlight === settled) entry.inFlight = null;
+      if (!mounted(entry) && state.entries.get(entry.key) === entry) {
+        scheduleRelease(state, entry, state.retainers > 0 ? DEFAULT_RETAIN_MS : 0);
+      }
+    });
+  entry.inFlight = settled;
+  return read;
+}
+
 /**
  * A writer for data read some other way (for example a live provider refresh).
  * Create it BEFORE starting that read: a clear in between refuses every write,
@@ -639,7 +738,7 @@ export function useSharedQuery<T>(
   useLayoutEffect(() => {
     binding.current = { key, load: load as Loader<unknown> };
   }, [key, load]);
-  const staleTimeMs = options.staleTimeMs ?? DEFAULT_STALE_TIME_MS;
+  const staleTimeMs = options.staleTimeMs ?? MOUNT_READ_REUSE_MS;
   const retainMs = options.retainMs ?? DEFAULT_RETAIN_MS;
   const pollIntervalMs = options.pollIntervalMs;
 
@@ -732,7 +831,7 @@ export function useSharedQueryValue<T>(
       enabled: false,
       pageLive: true,
       pollIntervalMs: undefined,
-      staleTimeMs: DEFAULT_STALE_TIME_MS,
+      staleTimeMs: MOUNT_READ_REUSE_MS,
       retainMs: DEFAULT_RETAIN_MS,
     };
     registerSubscriber(scope, entry, subscriber);
