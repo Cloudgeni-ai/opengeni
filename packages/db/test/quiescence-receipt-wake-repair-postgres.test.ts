@@ -699,6 +699,31 @@ describe("missing quiescence-receipt wake repair", () => {
       }
       return body;
     };
+    // 1693 then opens that claim only when row security applies to the owner.
+    const CLAIM_GUARD_1693: [string, string][] = [
+      [
+        "\n      IF claim_needed THEN" +
+          "\n        INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES" +
+          "\n          (capability_id, pg_backend_pid(), pg_current_xact_id(), 'wakes');" +
+          "\n      END IF;",
+        WAKE_CLAIM_1677[1]!,
+      ],
+      [
+        "\n      IF claim_needed THEN" +
+          "\n        DELETE FROM opengeni_private.maintenance_claim_capabilities claim WHERE claim.id = capability_id;" +
+          "\n      END IF;",
+        WAKE_CLAIM_1677[2]!,
+      ],
+    ];
+    const CLAIM_NEEDED_1693 = /\n {6}claim_needed constant boolean :=[\s\S]*?;(?=\n {4}BEGIN)/;
+    const withoutClaimGuard = (body: string) => {
+      for (const [guarded, plain] of CLAIM_GUARD_1693) {
+        expect(body.split(guarded)).toHaveLength(2);
+        body = body.replace(guarded, plain);
+      }
+      expect(body).toMatch(CLAIM_NEEDED_1693);
+      return body.replace(CLAIM_NEEDED_1693, "");
+    };
     expect(QUIESCENCE_REPAIR_WAKE_QUIET_SECONDS).toBe(120);
     const baseline = await readFile(
       new URL("../drizzle/0977_baseline_01.sql", import.meta.url),
@@ -718,6 +743,10 @@ describe("missing quiescence-receipt wake repair", () => {
     );
     const wakeClaimMigration = await readFile(
       new URL("../drizzle/1677_wake_repair_inventory_owner_rls.sql", import.meta.url),
+      "utf8",
+    );
+    const claimGuardMigration = await readFile(
+      new URL("../drizzle/1693_wake_repair_inventory_claim_guard.sql", import.meta.url),
       "utf8",
     );
     await shared.admin.begin(async (tx) => {
@@ -745,7 +774,7 @@ describe("missing quiescence-receipt wake repair", () => {
         select prosrc as body from pg_proc
         where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
       expect(
-        withoutWakeClaim(installed[0]!.body)
+        withoutWakeClaim(withoutClaimGuard(installed[0]!.body))
           .replace("latest.account_id = session.account_id AND ", "")
           .replace(QUIET_WINDOW_1239, QUIET_WINDOW_1014)
           .trim(),
@@ -788,7 +817,7 @@ describe("missing quiescence-receipt wake repair", () => {
         const [current] = await tx<{ body: string }[]>`
           select prosrc as body from pg_proc
           where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
-        expect(current!.body).toBe(withoutWakeClaim(installed[0]!.body));
+        expect(current!.body).toBe(withoutWakeClaim(withoutClaimGuard(installed[0]!.body)));
         expect(current!.body).toBe(ownerKey!.body.replace(QUIET_WINDOW_1014, QUIET_WINDOW_1239));
       }
 
@@ -798,6 +827,20 @@ describe("missing quiescence-receipt wake repair", () => {
         await tx`select * from opengeni_private.list_quiescence_receipt_wake_repairs_v1(100,null,null)`;
       for (let replay = 0; replay < 2; replay++) {
         await tx.unsafe(wakeClaimMigration);
+        expect(await readPosture()).toEqual(initialPosture);
+        const [current] = await tx<{ body: string }[]>`
+          select prosrc as body from pg_proc
+          where oid='opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid)'::regprocedure`;
+        expect(current!.body).toBe(withoutClaimGuard(installed[0]!.body));
+        expect(
+          await tx`select * from opengeni_private.list_quiescence_receipt_wake_repairs_v1(100,null,null)`,
+        ).toEqual(quietRows);
+      }
+
+      // 1693 then guards that claim, idempotently, with the same answer,
+      // owner, grants and signature.
+      for (let replay = 0; replay < 2; replay++) {
+        await tx.unsafe(claimGuardMigration);
         expect(await readPosture()).toEqual(initialPosture);
         const [current] = await tx<{ body: string }[]>`
           select prosrc as body from pg_proc
