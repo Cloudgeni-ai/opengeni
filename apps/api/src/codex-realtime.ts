@@ -357,6 +357,7 @@ export type RealtimeSetupPhase =
   | "history"
   | "token"
   | "config"
+  | "config_refresh"
   | "fence"
   | "provider_call"
   | "release";
@@ -443,6 +444,8 @@ export async function brokerSessionCoreCodexRealtime(
       acquireSubscriptionCoreCodexOperationLease(db, scope, ref),
     );
     if (lease.kind !== "acquired") continue;
+    // Configuration refreshes are requests under this lease (settled before release).
+    const refreshes: Promise<unknown>[] = [];
     try {
       const resolver = buildSubscriptionCoreCodexConnectionTokenResolver(
         db,
@@ -466,6 +469,22 @@ export async function brokerSessionCoreCodexRealtime(
         providerConfigCaches.set(fetchImpl, cache);
       }
       let configKey = "";
+      // A configuration past its freshness window is still used for the call
+      // while this call's own request refreshes it, under this lease.
+      let stale: {
+        value: CodexRealtimeProviderConfig;
+        refresh: Promise<CodexRealtimeProviderConfig | null>;
+      } | null = null;
+      const fence = async () => {
+        if (
+          !(await timed("fence", () => renewSubscriptionCoreCodexOperationLease(db, scope, ref)))
+        ) {
+          throw new CodexRealtimeBrokerError(
+            "credential_unavailable",
+            "Codex subscription credential is unavailable",
+          );
+        }
+      };
       return await brokerSessionCodexRealtime(
         {
           enabled: true,
@@ -490,29 +509,47 @@ export async function brokerSessionCoreCodexRealtime(
               auth.clientVersion,
               auth.isFedramp,
             ]);
-            return timed("config", () =>
-              cache.get(configKey, () =>
+            return timed("config", async () => {
+              const read = await cache.get(configKey, () =>
                 fetchCodexRealtimeProviderConfig(auth, requestFetch, options),
-              ),
-            );
+              );
+              if (read.refresh) {
+                const refresh = timed("config_refresh", () => read.refresh!);
+                refreshes.push(refresh);
+                stale = { value: read.value, refresh };
+              } else stale = null;
+              return read.value;
+            });
           },
           createCall: async (auth, callInput, options) => {
             // Pre-dispatch fence on the exact operation lease.
-            if (
-              !(await timed("fence", () =>
-                renewSubscriptionCoreCodexOperationLease(db, scope, ref),
-              ))
-            ) {
-              throw new CodexRealtimeBrokerError(
-                "credential_unavailable",
-                "Codex subscription credential is unavailable",
-              );
-            }
+            await fence();
             try {
               return await timed("provider_call", () =>
                 createCodexRealtimeCall(auth, callInput, requestFetch, options),
               );
             } catch (error) {
+              // The provider definitively refused a call made with a stale
+              // configuration: nothing was created, so one call with the
+              // refreshed configuration is the call an uncached read would
+              // have made.
+              const used = stale?.value === options.providerConfig ? stale : null;
+              const fresh = used && codexRealtimeRejectedRequest(error) ? await used.refresh : null;
+              if (fresh && !sameRealtimeProviderConfig(fresh, used!.value)) {
+                stale = null;
+                try {
+                  await fence();
+                  return await timed("provider_call", () =>
+                    createCodexRealtimeCall(auth, callInput, requestFetch, {
+                      ...options,
+                      providerConfig: fresh,
+                    }),
+                  );
+                } catch (retryError) {
+                  cache.invalidate(configKey);
+                  throw retryError;
+                }
+              }
               // A rejected/stale configuration must not poison the next call.
               // Never replay a call on an ambiguous provider outcome.
               cache.invalidate(configKey);
@@ -531,6 +568,8 @@ export async function brokerSessionCoreCodexRealtime(
         // An observer must never change the call's outcome.
       }
     } finally {
+      // A refresh is a request under this lease; it settles before release.
+      await Promise.all(refreshes);
       await timed("release", () =>
         releaseSubscriptionCoreCodexOperationLease(db, scope, ref),
       ).catch(() => false);
@@ -551,6 +590,32 @@ export type CodexRealtimeBrokerOptions = {
    */
   onConnectionRefused?: (error: CodexRealtimeBrokerError) => void;
 };
+
+/**
+ * The provider answered call creation with a definite client error, so no
+ * call exists: authentication, entitlement, timeout and rate limits are not
+ * configuration rejections, and network or timeout outcomes are ambiguous.
+ */
+function codexRealtimeRejectedRequest(error: unknown): boolean {
+  if (!(error instanceof CodexRealtimeError)) return false;
+  const status = error.providerStatus;
+  return (
+    status !== null &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 401 &&
+    status !== 403 &&
+    status !== 408 &&
+    status !== 429
+  );
+}
+
+function sameRealtimeProviderConfig(
+  a: CodexRealtimeProviderConfig,
+  b: CodexRealtimeProviderConfig,
+): boolean {
+  return a.model === b.model && a.architecture === b.architecture && a.version === b.version;
+}
 
 /**
  * The provider refused realtime for this connection's account, not for the
