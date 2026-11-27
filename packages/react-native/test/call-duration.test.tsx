@@ -56,10 +56,13 @@ mock.module("@opengeni/react/session", () => ({
   useSession: () => ({ session: { title: "Test session", status: "idle" } }),
   useTurnQueue: () => ({ effectiveControl: { state: "active", settlement: null } }),
 }));
-// Voice goes live as soon as it starts.
+// Voice goes live as soon as it starts; a test can drop it into a reconnect and back.
+type VoiceStatus = "idle" | "active" | "recovering";
+let setVoiceStatus: (status: VoiceStatus) => void = () => {};
 mock.module("../src/realtime/use-native-session-realtime", () => ({
   useNativeSessionRealtime: () => {
-    const [status, setStatus] = useState<"idle" | "active">("idle");
+    const [status, setStatus] = useState<VoiceStatus>("idle");
+    setVoiceStatus = setStatus;
     return {
       canStart: true,
       admissionBlocker: null,
@@ -96,61 +99,95 @@ const press = async (label: string) => {
   if (!button) throw new Error(`No button "${label}"`);
   await act(async () => button.click());
 };
+const text = () => document.body.textContent ?? "";
+
+/** Renders the provider and starts a call at the current clock; voice goes live at once. */
+async function startCall() {
+  let calls!: ReturnType<typeof useNativeAgentCall>;
+  function Child() {
+    calls = useNativeAgentCall();
+    return null;
+  }
+  const rendered = await renderComponent(
+    createElement(
+      NativeAgentCallProvider,
+      {
+        client,
+        workspaceId: "w",
+        codexConnected: true,
+        callAdapter: adapter,
+        webrtc: {
+          createPeerConnection: () => {
+            throw Error("mocked");
+          },
+          getUserMedia: async () => {
+            throw Error("mocked");
+          },
+        },
+      },
+      createElement(Child),
+    ),
+  );
+  await act(async () => calls.callSession("s"));
+  return { expand: () => act(async () => calls.callSession("s")), unmount: rendered.unmount };
+}
 
 describe("call duration", () => {
-  afterEach(() => setSystemTime());
+  afterEach(() => {
+    setSystemTime();
+    platform.OS = "ios";
+  });
 
   // iOS draws the call in a window layer, Android in a Modal; both unmount it when minimized.
   test.each(["ios", "android"])(
     "on %s, minimizing and expanding a call keeps the time running from the call's start",
     async (os) => {
       platform.OS = os;
-      let calls!: ReturnType<typeof useNativeAgentCall>;
-      function Child() {
-        calls = useNativeAgentCall();
-        return null;
-      }
       at(0);
-      const rendered = await renderComponent(
-        createElement(
-          NativeAgentCallProvider,
-          {
-            client,
-            workspaceId: "w",
-            codexConnected: true,
-            callAdapter: adapter,
-            webrtc: {
-              createPeerConnection: () => {
-                throw Error("mocked");
-              },
-              getUserMedia: async () => {
-                throw Error("mocked");
-              },
-            },
-          },
-          createElement(Child),
-        ),
-      );
-      await act(async () => calls.callSession("s"));
-      expect(document.body.textContent).toContain("Listening · 0:00");
+      const call = await startCall();
+      expect(text()).toContain("Listening · 0:00");
 
       // Minimize 49 seconds in: the pill shows the same running time.
       at(49);
       await press("Back to chat");
-      expect(document.body.textContent).not.toContain("Listening");
-      expect(document.body.textContent).toContain("On call · 0:49 · Test session");
+      expect(text()).not.toContain("Listening");
+      expect(text()).toContain("On call · 0:49 · Test session");
 
       // Expand again later: the call screen continues from the call's start, not from 0:00.
       at(62);
-      await act(async () => calls.callSession("s"));
-      expect(document.body.textContent).toContain("Listening · 1:02");
+      await call.expand();
+      expect(text()).toContain("Listening · 1:02");
 
       // And again: no restart on any number of round trips.
       await press("Back to chat");
       at(125);
-      await act(async () => calls.callSession("s"));
-      expect(document.body.textContent).toContain("Listening · 2:05");
-      await rendered.unmount();
+      await call.expand();
+      expect(text()).toContain("Listening · 2:05");
+      await call.unmount();
     },
   );
+
+  test("the time ticks on while the call screen stays open", async () => {
+    at(0);
+    const call = await startCall();
+    expect(text()).toContain("Listening · 0:00");
+    at(5);
+    // The next one-second tick picks up the clock.
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 1100)));
+    expect(text()).toMatch(/Listening · 0:0[56]/);
+    await call.unmount();
+  });
+
+  test("a reconnect keeps the call's start time", async () => {
+    at(0);
+    const call = await startCall();
+    at(30);
+    await act(async () => setVoiceStatus("recovering"));
+    expect(text()).toContain("Reconnecting");
+    expect(text()).not.toContain("Listening");
+    at(42);
+    await act(async () => setVoiceStatus("active"));
+    expect(text()).toContain("Listening · 0:42");
+    await call.unmount();
+  });
 });
