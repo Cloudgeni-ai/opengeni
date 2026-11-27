@@ -24,6 +24,7 @@ import {
   renewSessionRealtimeInTransaction,
   requestSessionCompaction,
   saveComposerDraftInTransaction,
+  SESSION_REALTIME_LEASE_MS,
   SessionRealtimeConflictError,
   submitHumanPromptInTransaction,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
@@ -542,6 +543,53 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
     await expectConflict(
       end(value, winningProof, winner!.value.mode.id, 99),
       "REALTIME_VERSION_CHANGED",
+    );
+  });
+
+  test("a hang-up frees the chat at once; a client gone without hanging up holds it only until its lease ends", async () => {
+    const value = await fixture();
+
+    // Hang up, then call the same chat again from a relaunched app: a new
+    // browser instance and owner key, as after a force-close.
+    const hungUp = owner(value);
+    const first = await begin(value, hungUp);
+    await end(value, hungUp, first.mode.id, first.mode.version);
+    const relaunched = owner(value);
+    const startedAt = new Date();
+    const second = await begin(value, relaunched, { now: startedAt });
+    expect(second).toMatchObject({ replay: false, mode: { state: "active" } });
+    expect(Date.parse(second.mode.leaseExpiresAt)).toBe(
+      startedAt.getTime() + SESSION_REALTIME_LEASE_MS,
+    );
+
+    // That app is killed before it can hang up. Its call still holds the
+    // chat (the server cannot tell a dead client from a live one on another
+    // device) until its lease runs out with no heartbeat to renew it.
+    const leaseEnd = startedAt.getTime() + SESSION_REALTIME_LEASE_MS;
+    await expectConflict(
+      begin(value, owner(value), { now: new Date(leaseEnd - 1) }),
+      "REALTIME_ACTIVE",
+    );
+    const third = await begin(value, owner(value), { now: new Date(leaseEnd) });
+    expect(third).toMatchObject({ replay: false, mode: { state: "active" } });
+    expect(third.eventIds).toHaveLength(2);
+
+    const rows = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      db
+        .select({
+          id: schema.sessionRealtimeModes.id,
+          state: schema.sessionRealtimeModes.state,
+          endReason: schema.sessionRealtimeModes.endReason,
+        })
+        .from(schema.sessionRealtimeModes)
+        .where(eq(schema.sessionRealtimeModes.sessionId, value.session.id)),
+    );
+    expect(new Map(rows.map((row) => [row.id, [row.state, row.endReason]]))).toEqual(
+      new Map([
+        [first.mode.id, ["ended", "user_stop"]],
+        [second.mode.id, ["ended", "lease_expired"]],
+        [third.mode.id, ["active", null]],
+      ]),
     );
   });
 
