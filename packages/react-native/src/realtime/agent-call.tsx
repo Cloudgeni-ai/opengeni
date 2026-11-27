@@ -20,6 +20,8 @@ import { CallSurfaceLayer } from "./call-surface-layer";
 import {
   DEFAULT_OPENGENI_NATIVE_CALL_LABELS,
   OpenGeniNativeCallView,
+  formatNativeCallDuration,
+  useNativeCallDuration,
   type OpenGeniNativeCallLabels,
 } from "./call-view";
 import {
@@ -604,6 +606,7 @@ function ActiveAgentCall(
       {!props.expanded && !props.pillHidden
         ? surface(
             <OnCallPill
+              call={call}
               title={title}
               topOffset={props.pillTopOffset ?? 56}
               status={
@@ -651,6 +654,7 @@ function CallScreen(props: {
 
 /** While minimized: a pill above the content that returns to the call. */
 function OnCallPill(props: {
+  call: ReturnType<typeof useNativeRealtimeCall>;
   title: string;
   status: string;
   topOffset: number;
@@ -659,6 +663,10 @@ function OnCallPill(props: {
 }) {
   const insets = useSafeAreaInsets();
   const theme = useNativeTimelineTheme();
+  // The same elapsed time as the call screen, from the call's own start.
+  const duration = useNativeCallDuration(props.call);
+  const time =
+    duration !== null && !props.call.muted ? ` · ${formatNativeCallDuration(duration)}` : "";
   return (
     <View
       pointerEvents="box-none"
@@ -675,7 +683,8 @@ function OnCallPill(props: {
       >
         <View style={[styles.pillDot, { backgroundColor: "#34C759" }]} />
         <Text numberOfLines={1} style={[styles.pillText, { color: theme.colors.bg }]}>
-          {props.status} · {props.title}
+          {props.status}
+          {time} · {props.title}
         </Text>
       </Pressable>
     </View>
