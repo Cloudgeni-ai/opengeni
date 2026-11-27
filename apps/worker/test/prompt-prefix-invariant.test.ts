@@ -27,6 +27,8 @@ import {
   liveBox,
   responsesModel,
 } from "../../../packages/runtime/test/live-chat-fixture";
+import type { Settings } from "@opengeni/config";
+import { sandboxSettingsForRoute } from "../src/activities/agent-turn/sandbox-route";
 
 type Transition = {
   name: string;
@@ -268,7 +270,16 @@ describe.each([
     const managed = { backend: "docker", root: "/workspace" } as const;
     const machine = { backend: "selfhosted", root: "/home/user" } as const;
     const otherMachine = { backend: "selfhosted", root: "/Users/user" } as const;
-    const placements = [
+    // A chat created on a Connected Machine has that as its home backend; the
+    // worker's route rewrites the settings' backend to the managed sandbox the
+    // chat moves to (sandboxSettingsForRoute), so the settings differ per side.
+    type Placement = {
+      name: string;
+      from: typeof managed | typeof machine | typeof otherMachine;
+      to: typeof managed | typeof machine | typeof otherMachine;
+      home?: "selfhosted";
+    };
+    const placements: readonly Placement[] = [
       { name: "the sandbox restarts on the same machine", from: machine, to: machine },
       { name: "the chat moves to another machine", from: machine, to: otherMachine },
       { name: "the managed sandbox restarts", from: managed, to: managed },
@@ -282,7 +293,19 @@ describe.each([
         from: machine,
         to: managed,
       },
-    ] as const;
+      {
+        name: "a chat created on a Connected Machine moves to a managed sandbox",
+        from: machine,
+        to: managed,
+        home: "selfhosted",
+      },
+      {
+        name: "a chat created on a Connected Machine moves back to it from a managed sandbox",
+        from: managed,
+        to: machine,
+        home: "selfhosted",
+      },
+    ];
     for (const placement of placements) {
       const known = expectedBreak(`${name}: ${placement.name}`, placement.name);
       (known ? test.failing : test)(
@@ -294,14 +317,23 @@ describe.each([
           const conversationChat = liveChat(first, model, api);
           // Each box reports its own workspace root, so a move lands on another
           // root and backend as it does in production.
-          const on = (
-            box: typeof first,
-            side: (typeof placement)["from"] | (typeof placement)["to"],
-          ) => ({
+          const on = (box: typeof first, side: Placement["from"]) => ({
             box,
+            ...(placement.home
+              ? {
+                  settings: {
+                    sandboxBackend: sandboxSettingsForRoute({
+                      runSettings: { sandboxBackend: placement.home } as Settings,
+                      machinePrimary: side.backend === "selfhosted",
+                      groupBoxBackend: managed.backend,
+                    }).sandboxBackend,
+                  },
+                }
+              : {}),
             build: {
               ...agent,
               activeSandboxBackend: side.backend,
+              ...(placement.home ? { homeSandboxBackend: placement.home } : {}),
               sandboxWorkspaceRoot: box.session.state.manifest!.root!,
             },
           });

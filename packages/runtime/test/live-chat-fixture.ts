@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach } from "bun:test";
 import { OpenAIResponsesModel, type AgentInputItem, type Model } from "@openai/agents";
 import OpenAI from "openai";
-import type { ResolvedModelProvider } from "@opengeni/config";
+import type { ResolvedModelProvider, Settings } from "@opengeni/config";
 import {
   latestRepositorySkillsIndex,
   repositorySkillsContextItem,
@@ -98,6 +98,8 @@ export type TurnOptions = {
   deferred?: boolean;
   /** Agent options of this turn, as the worker builds them. */
   build?: Partial<BuildAgentOptions>;
+  /** The settings the worker builds this turn's agent with (its route rewrites the backend). */
+  settings?: Partial<Settings>;
   /** This turn's operational notices (goal, notes, restore or credit notices). */
   internalContext?: string;
   /** The box this turn runs on, when the chat moved to another one. */
@@ -136,7 +138,7 @@ export function chat(
         rows.splice(0, rows.length, ...withIndex(rows, index.text));
         return (frozen = index.text);
       };
-      const agent = buildOpenGeniAgent(settings, [REPOSITORY], {
+      const agent = buildOpenGeniAgent({ ...settings, ...options.settings }, [REPOSITORY], {
         ...options.build,
         model,
         publishRepositorySkills: publish,
