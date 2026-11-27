@@ -23,15 +23,17 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-// Contract (1599/1600): a terminal turn event's `usage` is exactly what the
+// Contract (1663–1668): a terminal turn event's `usage` is exactly what the
 // previous release's trigger (1514) computes, now from running per-turn totals
 // the source rows' triggers keep. The oracle is the previous release's own
-// trigger, read from the database before 1599 and installed next to the new
+// trigger, read from the database before 1663 and installed next to the new
 // one under another name (writing `usageBefore`), so every terminal event of
 // every replayed history carries both answers computed in the same statement.
-// 1599 installs the triggers without reading history; 1600 completes the
-// turns that existed before it, one per transaction, online, as the
-// NOSUPERUSER NOBYPASSRLS owner, while readers recount not-ready turns.
+// 1663 installs the tables and routines and 1664-1667 the triggers, one busy
+// table per step, while writers keep appending (no step reads history);
+// 1668 recounts the turns that existed before them, one per transaction,
+// while writers continue, as the NOSUPERUSER NOBYPASSRLS owner, and readers
+// recount not-ready turns.
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const SHIPPED = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
@@ -603,18 +605,36 @@ async function failure(promise: Promise<unknown>): Promise<string> {
   return "no error";
 }
 
-/** Histories written before 1599 (their turns predate the triggers). */
+/** Histories written before 1663 (their turns predate the triggers). */
 const preexisting: History[] = [];
 let bigTurn: Turn | null = null;
 const BIG_CALLS = 3_000;
 
+/** 1663-1667 applied while writers ran: what the writers saw. */
+const underLoad = {
+  histories: [] as History[],
+  writes: 0,
+  deletes: 0,
+  reapplied: 0,
+  errors: [] as string[],
+  deadlocks: -1,
+  migrateMs: 0,
+};
+
+async function deadlockCount(): Promise<number> {
+  await owned!.admin`select pg_stat_clear_snapshot()`;
+  const [row] = await owned!.admin<{ n: number }[]>`
+    select deadlocks::int as n from pg_stat_database where datname = current_database()`;
+  return row!.n;
+}
+
 beforeAll(async () => {
-  owned = await acquireOwnerMigratedTestDatabase("migration-1599-turn-credit");
+  owned = await acquireOwnerMigratedTestDatabase("migration-1663-turn-credit");
   if (!owned) {
     if (requireRealDatabase) throw new Error("PostgreSQL fixture is unavailable");
     return;
   }
-  directory = await mkdtemp(join(tmpdir(), "og-migration-1599-"));
+  directory = await mkdtemp(join(tmpdir(), "og-migration-1663-"));
   shippedFiles = (await readdir(SHIPPED)).filter((file) => file.endsWith(".sql")).sort();
   ours = shippedFiles.findIndex((file) => file.endsWith("_session_turn_credit_totals.sql"));
   if (ours < 0) throw new Error("the session turn credit totals migration is missing");
@@ -636,23 +656,23 @@ beforeAll(async () => {
   const oracle = previous!.fn
     .replace(
       "opengeni_private.attach_session_turn_credit_usage_v1()",
-      "opengeni_private.test_turn_credit_usage_before_1599()",
+      "opengeni_private.test_turn_credit_usage_before_1663()",
     )
     .replace(
       "jsonb_build_object('usage', usage_value)",
       "jsonb_build_object('usageBefore', usage_value)",
     );
-  expect(oracle).toContain("test_turn_credit_usage_before_1599()");
+  expect(oracle).toContain("test_turn_credit_usage_before_1663()");
   expect(oracle).toContain("'usageBefore'");
   await owned.admin.unsafe(oracle);
   const oracleTrigger = previous!.trigger
-    .replace("session_events_turn_credit_usage_v1", "session_events_turn_credit_usage_before_1599")
-    .replace("attach_session_turn_credit_usage_v1()", "test_turn_credit_usage_before_1599()");
-  expect(oracleTrigger).toContain("test_turn_credit_usage_before_1599()");
+    .replace("session_events_turn_credit_usage_v1", "session_events_turn_credit_usage_before_1663")
+    .replace("attach_session_turn_credit_usage_v1()", "test_turn_credit_usage_before_1663()");
+  expect(oracleTrigger).toContain("test_turn_credit_usage_before_1663()");
   await owned.admin.unsafe(oracleTrigger);
 
   // Histories before the triggers exist, some already finished.
-  const random = prng(1599);
+  const random = prng(1663);
   for (let sessionIndex = 0; sessionIndex < 3; sessionIndex += 1) {
     const scope = await seedSession(`before-${sessionIndex}`);
     for (let turnIndex = 0; turnIndex < 6; turnIndex += 1) {
@@ -688,9 +708,78 @@ beforeAll(async () => {
   );
   preexisting.push(newHistory(bigTurn));
 
-  // 1599 alone: triggers and tables, no history read.
-  await linkThrough(ours);
-  await migrate(owned.ownerUrl, undefined, { migrationsDirectory: directory });
+  // 1663-1667 while writers append events and usage rows to new turns, start
+  // turns, and delete sessions: each step locks one busy table at a time.
+  const loadSessions = await Promise.all(
+    Array.from({ length: 10 }, (_, index) => seedSession(`load-${index}`)),
+  );
+  const deadlocksBefore = await deadlockCount();
+  const load = { stop: false };
+  const record = (error: unknown) => {
+    underLoad.errors.push(error instanceof Error ? error.message : String(error));
+  };
+  const loadWriters = [
+    ...loadSessions.map((loadScope, writer) =>
+      (async () => {
+        const writerRandom = prng(5000 + writer);
+        while (!load.stop) {
+          try {
+            const history = newHistory(await seedTurn(loadScope));
+            underLoad.histories.push(history);
+            await burst(writerRandom, history, 2);
+            if (writerRandom() < 0.5) await terminal(writerRandom, history);
+            underLoad.writes += 1;
+          } catch (error) {
+            record(error);
+          }
+        }
+      })(),
+    ),
+    (async () => {
+      const writerRandom = prng(5100);
+      while (!load.stop) {
+        try {
+          const history = newHistory(await seedTurn(await seedSession("load-deleted")));
+          await burst(writerRandom, history, 1);
+          await owned!.admin`delete from sessions where id = ${history.turn.sessionId}`;
+          underLoad.deletes += 1;
+        } catch (error) {
+          record(error);
+        }
+      }
+    })(),
+  ];
+  const turnStart = shippedFiles.findIndex((file) =>
+    file.endsWith("_session_turn_credit_totals_turn_start.sql"),
+  );
+  if (turnStart <= ours) throw new Error("the session turn start step is missing");
+  try {
+    await Bun.sleep(300);
+    await linkThrough(turnStart);
+    const started = performance.now();
+    await migrate(owned.ownerUrl, undefined, { migrationsDirectory: directory });
+    underLoad.migrateMs = performance.now() - started;
+    // Each step reapplied as a deploy retry would (idempotent), still under load.
+    for (let round = 0; round < 5; round += 1) {
+      for (const file of shippedFiles.slice(ours + 1, turnStart + 1)) {
+        const body = await readFile(join(SHIPPED, file), "utf8");
+        await owned.admin.begin(async (tx) => {
+          await tx`select pg_catalog.set_config('lock_timeout', '5s', true)`;
+          await tx.unsafe(body);
+        });
+        underLoad.reapplied += 1;
+      }
+    }
+    await Bun.sleep(300);
+  } finally {
+    load.stop = true;
+    await Promise.all(loadWriters);
+  }
+  // A backend reports its deadlocks when it exits: reconnect the writers.
+  await client.close();
+  client = createDb(appUrl.toString(), { max: 12, rlsStrategy: "force" });
+  await Bun.sleep(500);
+  underLoad.deadlocks = (await deadlockCount()) - deadlocksBefore;
 }, 1_800_000);
 
 afterAll(async () => {
@@ -698,6 +787,26 @@ afterAll(async () => {
   await owned?.release();
   if (directory) await rm(directory, { recursive: true, force: true });
 }, 120_000);
+
+test("the trigger steps apply while writers append events and usage, with no deadlock", async () => {
+  if (!owned) return;
+  console.info(
+    `[turn credit totals rollout] 1663-1667 in ${underLoad.migrateMs.toFixed(0)} ms with ` +
+      `${underLoad.writes} turn writes and ${underLoad.deletes} session deletes, then ` +
+      `${underLoad.reapplied} step reapplies; ${underLoad.deadlocks} new deadlocks`,
+  );
+  expect(underLoad.errors).toEqual([]);
+  expect(underLoad.deadlocks).toBe(0);
+  expect(underLoad.reapplied).toBe(20);
+  expect(underLoad.writes).toBeGreaterThan(4);
+  expect(underLoad.deletes).toBeGreaterThan(0);
+  // Every terminal event written between the steps gave the previous usage.
+  const compared = await terminalMismatches(
+    underLoad.histories.map((history) => history.turn.turnId),
+  );
+  expect(compared.compared).toBeGreaterThan(0);
+  expect(compared.differ).toEqual([]);
+});
 
 test("before the backfill, a turn that predates the triggers keeps the previous full sum", async () => {
   if (!owned) return;
@@ -719,9 +828,9 @@ test("before the backfill, a turn that predates the triggers keeps the previous 
 
 test("the batched backfill completes every pre-existing turn exactly while writers keep writing", async () => {
   if (!owned) return;
-  // Every pre-existing turn gets rows (not ready) from a write, then 1600
+  // Every pre-existing turn gets rows (not ready) from a write, then 1668
   // runs while writers keep writing to the same turns.
-  const random = prng(1600);
+  const random = prng(1668);
   for (const [index, history] of preexisting.entries()) {
     await writeEvents(history, [
       {
@@ -733,7 +842,9 @@ test("the batched backfill completes every pre-existing turn exactly while write
     await burst(random, history, 1);
   }
   const [pending] = await owned.admin<{ n: number }[]>`
-    select count(*)::int as n from session_turn_credit_totals where side = 'events' and not ready`;
+    select count(*)::int as n from session_turn_credit_totals
+    where side = 'events' and not ready
+      and turn_id = any(${preexisting.map((history) => history.turn.turnId)}::uuid[])`;
   expect(pending!.n).toBe(preexisting.length);
 
   const writing = { stop: false };
@@ -1009,7 +1120,7 @@ test("the backfill never waits for a session event writer holding the turn", asy
   });
   await locked;
   const backfill = await readFile(
-    join(SHIPPED, "1600_session_turn_credit_totals_backfill.sql"),
+    join(SHIPPED, "1668_session_turn_credit_totals_backfill.sql"),
     "utf8",
   );
   const owner = postgres(owned.ownerUrl, { max: 1 });
@@ -1116,7 +1227,7 @@ test("a session delete takes the turn's totals rows before its call rows", async
       key: `k:${turn.turnId}:b`,
     },
   ]);
-  // A writer (or the 1600 recount) holds the turn's events row and would take
+  // A writer (or the 1668 recount) holds the turn's events row and would take
   // call rows next. The delete must wait for it before it takes any call row,
   // or the two deadlock.
   const holder = await owned.admin.reserve();
@@ -1242,7 +1353,7 @@ test("terminal insert at production shape: kept totals against the previous full
   await owned.admin`analyze session_events`;
   await owned.admin`analyze usage_events`;
   // Time the new trigger alone.
-  await owned.admin`alter table session_events disable trigger session_events_turn_credit_usage_before_1599`;
+  await owned.admin`alter table session_events disable trigger session_events_turn_credit_usage_before_1663`;
   type Plan = { ms: number; buffers: number };
   const explain = async (turn: Turn): Promise<Plan> => {
     const [next] = await owned!.admin<{ sequence: number }[]>`
@@ -1324,7 +1435,7 @@ test("terminal insert at production shape: kept totals against the previous full
         `${withTotals.toFixed(2)} ms with it`,
     );
   } finally {
-    await owned.admin`alter table session_events enable trigger session_events_turn_credit_usage_before_1599`;
+    await owned.admin`alter table session_events enable trigger session_events_turn_credit_usage_before_1663`;
   }
 });
 

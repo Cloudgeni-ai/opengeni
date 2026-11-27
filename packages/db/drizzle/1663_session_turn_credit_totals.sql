@@ -1,5 +1,4 @@
 -- deployment-mode: rolling
--- online-safety-exception: explicit-lock: takes the SHARE ROW EXCLUSIVE locks its foreign keys and triggers need anyway, once, up front in the application's lock order, with a one-second timeout and bounded retries, so no step waits while holding another.
 -- Running per-turn credit totals, so writing a turn's terminal event no longer
 -- re-reads every model call of the turn.
 --
@@ -47,14 +46,22 @@
 -- give the same `usage` for every turn; a sampled worker check compares them
 -- (opengeni_session_turn_credit_totals_mismatched_turns).
 --
--- Rollout: a turn that existed before this migration gets not-ready rows on
--- its first later change (deltas apply from then on); 1600 recounts them one
--- turn per transaction while writers continue, and a turn it cannot recount
--- (or one that becomes not ready later) keeps the full sum. A pre-existing
--- turn with no later change has no rows and keeps the full sum.
+-- Rollout, one busy table per migration (each lock taken with a short
+-- timeout and retried, never two hot tables in one transaction): 1663 the
+-- tables, routines, workspace foreign keys and the terminal reader; 1664 the
+-- usage_events triggers; 1665 the session_events triggers; 1666 the sessions
+-- delete cleanup; 1667 the session_turns start trigger, last; 1668 the
+-- backfill. Until 1667 no turn's rows start ready (a row a trigger creates
+-- for an existing turn is not ready), so a terminal event between the steps
+-- takes the full sum and partial apply never changes `usage`. A turn that
+-- existed before 1667 gets not-ready rows on its first later change (deltas
+-- apply from then on); 1668 recounts them one turn per transaction while
+-- writers continue, and a turn it cannot recount (or one that becomes not
+-- ready later) keeps the full sum. A pre-existing turn with no later change
+-- has no rows and keeps the full sum.
 --
 -- Locks: every writer of these rows locks totals rows before call rows (a
--- writer its side's totals row, then the call row; the 1600 recount the
+-- writer its side's totals row, then the call row; the 1668 recount the
 -- events row, then the usage row, then the turn's call rows; the session
 -- delete and TRUNCATE cleanups the totals rows, then the call rows). Session
 -- event writers already serialize per session on the event cursor, so the
@@ -82,42 +89,21 @@
 -- charge: billing reads the ledger), and the sampled drift check reports it.
 -- The owner policy serves workspace cascades and the backfill.
 --
--- Rolling: new FORCE RLS tables (runtime SELECT, INSERT, UPDATE, DELETE), invoker
--- routines and triggers. The previous release writes the same records and
--- keeps the totals current through the triggers; the replaced terminal
--- function returns the same `usage`.
+-- Rolling: new FORCE RLS tables (runtime SELECT, INSERT, UPDATE, DELETE) and
+-- invoker routines; the triggers follow in 1664-1667. The previous release
+-- writes the same records and keeps the totals current through those
+-- triggers; the replaced terminal function returns the same `usage`.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
-
--- The tables this migration's foreign keys and triggers lock (SHARE ROW
--- EXCLUSIVE), taken together up front in the application's lock order
--- (workspace, session, turn, its events, its usage), so no step waits while
--- holding an earlier one. A busy table gives up within a short timeout and
--- retries; the locks are held until commit.
-DO $session_turn_credit_totals_locks$
-BEGIN
-  FOR attempt IN 1..20 LOOP
-    BEGIN
-      PERFORM pg_catalog.set_config('lock_timeout', '1s', true);
-      LOCK TABLE workspaces, sessions, session_turns, session_events, usage_events
-        IN SHARE ROW EXCLUSIVE MODE;
-      RETURN;
-    EXCEPTION WHEN lock_not_available THEN
-      PERFORM pg_catalog.pg_sleep(0.2 * least(attempt, 5));
-    END;
-  END LOOP;
-  RAISE EXCEPTION 'session turn credit totals: the source tables stayed busy'
-    USING ERRCODE = 'lock_not_available';
-END $session_turn_credit_totals_locks$;
 
 CREATE TABLE session_turn_credit_totals (
   turn_id uuid NOT NULL,
   -- 'events': kept by session_events writers; 'usage': by usage_events writers.
   side text NOT NULL CHECK (side IN ('events', 'usage')),
   account_id uuid NOT NULL,
-  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL,
   session_id uuid NOT NULL,
-  -- Holds the turn's whole records (new turns; 1600 for earlier ones).
+  -- Holds the turn's whole records (new turns; 1668 for earlier ones).
   ready boolean NOT NULL DEFAULT false,
   -- False once a counted row was updated or deleted: recount from then on.
   exact boolean NOT NULL DEFAULT true,
@@ -138,8 +124,8 @@ CREATE TABLE session_turn_credit_totals (
   PRIMARY KEY (turn_id, side)
 );
 COMMENT ON TABLE session_turn_credit_totals IS
-  'Running per-turn credit sums behind terminal turn usage, kept exact by triggers on session_events and usage_events (1599); readers recount a turn whose rows are not ready and exact.';
--- The 1600 backfill's queue and the sampled drift check.
+  'Running per-turn credit sums behind terminal turn usage, kept exact by triggers on session_events and usage_events (1663-1667); readers recount a turn whose rows are not ready and exact.';
+-- The 1668 backfill's queue and the sampled drift check.
 CREATE INDEX session_turn_credit_totals_pending_idx ON session_turn_credit_totals (turn_id)
   WHERE side = 'events' AND NOT ready AND exact;
 CREATE INDEX session_turn_credit_totals_account_idx ON session_turn_credit_totals (account_id, turn_id)
@@ -154,7 +140,7 @@ CREATE TABLE session_turn_credit_calls (
   -- source_resource_id otherwise.
   source_id text NOT NULL,
   account_id uuid NOT NULL,
-  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL,
   -- The first recorded usage of the call, by session sequence; null until one.
   call_sequence integer,
   has_settlement boolean,
@@ -171,11 +157,32 @@ CREATE TABLE session_turn_credit_calls (
   PRIMARY KEY (turn_id, source_id)
 );
 COMMENT ON TABLE session_turn_credit_calls IS
-  'Per model call state behind session_turn_credit_totals (1599): the first recorded usage and the largest model.cost row.';
+  'Per model call state behind session_turn_credit_totals (1663): the first recorded usage and the largest model.cost row.';
 CREATE INDEX session_turn_credit_calls_probe_idx ON session_turn_credit_calls (turn_id)
   WHERE ((call_sequence IS NOT NULL OR has_cost) AND has_settlement IS NOT TRUE)
     OR hosted_credit_micros IS NOT NULL;
 CREATE INDEX session_turn_credit_calls_workspace_idx ON session_turn_credit_calls (workspace_id);
+
+-- The workspace foreign keys lock workspaces (SHARE ROW EXCLUSIVE), the only
+-- busy table this step touches: a short lock timeout, retried with jitter.
+DO $session_turn_credit_totals_workspace_fk$
+DECLARE previous_lock_timeout constant text := pg_catalog.current_setting('lock_timeout');
+BEGIN
+  FOR attempt IN 1..30 LOOP
+    BEGIN
+      PERFORM pg_catalog.set_config('lock_timeout', '300ms', true);
+      ALTER TABLE session_turn_credit_totals ADD CONSTRAINT session_turn_credit_totals_workspace_fk
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE;
+      ALTER TABLE session_turn_credit_calls ADD CONSTRAINT session_turn_credit_calls_workspace_fk
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE;
+      PERFORM pg_catalog.set_config('lock_timeout', previous_lock_timeout, true);
+      RETURN;
+    EXCEPTION WHEN lock_not_available THEN
+      PERFORM pg_catalog.pg_sleep(0.05 + pg_catalog.random() * 0.25);
+    END;
+  END LOOP;
+  RAISE EXCEPTION 'session turn credit totals: workspaces stayed busy' USING ERRCODE = 'lock_not_available';
+END $session_turn_credit_totals_workspace_fk$;
 
 ALTER TABLE session_turn_credit_totals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE session_turn_credit_totals FORCE ROW LEVEL SECURITY;
@@ -221,15 +228,15 @@ REVOKE ALL ON TABLE session_turn_credit_calls FROM PUBLIC;
 DO $session_turn_credit_totals$
 DECLARE data_schema text := current_schema(); owner_name text := current_user;
 BEGIN
-  -- Workspace cascades, owner writes and the 1600 backfill.
+  -- Workspace cascades, owner writes and the 1668 backfill.
   EXECUTE format(
-    'CREATE POLICY session_turn_credit_totals_owner ON %1$I.session_turn_credit_totals '
-    'TO %2$I USING (CURRENT_USER = %3$L::name) WITH CHECK (CURRENT_USER = %3$L::name)',
-    data_schema, owner_name, owner_name);
+    'CREATE POLICY session_turn_credit_totals_owner ON session_turn_credit_totals '
+    'TO %1$I USING (CURRENT_USER = %2$L::name) WITH CHECK (CURRENT_USER = %2$L::name)',
+    owner_name, owner_name);
   EXECUTE format(
-    'CREATE POLICY session_turn_credit_calls_owner ON %1$I.session_turn_credit_calls '
-    'TO %2$I USING (CURRENT_USER = %3$L::name) WITH CHECK (CURRENT_USER = %3$L::name)',
-    data_schema, owner_name, owner_name);
+    'CREATE POLICY session_turn_credit_calls_owner ON session_turn_credit_calls '
+    'TO %1$I USING (CURRENT_USER = %2$L::name) WITH CHECK (CURRENT_USER = %2$L::name)',
+    owner_name, owner_name);
 
   -- What a recorded usage payload says about its call's price. The same
   -- expressions as 1514's lookup_keys/priced, so a payload of any shape gives
@@ -644,7 +651,7 @@ BEGIN
     END $body$;
   $create$, data_schema);
 
-  -- The 1600 backfill's recount of one not-ready turn, as the owner in the
+  -- The 1668 backfill's recount of one not-ready turn, as the owner in the
   -- turn's tenant scope. It locks the events row (waiting for its writer),
   -- then the usage row without waiting (a writer of both families could hold
   -- it and wait for the events row; the backfill then retries the turn), so
@@ -841,7 +848,7 @@ BEGIN
   $create$, data_schema);
 END $session_turn_credit_totals$;
 
--- The backfill (1600) and the cascade clear run as the owner; the runtime
+-- The backfill (1668) and the cascade clear run as the owner; the runtime
 -- reaches every routine through the triggers and the two readers.
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_call_fields(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_call_terms(session_turn_credit_calls) FROM PUBLIC;
@@ -856,46 +863,6 @@ REVOKE ALL ON FUNCTION opengeni_private.forget_session_turn_credit_totals() FROM
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_usage_full_v1(uuid, uuid, uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_usage_kept_v1(uuid, uuid, uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.session_turn_credit_totals_recount(uuid) FROM PUBLIC;
-
--- Sorts after session_events_fill_* and session_events_normalize_legacy_*:
--- the row's sequence and payload are final when it runs.
-CREATE TRIGGER session_events_turn_credit_totals_v1 BEFORE INSERT ON session_events
-  FOR EACH ROW WHEN (NEW.turn_id IS NOT NULL
-    AND NEW.type IN ('agent.model.usage', 'turn.event.rejected_late'))
-  EXECUTE FUNCTION opengeni_private.session_turn_credit_record_event();
-CREATE TRIGGER session_events_turn_credit_totals_inexact_v1 AFTER UPDATE ON session_events
-  FOR EACH ROW WHEN ((OLD.turn_id IS NOT NULL OR NEW.turn_id IS NOT NULL)
-    AND (OLD.type IN ('agent.model.usage', 'turn.event.rejected_late')
-      OR NEW.type IN ('agent.model.usage', 'turn.event.rejected_late'))
-    AND (OLD.type, OLD.payload, OLD.turn_id, OLD.session_id, OLD.workspace_id, OLD.sequence, OLD.turn_association)
-      IS DISTINCT FROM (NEW.type, NEW.payload, NEW.turn_id, NEW.session_id, NEW.workspace_id, NEW.sequence, NEW.turn_association))
-  EXECUTE FUNCTION opengeni_private.session_turn_credit_mark_inexact();
-CREATE TRIGGER session_events_turn_credit_totals_delete_v1 AFTER DELETE ON session_events
-  FOR EACH ROW WHEN (OLD.turn_id IS NOT NULL
-    AND OLD.type IN ('agent.model.usage', 'turn.event.rejected_late'))
-  EXECUTE FUNCTION opengeni_private.session_turn_credit_mark_inexact();
-CREATE TRIGGER session_events_turn_credit_totals_truncate_v1 AFTER TRUNCATE ON session_events
-  FOR EACH STATEMENT EXECUTE FUNCTION opengeni_private.clear_session_turn_credit_totals();
-
-CREATE TRIGGER usage_events_turn_credit_totals_v1 AFTER INSERT ON usage_events
-  FOR EACH ROW WHEN (NEW.turn_id IS NOT NULL AND NEW.unit = 'usd_micros'
-    AND (NEW.event_type LIKE '%.cost' OR (NEW.event_type LIKE '%.refund' AND NEW.event_type <> 'model.refund')))
-  EXECUTE FUNCTION opengeni_private.session_turn_credit_record_usage();
-CREATE TRIGGER usage_events_turn_credit_totals_inexact_v1 AFTER UPDATE ON usage_events
-  FOR EACH ROW WHEN ((OLD.turn_id IS NOT NULL OR NEW.turn_id IS NOT NULL)
-    AND (OLD.turn_id, OLD.session_id, OLD.workspace_id, OLD.event_type, OLD.unit, OLD.quantity, OLD.source_resource_id)
-      IS DISTINCT FROM (NEW.turn_id, NEW.session_id, NEW.workspace_id, NEW.event_type, NEW.unit, NEW.quantity, NEW.source_resource_id))
-  EXECUTE FUNCTION opengeni_private.session_turn_credit_mark_inexact();
-CREATE TRIGGER usage_events_turn_credit_totals_delete_v1 AFTER DELETE ON usage_events
-  FOR EACH ROW WHEN (OLD.turn_id IS NOT NULL AND OLD.unit = 'usd_micros')
-  EXECUTE FUNCTION opengeni_private.session_turn_credit_mark_inexact();
-CREATE TRIGGER usage_events_turn_credit_totals_truncate_v1 AFTER TRUNCATE ON usage_events
-  FOR EACH STATEMENT EXECUTE FUNCTION opengeni_private.clear_session_turn_credit_totals();
-
-CREATE TRIGGER session_turns_credit_totals_start_v1 AFTER INSERT ON session_turns
-  FOR EACH ROW EXECUTE FUNCTION opengeni_private.session_turn_credit_start_turn();
-CREATE TRIGGER sessions_turn_credit_totals_forget_v1 AFTER DELETE ON sessions
-  FOR EACH ROW EXECUTE FUNCTION opengeni_private.forget_session_turn_credit_totals();
 
 -- Every configured application role, as provisioning does. INSERT, UPDATE
 -- and DELETE serve only the invoker triggers (the policies admit nothing else).

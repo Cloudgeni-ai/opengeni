@@ -2500,7 +2500,7 @@ export const FORCE_RLS_TABLES = [
   "session_title_operations",
   "session_turn_app_action_grants",
   "session_turn_attempts",
-  // 1599_session_turn_credit_totals: per-turn credit sums its triggers keep.
+  // 1663_session_turn_credit_totals: per-turn credit sums its triggers keep.
   "session_turn_credit_calls",
   "session_turn_credit_totals",
   "session_turn_machine_consents",
@@ -2920,7 +2920,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_title_operations",
   "session_turn_app_action_grants",
   "session_turn_attempts",
-  // 1599_session_turn_credit_totals: written and deleted only by the
+  // 1663_session_turn_credit_totals: written and deleted only by the
   // session_events, usage_events and sessions invoker triggers (RLS admits
   // runtime writes at pg_trigger_depth() > 0).
   "session_turn_credit_calls",

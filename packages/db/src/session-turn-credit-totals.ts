@@ -32,7 +32,7 @@ function sqlState(error: unknown): string | null {
 }
 
 /**
- * Drift check for the per-turn credit totals (migration 1599): for each given
+ * Drift check for the per-turn credit totals (migration 1663): for each given
  * account, up to `turnsPerAccount` turns with ready, exact kept rows and at
  * most `maxCalls` calls, chosen at a random point of the turn id space,
  * compare the terminal `usage` the kept rows give
