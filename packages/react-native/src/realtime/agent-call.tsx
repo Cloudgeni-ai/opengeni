@@ -111,6 +111,13 @@ export type NativeAgentCallProviderProps = {
   webrtc: NativeWebRtcAdapter;
   /** Where a call from outside the app goes; defaults to the requested or a fresh session. */
   resolveOutsideCall?(context: NativeOutsideCallContext): Promise<string>;
+  /**
+   * Asked before a call starts: from a session, from outside the app, or by
+   * answering an agent's call. For example the person's permission to send
+   * their voice to AI providers. Resolving false starts nothing (an answered
+   * agent call ends); bringing back the call already running asks nothing.
+   */
+  beforeCall?(): Promise<boolean>;
   /** Runs as a call starts (for example a haptic). */
   onCallStarting?(): void;
   /** Shows a failure; defaults to an alert. */
@@ -186,28 +193,58 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
   onErrorRef.current = onError;
   const [target, setTarget] = useState<CallTarget | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const targetRef = useRef(target);
+  targetRef.current = target;
+  const beforeCallRef = useRef(props.beforeCall);
+  beforeCallRef.current = props.beforeCall;
+  /** The host's permission for a new call; true without one. */
+  const mayCall = useCallback(async (): Promise<boolean> => {
+    const ask = beforeCallRef.current;
+    if (!ask) return true;
+    try {
+      return await ask();
+    } catch {
+      return false;
+    }
+  }, []);
 
   const callSession = useCallback(
     (sessionId: string, sessionWorkspaceId?: string) => {
       const callWorkspaceId = sessionWorkspaceId || workspaceId;
       if (!callWorkspaceId) return;
-      setTarget((current) =>
-        current?.sessionId === sessionId && current.workspaceId === callWorkspaceId
-          ? current
-          : {
-              workspaceId: callWorkspaceId,
-              sessionId,
-              systemTarget: nativeCallHandle(callWorkspaceId, sessionId),
-            },
-      );
-      setExpanded(true);
+      const running = targetRef.current;
+      const start = () => {
+        setTarget((current) =>
+          current?.sessionId === sessionId && current.workspaceId === callWorkspaceId
+            ? current
+            : {
+                workspaceId: callWorkspaceId,
+                sessionId,
+                systemTarget: nativeCallHandle(callWorkspaceId, sessionId),
+              },
+        );
+        setExpanded(true);
+      };
+      // The call already running comes back to the front without asking again.
+      if (
+        (running?.sessionId === sessionId && running.workspaceId === callWorkspaceId) ||
+        !beforeCallRef.current
+      ) {
+        start();
+        return;
+      }
+      void mayCall().then((allowed) => {
+        if (allowed) start();
+      });
     },
-    [workspaceId],
+    [mayCall, workspaceId],
   );
 
   const callFromOutside = useCallback(
     async (requested: string | null, requestedWorkspace?: string | null) => {
       if (!workspaceId) return;
+      // Before anything is made for the call (a fresh session included).
+      if (!(await mayCall())) return;
       // A workspace means nothing without the session it holds.
       const requestedWorkspaceId = (requested && requestedWorkspace) || null;
       const callWorkspaceId = requestedWorkspaceId ?? workspaceId;
@@ -264,7 +301,7 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
         );
       }
     },
-    [client, messages.couldNotStart, resolveOutsideCall, workspaceId],
+    [client, mayCall, messages.couldNotStart, resolveOutsideCall, workspaceId],
   );
 
   // An agent calling this phone: answering on the ring screen opens its chat's call.
@@ -288,14 +325,29 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
       setTarget((current) => (current?.answeredCallId === callId ? null : current));
     },
     onAnswered: (call, device) => {
-      setTarget({
-        workspaceId: call.workspaceId,
-        sessionId: call.sessionId,
-        systemTarget: call.sessionId,
-        answeredCallId: call.callId,
-        incomingDevice: device,
+      const answer = () => {
+        setTarget({
+          workspaceId: call.workspaceId,
+          sessionId: call.sessionId,
+          systemTarget: call.sessionId,
+          answeredCallId: call.callId,
+          incomingDevice: device,
+        });
+        setExpanded(true);
+      };
+      if (!beforeCallRef.current) {
+        answer();
+        return;
+      }
+      void mayCall().then((allowed) => {
+        if (allowed) {
+          answer();
+          return;
+        }
+        // Nothing goes to the agent: the answered system call ends here.
+        setTarget((current) => (current?.answeredCallId === call.callId ? null : current));
+        void callAdapter?.endCall(call.callId, "ended").catch(() => undefined);
       });
-      setExpanded(true);
     },
     onError: (error) =>
       onErrorRef.current(

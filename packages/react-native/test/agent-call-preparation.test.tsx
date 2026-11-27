@@ -82,13 +82,17 @@ const incoming: NativeIncomingCall = {
 function fixture(
   connectsBeforeAnswer?: boolean,
   serverPrepares = false,
-  extra: { resolveOutsideCall?(context: NativeOutsideCallContext): Promise<string> } = {},
+  extra: {
+    resolveOutsideCall?(context: NativeOutsideCallContext): Promise<string>;
+    beforeCall?(): Promise<boolean>;
+  } = {},
 ) {
   const listeners = new Set<(event: NativeCallEvent) => void>();
   let finishAnswer!: (value: unknown) => void;
   let catalogLoads = 0;
   const catalogWorkspaces: string[] = [];
   const systemTargets: (string | null)[] = [];
+  const ended: string[] = [];
   const client = {
     getWorkspaceRealtimeModelCatalog: async (workspaceId: string) => {
       catalogLoads++;
@@ -131,7 +135,9 @@ function fixture(
       systemTargets.push(target);
     },
     reportConnected() {},
-    endCall: async () => {},
+    endCall: async (callId) => {
+      ended.push(callId);
+    },
     setMuted: async () => {},
     setSpeaker: async () => {},
   };
@@ -170,6 +176,7 @@ function fixture(
     catalogLoads: () => catalogLoads,
     catalogWorkspaces,
     systemTargets,
+    ended,
     call: () => calls.callSession("s"),
   };
 }
@@ -286,6 +293,69 @@ describe("native call preparation lifecycle", () => {
     expect(contexts[0]).toMatchObject({ workspaceId: "w", requested: null });
     expect(contexts[0]?.requestedWorkspaceId).toBeNull();
     expect(f.systemTargets).toEqual([null]);
+    await rendered.unmount();
+  });
+});
+
+describe("the host's permission before a call", () => {
+  test("a call from a session waits for it, and starts nothing when it is refused", async () => {
+    log.length = 0;
+    instance = 0;
+    const answers = [false, true];
+    let asked = 0;
+    const f = fixture(undefined, false, {
+      beforeCall: async () => {
+        asked++;
+        return answers.shift() ?? true;
+      },
+    });
+    const rendered = await f.render();
+    await act(async () => f.call());
+    expect(asked).toBe(1);
+    expect(log).not.toContain("start");
+    expect(document.body.textContent).not.toContain("Call screen");
+    await act(async () => f.call());
+    expect(asked).toBe(2);
+    expect(log).toContain("start");
+    expect(document.body.textContent).toContain("Call screen");
+    // Bringing the running call back to the front asks nothing.
+    await act(async () => f.call());
+    expect(asked).toBe(2);
+    await rendered.unmount();
+  });
+
+  test("a call from outside the app is refused before any session is made for it", async () => {
+    log.length = 0;
+    instance = 0;
+    const contexts: NativeOutsideCallContext[] = [];
+    const f = fixture(undefined, false, {
+      beforeCall: async () => false,
+      resolveOutsideCall: async (context) => {
+        contexts.push(context);
+        return "fresh";
+      },
+    });
+    const rendered = await f.render();
+    await act(async () => f.emit({ type: "startRequested", target: null }));
+    expect(contexts).toHaveLength(0);
+    expect(f.systemTargets).toEqual([]);
+    expect(document.body.textContent).not.toContain("Call screen");
+    await rendered.unmount();
+  });
+
+  test("an answered agent call that is refused ends without starting voice", async () => {
+    log.length = 0;
+    instance = 0;
+    const f = fixture(undefined, false, { beforeCall: async () => false });
+    const rendered = await f.render();
+    await act(async () => f.emit({ type: "incoming", call: incoming }));
+    await act(async () =>
+      f.emit({ type: "incomingAnswered", call: { ...incoming, state: "answered" } }),
+    );
+    await act(async () => f.answer());
+    expect(log).not.toContain("start");
+    expect(f.ended).toEqual(["c"]);
+    expect(document.body.textContent).not.toContain("Call screen");
     await rendered.unmount();
   });
 });

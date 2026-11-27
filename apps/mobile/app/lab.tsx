@@ -18,6 +18,7 @@ import {
   type MachineMoveChat,
 } from "@opengeni/react/machine-request-model";
 import { buildTimeline } from "@opengeni/react/session";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import type {
   ChatClient,
   DraftTimelineAnnotation,
@@ -193,7 +194,11 @@ function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" 
   const scenario = scenarios.find((entry) => entry.id === scenarioId) ?? scenarios[0]!;
   // One in-memory client for the lab's cards; reopen the lab to start over.
   const [labClient] = useState(createLabClient);
-  const items = useMemo(() => buildTimeline(t, scenario.events), [t, scenario.events]);
+  const showPurchasePrompts = useShowPurchasePrompts();
+  const items = useMemo(
+    () => buildTimeline(t, scenario.events, { showPurchasePrompts }),
+    [t, scenario.events, showPurchasePrompts],
+  );
   const renderAuthNeeded = useNativeInChatConnect({
     client: labClient,
     workspaceId: "lab-workspace",

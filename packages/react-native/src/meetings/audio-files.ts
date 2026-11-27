@@ -26,8 +26,11 @@ const TYPE_ALIASES: Record<string, string> = {
 
 export class AudioImportError extends Error {
   constructor(
-    /** `unsupported`: not a kind of audio recordings take (such as MP3 or WAV). */
-    readonly reason: "unsupported" | "unreadable",
+    /**
+     * `unsupported`: not a kind of audio recordings take (such as MP3 or WAV).
+     * `declined`: the person chose not to go ahead (the host's `beforeCapture`).
+     */
+    readonly reason: "unsupported" | "unreadable" | "declined",
     message: string,
   ) {
     super(message);

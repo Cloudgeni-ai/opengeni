@@ -42,7 +42,7 @@ import { signInWebViews } from "@/artifact-web-session";
 import { copyText } from "@/clipboard";
 import { NativeMenu, type MenuAction } from "@/native-menu";
 import { AppThemeProvider } from "@/theme";
-import { openOnWeb, webUrl } from "@/web-links";
+import { hostedUrl, openOnWeb } from "@/web-links";
 
 const KINDS: readonly ArtifactCatalogKind[] = [
   "site",
@@ -436,7 +436,7 @@ function WebPageView({
     <View style={{ flex: 1 }}>
       {session === "ready" ? (
         <WebView
-          source={{ uri: webUrl(account.baseUrl, path) }}
+          source={{ uri: hostedUrl(account.baseUrl, path) }}
           sharedCookiesEnabled
           thirdPartyCookiesEnabled
           allowsInlineMediaPlayback

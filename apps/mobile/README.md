@@ -255,3 +255,29 @@ server needs `ai.opengeni.ios` in `OPENGENI_NATIVE_APP_IDS` alongside any
 existing app IDs, and APNs credentials for the distribution team (see
 Notifications). The server has one APNs credential set: don't replace it if
 that would break another iOS app served by the same deployment.
+
+## Privacy and account controls on iOS
+
+- **Hosted pages.** Every deployment page the iOS app opens itself (Settings
+  links, the organization row, Open on the web, chats and artifacts shown in a
+  web view) carries `client=ios`, so the hosted pages show their in-app
+  context without purchase prompts. It is added where the app opens the page
+  (`markHostedUrl` and `hostedUrl` in `src/web-links.ts`), never in `webUrl`,
+  which also builds the app's own API requests and the links people share.
+- **AI providers.** Before the first Send, call, dictation, recording or audio
+  import, the app reads `GET /v1/me/ai-processing-consent`. When it is
+  required, the server's disclosure (its title, text, providers and privacy
+  link) is shown, and nothing is sent until the person taps Allow; Not now
+  keeps the draft. A `403 ai_processing_consent_required` from any request
+  asks again, and a stale grant (`409`) shows the new text, never accepting it
+  for them. Settings › AI providers shows the choice and withdraws it. When the
+  state can't be read the app goes ahead: the server still refuses without
+  permission, and that refusal asks. The gate is `src/ai-consent-gate.ts`.
+- **Delete account.** Settings › Delete account shows what `GET
+  /v1/me/account-deletion` says closes and what the person leaves, any
+  organization only they own (with a link to its members on the web), and
+  asks for `DELETE` typed in full. On `202` the app forgets the account on
+  this device and says what happens next.
+
+Development builds have a lab with these screens and example data:
+`opengeni://lab-app-review`.

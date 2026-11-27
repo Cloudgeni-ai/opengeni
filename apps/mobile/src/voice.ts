@@ -4,8 +4,9 @@ import { transcribeExpoRecording, useExpoVoiceRecorder } from "@opengeni/react-n
 import { useNativeDictation, useNativeRecorderPlatform } from "@opengeni/react-native/recordings";
 import type { ClientVoiceInputConfig } from "@opengeni/sdk";
 import * as Haptics from "expo-haptics";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAccount } from "@/account";
+import { useAiConsent } from "@/ai-consent";
 
 type VoiceCapability = {
   workspaceId: string;
@@ -81,5 +82,24 @@ export function useComposerVoice(input: {
     scope,
     onFeedback,
   });
-  return durable ? dictation : oneShot;
+  const chosen = durable ? dictation : oneShot;
+  // What's said goes to the AI providers to be transcribed, so recording (and
+  // transcribing a kept recording again) waits for the person's permission.
+  const consent = useAiConsent();
+  return useMemo(
+    () => ({
+      ...chosen,
+      start: () => {
+        void consent.ensure().then((allowed) => {
+          if (allowed) chosen.start();
+        });
+      },
+      retry: () => {
+        void consent.ensure().then((allowed) => {
+          if (allowed) chosen.retry();
+        });
+      },
+    }),
+    [chosen, consent],
+  );
 }
