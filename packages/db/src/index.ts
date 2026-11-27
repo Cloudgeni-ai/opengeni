@@ -66509,7 +66509,11 @@ async function verifyWorkspaceMutationSettlementForAuthority(
                 )))
             ) {
               const [wakeTarget] = await tx
-                .select({ workflowId: schema.sessions.temporalWorkflowId })
+                .select({
+                  workflowId: schema.sessions.temporalWorkflowId,
+                  contentArchiveState: schema.sessions.contentArchiveState,
+                  importedArchiveImportId: schema.sessions.importedArchiveImportId,
+                })
                 .from(schema.sessions)
                 .where(
                   and(
@@ -66518,13 +66522,21 @@ async function verifyWorkspaceMutationSettlementForAuthority(
                   ),
                 )
                 .limit(1);
-              await enqueueSessionWorkflowWakeInTransaction(tx, {
-                accountId: authorityInput.accountId,
-                workspaceId: authorityInput.workspaceId,
-                sessionId: authorityInput.sessionId,
-                temporalWorkflowId: wakeTarget?.workflowId ?? `session-${authorityInput.sessionId}`,
-                reason: "workspace_mutation_settled_quiescence",
-              });
+              // A read-only (archived or imported) chat refuses wakes; the
+              // settlement itself must still commit.
+              if (
+                wakeTarget?.contentArchiveState == null &&
+                wakeTarget?.importedArchiveImportId == null
+              ) {
+                await enqueueSessionWorkflowWakeInTransaction(tx, {
+                  accountId: authorityInput.accountId,
+                  workspaceId: authorityInput.workspaceId,
+                  sessionId: authorityInput.sessionId,
+                  temporalWorkflowId:
+                    wakeTarget?.workflowId ?? `session-${authorityInput.sessionId}`,
+                  reason: "workspace_mutation_settled_quiescence",
+                });
+              }
             }
           }
           if (outcome === "rejected") return { failure: null };

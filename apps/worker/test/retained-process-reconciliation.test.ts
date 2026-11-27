@@ -3393,16 +3393,14 @@ describe("retained-process terminal-owner reconciliation", () => {
     return row ?? null;
   }
 
-  for (const [status, outcome] of [
-    ["cancelled", "cancelled"],
-    ["idle", "cancelled"],
-    ["idle", "interrupted_recoverable"],
-  ] as const) {
-    test(`the reaper settles a background command of an archived ${status} chat (owner ${outcome})`, async () => {
+  // A cancelled chat already settled without agent input before this fix; an
+  // archived chat in any other status reached the refused writes.
+  for (const outcome of ["cancelled", "interrupted_recoverable"] as const) {
+    test(`the reaper settles a background command of an archived idle chat (owner ${outcome})`, async () => {
       if (!available) return;
       const fixture = await promoteTurnProcess({ outcome, backgroundCommand: "sleep 3600" });
       const wakeBefore = await wakeOutbox(fixture);
-      await archiveSession(fixture, status);
+      await archiveSession(fixture, "idle");
       await runReaper(async () => ({
         status: "proved",
         proof: { outcome: "exited", exitCode: 0, reason: "provider_exit_banner" },
@@ -3431,6 +3429,46 @@ describe("retained-process terminal-owner reconciliation", () => {
       expect(finished?.count).toBe(1);
     }, 60_000);
   }
+
+  test("a late request settlement for an archived chat whose turn awaits quiescence commits without a wake", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshTurn(ids);
+    const { instanceId } = await insertWarmLease(ids, {
+      sessionId: attempt.sessionId,
+      holderId: attempt.holderId,
+      holderKind: "turn",
+    });
+    const scope = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      executionGeneration: attempt.executionGeneration,
+      attemptId: attempt.attemptId,
+      holderId: attempt.holderId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 7,
+      expectedInstanceId: instanceId,
+    };
+    const operation = `archivedLateSettlement-${crypto.randomUUID()}`;
+    const admission = await advanceWorkspaceGeneration(db, { ...scope, operation });
+    await closeTurnOwner(ids, attempt, "interrupted_recoverable");
+    const fixture = { ...ids, sessionId: attempt.sessionId } as ProcessFixture;
+    const wakeBefore = await wakeOutbox(fixture);
+    await archiveSession(fixture, "idle");
+    await verifyWorkspaceMutationSettlement(db, {
+      ...scope,
+      admission,
+      operation,
+      outcome: "rejected",
+    });
+    const [row] = await admin<{ outcome: string | null; settled: boolean }[]>`
+      select provider_outcome as outcome, settled_at is not null as settled
+      from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
+    expect(row).toEqual({ outcome: "rejected", settled: true });
+    expect(await wakeOutbox(fixture)).toEqual(wakeBefore);
+  }, 60_000);
 
   test("copied identity, claim, and admission fences reject; durable proof safely removes a superseded holder", async () => {
     if (!available) return;
