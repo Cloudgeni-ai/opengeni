@@ -32,12 +32,15 @@ function CallLabBody({ params }: { params: Params }) {
   const theme = useNativeTimelineTheme();
   const [muted, setMuted] = useState(params.muted === "1");
   const [speaker, setSpeaker] = useState(params.speaker !== "0");
+  // A call that went live 83 seconds before the lab opened, so the screen shows a running time.
+  const [connectedAt] = useState(() => Date.now() - 83_000);
   const call: NativeRealtimeCall = {
     phase: params.phase ?? "active",
     muted,
     speaker,
     route: speaker ? "speaker" : "receiver",
     error: params.error ?? null,
+    connectedAt,
     systemCall: true,
     canStart: false,
     start: async () => undefined,
