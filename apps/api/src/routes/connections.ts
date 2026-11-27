@@ -190,7 +190,7 @@ import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations
 import { withAccountIdentityState } from "../integrations/oauth-account-identity";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
-import { prepareGoogleOAuthDisconnect } from "../integrations/google-oauth-revocation";
+import { prepareOAuthGrantDisconnect } from "../integrations/oauth-grant-revocation";
 import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
@@ -1418,12 +1418,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Each writer records the disconnect in its own transaction.
     const audit = disconnectAuditActor(c, { subjectId: grant.subjectId, grant });
-    // Google OAuth: drop the stored tokens in the revoke write, then end the
-    // grant at Google once that write committed.
-    const googleDisconnect =
+    // A provider that revokes on disconnect (Google): drop the stored tokens
+    // in the revoke write, then end the grant there once that write committed,
+    // unless another live connection anywhere may hold the same grant.
+    const grantDisconnect =
       isPersonalGitHub || isOpenGeniSlackBotConnection(existing) || workspaceProviderKind
         ? undefined
-        : await prepareGoogleOAuthDisconnect(deps, existing, grant.subjectId);
+        : await prepareOAuthGrantDisconnect(deps, existing);
     const connection = isPersonalGitHub
       ? await disconnectPersonalGitHub(deps, {
           workspaceId,
@@ -1461,7 +1462,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               existing.version,
               {
                 audit,
-                replacementCredentialEncrypted: googleDisconnect?.replacementCredentialEncrypted,
+                replacementCredentialEncrypted: grantDisconnect?.replacementCredentialEncrypted,
               },
             );
     if (!connection) {
@@ -1469,7 +1470,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // A Nango connection is deleted in Nango too, so its billing stops.
     await deleteNangoConnectionFor({ db, settings }, existing);
-    await googleDisconnect?.revokeAtGoogle?.();
+    await grantDisconnect?.revokeAtProvider?.();
     return c.json(ConnectionResponse.parse({ connection }));
   });
 

@@ -1497,6 +1497,8 @@ export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
 export * from "./nango-integrations";
+export * from "./oauth-grant-siblings";
+import { oauthGrantReauthSiblings } from "./oauth-grant-siblings";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -103048,6 +103050,7 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
     setStatus: setConnectionStatus,
     recordUsed: recordConnectionUsed,
     refresh: refreshOAuthConnectionCredentialCore,
+    findGrantReauthSiblings: oauthGrantReauthSiblings,
     encrypt: encryptEnvironmentValue,
     keyBytes: environmentsEncryptionKeyBytes,
     now: () => new Date(),
@@ -103084,6 +103087,7 @@ export {
   isPrivateAddress,
   normalizeBearerScheme,
   refreshOAuthConnectionCredential,
+  SHARED_GRANT_REFUSED_ERROR,
   type ConnectionBrokerDeps,
   type ConnectionCredentialForBroker,
   type ConnectionCredentialLookupInput,
