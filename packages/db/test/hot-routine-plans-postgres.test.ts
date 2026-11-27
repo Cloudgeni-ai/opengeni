@@ -290,10 +290,13 @@ test("the editable artifact schema resolver keeps every check and plans one rela
 
 // The wake repair inventories run every few seconds. Their cost was planning:
 // each call on a connection's first five planned the statement again.
+// They must also find every tenant's sessions under the owner posture
+// docs/deployment.md describes (NOBYPASSRLS, FORCE RLS) and under one that
+// bypasses row security (production's), with the same answer.
 test("the wake repair inventories find the same sessions and plan once per connection", async () => {
-  // Production's inventory owner reads every tenant's rows (both inventories
-  // return rows there). A NOSUPERUSER test owner needs BYPASSRLS for that.
-  await shared.admin.unsafe(`alter role "${shared.ownerRole}" bypassrls`);
+  const [owner] = await shared.admin<{ bypass: boolean }[]>`
+    select rolbypassrls as bypass from pg_roles where rolname = ${shared.ownerRole}`;
+  expect(owner?.bypass).toBe(false);
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "hot-routine-plans",
@@ -431,26 +434,68 @@ test("the wake repair inventories find the same sessions and plan once per conne
     ["list_pending_child_terminal_wake_repairs_v1", parent.id],
     ["list_quiescence_receipt_wake_repairs_v1", stranded.id],
   ] as const;
-  const steady: Record<string, number> = {};
-  for (const [inventory, sessionId] of inventories) {
-    const list = async (after: string | null) => [
-      ...(await app<{ account_id: string; workspace_id: string; session_id: string }[]>`
-        select account_id::text, workspace_id::text, session_id::text
-        from ${app.unsafe(`opengeni_private.${inventory}`)}(100, ${after && workspaceId}::uuid,
-          ${after}::uuid)`),
-    ];
-    expect(await list(null)).toEqual([
-      { account_id: grant.accountId, workspace_id: workspaceId, session_id: sessionId },
-    ]);
-    // The keyset cursor still pages past it.
-    expect(await list(sessionId)).toEqual([]);
-
-    steady[inventory] = await steadyCallBuffers(
-      `select count(*) from opengeni_private.${inventory}(100, null, null)`,
-    );
+  const list = async (inventory: string, after: string | null) => [
+    ...(await app<{ account_id: string; workspace_id: string; session_id: string }[]>`
+      select account_id::text, workspace_id::text, session_id::text
+      from ${app.unsafe(`opengeni_private.${inventory}`)}(100, ${after && workspaceId}::uuid,
+        ${after}::uuid)`),
+  ];
+  const claims = async () =>
+    (
+      await shared.admin`select count(*)::int as count from opengeni_private.maintenance_claim_capabilities`
+    )[0]!.count;
+  // The owner outside these routines holds no claim, so the new select
+  // policies admit nothing: it still sees none of the rows they read.
+  const ownerSql = postgres(shared.ownerUrl, {
+    max: 1,
+    onnotice: () => undefined,
+    connection: {
+      search_path: shared.schema,
+      application_name: "opengeni-lossless-v1-session-variable-sets-v1",
+    },
+  });
+  try {
+    for (const table of [
+      "session_system_updates",
+      "session_system_update_outbox",
+      "session_goals",
+      "session_turns",
+      "session_events",
+      "sessions",
+    ]) {
+      const [visible] = await ownerSql<{ count: number }[]>`
+        select count(*)::int as count from ${ownerSql(table)}`;
+      expect({ table, count: visible!.count }).toEqual({ table, count: 0 });
+    }
+  } finally {
+    await ownerSql.end();
   }
-  // Planning the statement again reads catalog pages on every call: locally
-  // 39 and 99 buffers before, 5 and 8 with one reused plan.
+  let steady: Record<string, number> = {};
+  try {
+    for (const posture of ["nobypassrls", "bypassrls"] as const) {
+      await shared.admin.unsafe(`alter role "${shared.ownerRole}" ${posture}`);
+      steady = {};
+      for (const [inventory, sessionId] of inventories) {
+        // Before 1672-1677 an owner without BYPASSRLS saw no row: both returned [].
+        expect(await list(inventory, null)).toEqual([
+          { account_id: grant.accountId, workspace_id: workspaceId, session_id: sessionId },
+        ]);
+        // The keyset cursor still pages past it.
+        expect(await list(inventory, sessionId)).toEqual([]);
+        // The call's maintenance claim does not outlive it.
+        expect(await claims()).toBe(0);
+        steady[inventory] = await steadyCallBuffers(
+          `select count(*) from opengeni_private.${inventory}(100, null, null)`,
+        );
+      }
+    }
+  } finally {
+    await shared.admin.unsafe(`alter role "${shared.ownerRole}" nobypassrls`);
+  }
+  // Under production's owner (the last posture), planning the statement again
+  // read catalog pages on every call: locally 39 and 99 buffers before, 5 and
+  // 8 with one reused plan, 9 and 12 with the call's claim row. Under an owner
+  // without BYPASSRLS the tables' existing row policies add their own reads.
   expect(steady).toEqual({
     list_pending_child_terminal_wake_repairs_v1: expect.any(Number),
     list_quiescence_receipt_wake_repairs_v1: expect.any(Number),
