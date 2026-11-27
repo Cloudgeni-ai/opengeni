@@ -15,13 +15,22 @@
 --   claim_slack_interaction_inbox         'slack_inbox' (1691)
 -- and list_legacy_modal_checkpoint_slots opens the Modal inventory read
 -- capability its sibling list_live_modal_sandbox_leases already opens, which
--- sandbox_leases' modal_inventory_owner_read policy admits for the owner.
--- The new policies apply to the owner role alone and are InitPlans, evaluated
--- once per statement; an owner that bypasses row security never evaluates
--- them, so production's results and plans are unchanged. The capability row
--- is written after the argument checks and deleted before the routine
--- returns its rows; an error rolls it back with the (sub)transaction that
--- inserted it, so no exception block (and no subtransaction) is needed.
+-- sandbox_leases' existing modal_inventory_owner_read policy admits for the
+-- owner (that older policy is evaluated per row, not as an InitPlan).
+-- The new policies apply to the owner role alone and are InitPlans,
+-- evaluated once per statement.
+--
+-- A routine opens its capability only when row security applies to its
+-- owner on a table it reads or writes (row_security_active, a catalog
+-- check that writes nothing). Every such table is FORCE ROW LEVEL SECURITY
+-- and owned by the routine's owner, so the check is true under an owner
+-- without BYPASSRLS and false under one that bypasses row security
+-- (production's). Production therefore writes no capability row and assigns
+-- no transaction id that it did not before: an empty poll stays read-only,
+-- and results and plans are unchanged. When opened, the capability row is
+-- written after the argument checks and deleted before the routine returns
+-- its rows; an error rolls it back with the (sub)transaction that inserted
+-- it, so no exception block (and no subtransaction) is needed.
 --
 -- The two browser state claimers become PL/pgSQL to write and remove the
 -- claim around the same query; each query is otherwise unchanged.
@@ -47,9 +56,13 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_browser_state_artifact_cleanup
     AS $body$
     #variable_conflict use_column
     DECLARE capability_id uuid := gen_random_uuid();
+      claim_needed constant boolean :=
+        row_security_active('%1$I.browser_state_artifacts'::regclass);
     BEGIN
-      INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
-        (capability_id, pg_backend_pid(), pg_current_xact_id(), 'browser_artifact_cleanup');
+      IF claim_needed THEN
+        INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
+          (capability_id, pg_backend_pid(), pg_current_xact_id(), 'browser_artifact_cleanup');
+      END IF;
       RETURN QUERY
       WITH candidates AS (
         SELECT A.id, gen_random_uuid() AS claim_id
@@ -81,7 +94,10 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_browser_state_artifact_cleanup
       )
       SELECT C.claim_id, C.id, C.account_id, C.workspace_id, C.object_key
       FROM claimed C;
-      DELETE FROM opengeni_private.maintenance_claim_capabilities claim WHERE claim.id = capability_id;
+      IF claim_needed THEN
+        DELETE FROM opengeni_private.maintenance_claim_capabilities claim
+        WHERE claim.id = capability_id;
+      END IF;
     END $body$;
       $create$, data_schema);
 
@@ -92,9 +108,16 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_browser_state_upload_cleanup(p
     AS $body$
     #variable_conflict use_column
     DECLARE capability_id uuid := gen_random_uuid();
+      claim_needed constant boolean :=
+        row_security_active('%1$I.browser_state_uploads'::regclass)
+        OR row_security_active('%1$I.interaction_operations'::regclass)
+        OR row_security_active('%1$I.browser_sessions'::regclass)
+        OR row_security_active('%1$I.workspace_interaction_revisions'::regclass);
     BEGIN
-      INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
-        (capability_id, pg_backend_pid(), pg_current_xact_id(), 'browser_upload_cleanup');
+      IF claim_needed THEN
+        INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
+          (capability_id, pg_backend_pid(), pg_current_xact_id(), 'browser_upload_cleanup');
+      END IF;
       RETURN QUERY
       WITH due AS MATERIALIZED (
         SELECT U.id, U.workspace_id, U.operation_id
@@ -195,7 +218,10 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_browser_state_upload_cleanup(p
       )
       SELECT C.claim_id, C.id, C.account_id, C.workspace_id, C.object_key
       FROM claimed C;
-      DELETE FROM opengeni_private.maintenance_claim_capabilities claim WHERE claim.id = capability_id;
+      IF claim_needed THEN
+        DELETE FROM opengeni_private.maintenance_claim_capabilities claim
+        WHERE claim.id = capability_id;
+      END IF;
     END $body$;
       $create$, data_schema);
 
@@ -205,12 +231,18 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_memory_slack_publication(p_hol
     SET search_path TO 'pg_catalog'
     AS $body$
     DECLARE capability_id uuid := gen_random_uuid();
+      claim_needed constant boolean :=
+        row_security_active('%1$I.memory_slack_publications'::regclass)
+        OR row_security_active('%1$I.memory_slack_publication_receipts'::regclass)
+        OR row_security_active('%1$I.sessions'::regclass);
     BEGIN
       IF p_lease_ms < 1000 OR p_lease_ms > 300000 THEN
         RAISE EXCEPTION 'invalid memory Slack publication claim lease';
       END IF;
-      INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
-        (capability_id, pg_backend_pid(), pg_current_xact_id(), 'memory_slack_delivery');
+      IF claim_needed THEN
+        INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
+          (capability_id, pg_backend_pid(), pg_current_xact_id(), 'memory_slack_delivery');
+      END IF;
       RETURN QUERY
       WITH candidate AS (
         SELECT P.id
@@ -258,7 +290,10 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_memory_slack_publication(p_hol
       SELECT C.*
       FROM claimed C
       JOIN receipt R ON R.publication_id = C.id;
-      DELETE FROM opengeni_private.maintenance_claim_capabilities claim WHERE claim.id = capability_id;
+      IF claim_needed THEN
+        DELETE FROM opengeni_private.maintenance_claim_capabilities claim
+        WHERE claim.id = capability_id;
+      END IF;
     END
     $body$;
       $create$, data_schema);
@@ -269,12 +304,16 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_slack_app_home_refresh(p_holde
     SET search_path TO 'pg_catalog'
     AS $body$
     DECLARE capability_id uuid := gen_random_uuid();
+      claim_needed constant boolean :=
+        row_security_active('%1$I.slack_app_home_refreshes'::regclass);
     BEGIN
       IF p_lease_ms < 1000 OR p_lease_ms > 300000 THEN
         RAISE EXCEPTION 'invalid Slack App Home claim lease';
       END IF;
-      INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
-        (capability_id, pg_backend_pid(), pg_current_xact_id(), 'slack_app_home');
+      IF claim_needed THEN
+        INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
+          (capability_id, pg_backend_pid(), pg_current_xact_id(), 'slack_app_home');
+      END IF;
       RETURN QUERY
       WITH candidate AS (
         SELECT refresh.id
@@ -295,7 +334,10 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_slack_app_home_refresh(p_holde
       FROM candidate
       WHERE refresh.id = candidate.id
       RETURNING refresh.*;
-      DELETE FROM opengeni_private.maintenance_claim_capabilities claim WHERE claim.id = capability_id;
+      IF claim_needed THEN
+        DELETE FROM opengeni_private.maintenance_claim_capabilities claim
+        WHERE claim.id = capability_id;
+      END IF;
     END
     $body$;
       $create$, data_schema);
@@ -306,12 +348,16 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_slack_interaction_inbox(p_hold
     SET search_path TO 'pg_catalog'
     AS $body$
     DECLARE capability_id uuid := gen_random_uuid();
+      claim_needed constant boolean :=
+        row_security_active('%1$I.slack_interaction_inbox'::regclass);
     BEGIN
       IF p_lease_ms < 1000 OR p_lease_ms > 300000 THEN
         RAISE EXCEPTION 'invalid Slack inbox claim lease';
       END IF;
-      INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
-        (capability_id, pg_backend_pid(), pg_current_xact_id(), 'slack_inbox');
+      IF claim_needed THEN
+        INSERT INTO opengeni_private.maintenance_claim_capabilities VALUES
+          (capability_id, pg_backend_pid(), pg_current_xact_id(), 'slack_inbox');
+      END IF;
       RETURN QUERY
       WITH candidate AS (
         SELECT I.id
@@ -337,7 +383,10 @@ CREATE OR REPLACE FUNCTION opengeni_private.claim_slack_interaction_inbox(p_hold
       FROM candidate C
       WHERE I.id = C.id
       RETURNING I.*;
-      DELETE FROM opengeni_private.maintenance_claim_capabilities claim WHERE claim.id = capability_id;
+      IF claim_needed THEN
+        DELETE FROM opengeni_private.maintenance_claim_capabilities claim
+        WHERE claim.id = capability_id;
+      END IF;
     END
     $body$;
       $create$, data_schema);
@@ -347,17 +396,19 @@ CREATE OR REPLACE FUNCTION opengeni_private.list_legacy_modal_checkpoint_slots(p
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog'
     AS $body$
-    DECLARE opened integer;
+    DECLARE opened integer := 0;
     BEGIN
       IF p_limit IS NULL OR p_limit < 1 OR p_limit > 500 THEN
         RAISE EXCEPTION 'legacy checkpoint slot limit must be between 1 and 500'
           USING ERRCODE = '22023';
       END IF;
-      INSERT INTO opengeni_private.modal_inventory_read_capabilities (
-        backend_pid, transaction_id, data_schema
-      ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), %1$L)
-      ON CONFLICT DO NOTHING;
-      GET DIAGNOSTICS opened = ROW_COUNT;
+      IF row_security_active('%1$I.sandbox_leases'::regclass) THEN
+        INSERT INTO opengeni_private.modal_inventory_read_capabilities (
+          backend_pid, transaction_id, data_schema
+        ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), %1$L)
+        ON CONFLICT DO NOTHING;
+        GET DIAGNOSTICS opened = ROW_COUNT;
+      END IF;
 
       RETURN QUERY
         SELECT lease.account_id, lease.workspace_id, lease.sandbox_group_id, lease.id,

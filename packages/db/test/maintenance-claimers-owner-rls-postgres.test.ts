@@ -68,6 +68,28 @@ const POLICIES = [
   ["slack_interaction_inbox", "maintenance_slack_inbox_update"],
 ] as const;
 const TABLES = [...new Set([...POLICIES.map(([table]) => table), "sandbox_leases"])];
+// The wake repair inventories (1677) guard their 'wakes' claim the same way (1693).
+const WAKE_TABLES = [
+  "session_system_updates",
+  "session_system_update_outbox",
+  "session_workflow_wake_outbox",
+  "session_goals",
+  "session_turns",
+  "session_turn_attempts",
+  "session_attempt_interruptions",
+  "session_events",
+  "workspace_inference_controls",
+];
+const ROUTINES = [
+  "claim_browser_state_artifact_cleanup",
+  "claim_browser_state_upload_cleanup",
+  "claim_memory_slack_publication",
+  "claim_slack_app_home_refresh",
+  "claim_slack_interaction_inbox",
+  "list_legacy_modal_checkpoint_slots",
+  "list_pending_child_terminal_wake_repairs_v1",
+  "list_quiescence_receipt_wake_repairs_v1",
+];
 
 beforeAll(async () => {
   const acquired = await acquireRestrictedRuntimeTestDatabase(
@@ -375,6 +397,51 @@ async function fixtures() {
 
 const holder = crypto.randomUUID();
 
+/** Every guarded routine's empty call, as SQL the runtime role runs. */
+const EMPTY_CALLS = [
+  "select * from opengeni_private.claim_browser_state_artifact_cleanup(60000, 0)",
+  "select * from opengeni_private.claim_browser_state_upload_cleanup(60000, 0)",
+  `select * from opengeni_private.claim_memory_slack_publication('${holder}'::uuid, 60000)`,
+  `select * from opengeni_private.claim_slack_app_home_refresh('${holder}'::uuid, 60000)`,
+  `select * from opengeni_private.claim_slack_interaction_inbox('${holder}'::uuid, 60000)`,
+  "select * from opengeni_private.list_legacy_modal_checkpoint_slots(100)",
+  "select * from opengeni_private.list_pending_child_terminal_wake_repairs_v1(100, null, null)",
+  "select * from opengeni_private.list_quiescence_receipt_wake_repairs_v1(100, null, null)",
+];
+
+/** Which empty calls left their transaction with a transaction id. */
+async function xidAssigned() {
+  const assigned: Record<string, boolean> = {};
+  for (const call of EMPTY_CALLS) {
+    assigned[call] = await rolledBack(async (tx) => {
+      const before = await tx`select pg_current_xact_id_if_assigned() is not null as assigned`;
+      expect(before[0]!.assigned).toBe(false);
+      expect(await tx.unsafe(call)).toHaveLength(0);
+      const [after] = await tx<{ assigned: boolean }[]>`
+        select pg_current_xact_id_if_assigned() is not null as assigned`;
+      return after!.assigned;
+    });
+  }
+  return assigned;
+}
+
+// Runs before any fixture exists, so every call finds nothing to claim.
+test("an empty call writes nothing under an owner that bypasses row security", async () => {
+  const results: Record<string, Record<string, boolean>> = {};
+  try {
+    for (const posture of ["bypassrls", "nobypassrls"] as const) {
+      await shared.admin.unsafe(`alter role "${shared.ownerRole}" ${posture}`);
+      results[posture] = await xidAssigned();
+    }
+  } finally {
+    await shared.admin.unsafe(`alter role "${shared.ownerRole}" nobypassrls`);
+  }
+  // Production's owner: the claim is skipped, so a poll stays read-only.
+  expect(results.bypassrls).toEqual(Object.fromEntries(EMPTY_CALLS.map((call) => [call, false])));
+  // Without BYPASSRLS the claim is written (and removed) as before.
+  expect(results.nobypassrls).toEqual(Object.fromEntries(EMPTY_CALLS.map((call) => [call, true])));
+}, 60_000);
+
 /** Each routine's answer and effects, from one rolled-back runtime transaction each. */
 async function claimAll() {
   const scope = await fixtures();
@@ -629,14 +696,17 @@ test("the claim policies bind only the owner and the migrations replay without c
       ...(await shared.admin<{ name: string; owner: string; body: string }[]>`
         select proname as name, pg_get_userbyid(proowner) as owner, prosrc as body
         from pg_proc where pronamespace = 'opengeni_private'::regnamespace
-          and proname = any(${[
-            "claim_browser_state_artifact_cleanup",
-            "claim_browser_state_upload_cleanup",
-            "claim_memory_slack_publication",
-            "claim_slack_app_home_refresh",
-            "claim_slack_interaction_inbox",
-            "list_legacy_modal_checkpoint_slots",
-          ]})
+          and proname = any(${ROUTINES})
+        order by 1`),
+    ],
+    // row_security_active is true for the owner exactly when it lacks
+    // BYPASSRLS only if every table it checks is forced and owner-owned.
+    tables: [
+      ...(await shared.admin<{ table: string; forced: boolean; owner: string }[]>`
+        select relname as table, relforcerowsecurity as forced,
+          pg_get_userbyid(relowner) as owner
+        from pg_class where relnamespace = ${shared.schema}::regnamespace
+          and relname = any(${[...TABLES, ...WAKE_TABLES]})
         order by 1`),
     ],
   });
@@ -657,8 +727,12 @@ test("the claim policies bind only the owner and the migrations replay without c
   for (const operation of ["wakes", "titles", "schedule_cleanup"]) {
     expect(before.check).toContain(`'${operation}'::text`);
   }
-  expect(before.routines).toHaveLength(6);
+  expect(before.routines).toHaveLength(8);
   for (const routine of before.routines) expect(routine.owner).toBe(shared.ownerRole);
+  expect(before.tables).toHaveLength(TABLES.length + WAKE_TABLES.length);
+  for (const table of before.tables) {
+    expect(table).toEqual({ table: table.table, forced: true, owner: shared.ownerRole });
+  }
   // The runtime role cannot open a claim itself.
   const [runtime] = await shared.admin<{ insert: boolean }[]>`
     select has_table_privilege('opengeni_app',
@@ -667,9 +741,9 @@ test("the claim policies bind only the owner and the migrations replay without c
 
   const directory = new URL("../drizzle/", import.meta.url);
   const files = (await readdir(directory))
-    .filter((name) => /^(168[1-9]|169[0-2])_.*\.sql$/.test(name))
+    .filter((name) => /^(168[1-9]|169[0-3])_.*\.sql$/.test(name))
     .sort();
-  expect(files).toHaveLength(12);
+  expect(files).toHaveLength(13);
   const owner = postgres(shared.ownerUrl, {
     max: 1,
     onnotice: () => undefined,
@@ -684,4 +758,46 @@ test("the claim policies bind only the owner and the migrations replay without c
     await owner.end();
   }
   expect(await catalog()).toEqual(before);
+}, 60_000);
+
+test("a held claim admits only the transaction that opened it", async () => {
+  await fixtures();
+  const connect = () =>
+    postgres(shared.ownerUrl, {
+      max: 1,
+      onnotice: () => undefined,
+      connection: {
+        search_path: shared.schema,
+        application_name: "opengeni-lossless-v1-session-variable-sets-v1",
+      },
+    });
+  const owner = connect();
+  const other = connect();
+  const visible = async (sql: postgres.Sql | postgres.TransactionSql) =>
+    (
+      await sql<{ count: number }[]>`select count(*)::int as count from slack_app_home_refreshes`
+    )[0]!.count;
+  try {
+    let held = 0;
+    let elsewhere = -1;
+    await owner.begin(async (tx) => {
+      await tx`
+        insert into opengeni_private.maintenance_claim_capabilities
+        values (gen_random_uuid(), pg_backend_pid(), pg_current_xact_id(), 'slack_app_home')`;
+      held = await visible(tx);
+      // Another session of the same owner, while the claim is held.
+      elsewhere = await visible(other);
+    });
+    expect(held).toBeGreaterThan(0);
+    expect(elsewhere).toBe(0);
+    // The committed row outlives its transaction but admits no later one,
+    // even on the same connection (same backend pid).
+    expect(await owner.begin((tx) => visible(tx))).toBe(0);
+    expect(await visible(other)).toBe(0);
+  } finally {
+    await owner.end();
+    await other.end();
+    await shared.admin`
+      delete from opengeni_private.maintenance_claim_capabilities where operation = 'slack_app_home'`;
+  }
 }, 60_000);

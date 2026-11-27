@@ -6,6 +6,13 @@
 -- select policy lets the routine's owner see it without BYPASSRLS, the
 -- posture in docs/deployment.md. It applies to that owner role alone, so the
 -- runtime role never evaluates it.
+-- sessions' own restrictive policies still apply on top of this permissive
+-- one, and the pump passes them: session_visibility_isolation admits every
+-- session while opengeni.subject_id is unset (the pump sets none),
+-- sessions_variable_set_attachments_protocol_v1 requires the runtime's
+-- protocol marker in application_name (the pump's connection carries it),
+-- and site_viewer_isolation hides only site-access sessions, which publish
+-- no Memory.
 -- Each is an InitPlan, evaluated once per statement, never per row, and
 -- admits only a transaction holding the claim, which only that SECURITY
 -- DEFINER routine opens and removes before it returns. An owner that bypasses
