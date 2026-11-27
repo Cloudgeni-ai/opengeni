@@ -219,7 +219,9 @@ test("the lost-provider session lookup probes open request owners by id", async 
       try {
         const rows = await tx.execute(sql.raw(execute));
         // Both owner kinds, in lock order.
-        expect(rows.map((row: { session_id?: unknown }) => row.session_id)).toEqual([turnOwner.id, processOwner.id].sort());
+        expect(rows.map((row: { session_id?: unknown }) => row.session_id)).toEqual(
+          [turnOwner.id, processOwner.id].sort(),
+        );
         const [explained] = await tx.execute(
           sql.raw(`explain (analyze, buffers, format json) ${execute}`),
         );
