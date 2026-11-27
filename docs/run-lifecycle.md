@@ -1707,6 +1707,11 @@ the session locks and registers one ordinary queue wake. It writes no receipt:
 the woken workflow still proves through Temporal that the exact activity is
 gone and rechecks both writer gates before `reconcileSessionAttemptQuiescence`
 commits. A paused session then parks idle for Resume as usual.
+This inventory and the child-result one
+(`list_pending_child_terminal_wake_repairs_v1`) read every tenant's sessions,
+so each call opens the wake dispatcher's `wakes` maintenance claim for its own
+transaction (migrations 1672-1677). Under an owner without `BYPASSRLS` (the
+posture in `docs/deployment.md`), they previously saw no rows and repaired nothing.
 Migration 0764 extends that same inventory to quiesced recovering logical turns,
 regardless of a stale idle/queued session projection. Its scoped repair uses
 `peekSessionWork` before waking a quiesced turn, preserving Pause, admission,
