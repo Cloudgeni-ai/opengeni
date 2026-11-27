@@ -6,6 +6,7 @@ import { registerDom, renderComponent } from "../../react/test/render-hook";
 
 registerDom();
 
+const platform = { OS: "ios" };
 const host = (props: { children?: ReactNode }) => createElement("div", null, props.children);
 mock.module("react-native", () => ({
   View: host,
@@ -16,11 +17,12 @@ mock.module("react-native", () => ({
       { "aria-label": props.accessibilityLabel, onClick: props.onPress },
       typeof props.children === "function" ? null : (props.children as ReactNode),
     ),
+  // Like React Native's Modal, a hidden one renders nothing: the call screen unmounts.
   Modal: (props: { visible: boolean; children?: ReactNode }) =>
     props.visible ? host(props) : null,
   Alert: { alert() {} },
   StyleSheet: { create: (value: unknown) => value, absoluteFill: {} },
-  Platform: { OS: "ios" },
+  Platform: platform,
   useWindowDimensions: () => ({ width: 400, height: 800 }),
   Keyboard: { dismiss() {} },
   Animated: {
@@ -98,52 +100,57 @@ const press = async (label: string) => {
 describe("call duration", () => {
   afterEach(() => setSystemTime());
 
-  test("minimizing and expanding a call keeps the time running from the call's start", async () => {
-    let calls!: ReturnType<typeof useNativeAgentCall>;
-    function Child() {
-      calls = useNativeAgentCall();
-      return null;
-    }
-    at(0);
-    const rendered = await renderComponent(
-      createElement(
-        NativeAgentCallProvider,
-        {
-          client,
-          workspaceId: "w",
-          codexConnected: true,
-          callAdapter: adapter,
-          webrtc: {
-            createPeerConnection: () => {
-              throw Error("mocked");
-            },
-            getUserMedia: async () => {
-              throw Error("mocked");
+  // iOS draws the call in a window layer, Android in a Modal; both unmount it when minimized.
+  test.each(["ios", "android"])(
+    "on %s, minimizing and expanding a call keeps the time running from the call's start",
+    async (os) => {
+      platform.OS = os;
+      let calls!: ReturnType<typeof useNativeAgentCall>;
+      function Child() {
+        calls = useNativeAgentCall();
+        return null;
+      }
+      at(0);
+      const rendered = await renderComponent(
+        createElement(
+          NativeAgentCallProvider,
+          {
+            client,
+            workspaceId: "w",
+            codexConnected: true,
+            callAdapter: adapter,
+            webrtc: {
+              createPeerConnection: () => {
+                throw Error("mocked");
+              },
+              getUserMedia: async () => {
+                throw Error("mocked");
+              },
             },
           },
-        },
-        createElement(Child),
-      ),
-    );
-    await act(async () => calls.callSession("s"));
-    expect(document.body.textContent).toContain("Listening · 0:00");
+          createElement(Child),
+        ),
+      );
+      await act(async () => calls.callSession("s"));
+      expect(document.body.textContent).toContain("Listening · 0:00");
 
-    // Minimize 49 seconds in: the pill shows the same running time.
-    at(49);
-    await press("Back to chat");
-    expect(document.body.textContent).not.toContain("Listening");
-    expect(document.body.textContent).toContain("On call · 0:49 · Test session");
+      // Minimize 49 seconds in: the pill shows the same running time.
+      at(49);
+      await press("Back to chat");
+      expect(document.body.textContent).not.toContain("Listening");
+      expect(document.body.textContent).toContain("On call · 0:49 · Test session");
 
-    // Expand again later: the call screen continues from the call's start, not from 0:00.
-    at(62);
-    await act(async () => calls.callSession("s"));
-    expect(document.body.textContent).toContain("Listening · 1:02");
+      // Expand again later: the call screen continues from the call's start, not from 0:00.
+      at(62);
+      await act(async () => calls.callSession("s"));
+      expect(document.body.textContent).toContain("Listening · 1:02");
 
-    // And again: no restart on any number of round trips.
-    await press("Back to chat");
-    at(125);
-    await act(async () => calls.callSession("s"));
-    expect(document.body.textContent).toContain("Listening · 2:05");
-    await rendered.unmount();
-  });
+      // And again: no restart on any number of round trips.
+      await press("Back to chat");
+      at(125);
+      await act(async () => calls.callSession("s"));
+      expect(document.body.textContent).toContain("Listening · 2:05");
+      await rendered.unmount();
+    },
+  );
 });
