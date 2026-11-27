@@ -70,18 +70,6 @@ const KEPT_REFERENCES = new Map<string, string>([
     "external_identities_personal_workspace_id_account_id_fkey",
     "a linked identity's personal workspace is deleted only with the identity",
   ],
-  [
-    "self_service_organization_setup_rece_personal_workspace_id_fkey",
-    "organization setup receipts keep the workspaces they created",
-  ],
-  [
-    "additional_organization_creation_rec_personal_workspace_id_fkey",
-    "organization creation receipts keep the workspaces they created",
-  ],
-  [
-    "additional_organization_creation_recei_shared_workspace_id_fkey",
-    "organization creation receipts keep the workspaces they created",
-  ],
 ]);
 
 describe("workspace deletion schema", () => {

@@ -96,6 +96,23 @@ describe("model-policy", () => {
     expect(requiredPlanHint(englishText, rows[0]!.catalog)).toBe("Needs Team");
     expect(requiredPlanHint(englishText, rows[1]!.catalog)).toBe(null);
   });
+  test("purchase-free rows and plan hints keep eligibility without naming a paid plan", () => {
+    const model = catalogModel({
+      id: "codex/gpt-6-astra",
+      label: "Astra",
+      cost: "subscription",
+      requiredPlan: { key: "pro", label: "Pro", monthlyPriceMicros: 20_000_000 },
+    });
+    const options = { showPurchasePrompts: false };
+    expect(requiredPlanHint(englishText, model, options)).toBe(
+      "Not available on your current plan",
+    );
+    expect(projectPickerRows(englishText, [model], options)[0]).toMatchObject({
+      selectable: true,
+      fundingHint: "Not available on your current plan",
+    });
+    expect(requiredPlanHint(englishText, model)).toBe("Needs Pro");
+  });
   test.each([
     {
       name: "free-only with blocked paid",
@@ -835,6 +852,20 @@ describe("models listed under the same name", () => {
     expect(view.selected?.label).toBe("GPT-6.1 Sol (EU)");
     const scoped = modelPickerMenuView(englishText, { ...input, collapseScopes: false }, "");
     expect(scoped.rows.map((row) => row.label)).toEqual(["GPT-6.1 Sol", "GPT-6.1 Sol (EU)"]);
+  });
+
+  test("the picker can give neutral plan status even when the host supplies rows", () => {
+    const model = {
+      ...sol("azure-sol/gpt-6.1-sol", unknown),
+      requiredPlan: { key: "pro" as const, label: "Pro", monthlyPriceMicros: 20_000_000 },
+    };
+    const rows = projectPickerRows(englishText, [model]);
+    const props = { rows, model: model.id, effort: "medium", latencyMode: "standard" } as const;
+    const normal = modelPickerMenuView(englishText, props, "");
+    const quiet = modelPickerMenuView(englishText, { ...props, showPurchasePrompts: false }, "");
+    expect(normal.rows[0]?.fundingHint).toBe("Needs Pro");
+    expect(quiet.rows[0]?.fundingHint).toBe("Not available on your current plan");
+    expect(quiet.rows[0]?.selectable).toBe(normal.rows[0]?.selectable);
   });
 
   test("an EU-only workspace still tells the restricted twin from the EU one", () => {

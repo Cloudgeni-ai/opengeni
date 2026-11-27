@@ -105,6 +105,7 @@ import {
   type PreparingProps,
 } from "./turn";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 import { resolveAgentSignals, type AgentSignals } from "@opengeni/react/session-agents-model";
 import { TurnStepsLoader } from "./turn-steps";
 import { useNativeTimelineMessages } from "./messages";
@@ -251,13 +252,14 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const turnDetail = resolveAgentSignals(props.agentSignals).turnDetail;
   const items = useMemo(() => {
-    const built = props.items ?? buildTimeline(t, props.events ?? []);
+    const built = props.items ?? buildTimeline(t, props.events ?? [], { showPurchasePrompts });
     // A person who never sees the agent's work reads an automation run as
     // its line and its answer only.
     return turnDetail ? built : automationRunOutcomesOnly(built);
-  }, [t, props.items, props.events, turnDetail]);
+  }, [t, props.items, props.events, turnDetail, showPurchasePrompts]);
   const pauses = useTimelinePauses(props.events, props.pause);
   const groups = useMemo(
     () => groupTimeline(t, items, { readableTurns: true, pauses }),

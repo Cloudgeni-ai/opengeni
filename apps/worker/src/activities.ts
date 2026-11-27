@@ -131,6 +131,7 @@ export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandbo
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
 export const deleteTransientObjects = defaultControlActivities.deleteTransientObjects;
+export const advanceAccountDeletion = defaultControlActivities.advanceAccountDeletion;
 export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
 export const stopArchivedSessionWork = defaultControlActivities.stopArchivedSessionWork;

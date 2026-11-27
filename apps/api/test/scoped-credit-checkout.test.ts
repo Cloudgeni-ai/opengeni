@@ -112,6 +112,7 @@ beforeEach(() => {
   // when the mocked existing customer means no provider creation is needed.
   const transactionalDb = {
     execute: async () => [{ account_id: accountId, workspace_id: "" }],
+    select: () => ({ from: () => ({ where: async () => [] }) }),
     transaction: async (run: (tx: db.Database) => Promise<unknown>) =>
       run(transactionalDb as unknown as db.Database),
   };

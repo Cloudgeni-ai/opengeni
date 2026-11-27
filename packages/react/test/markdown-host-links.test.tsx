@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { Markdown } from "../src/components/markdown";
+import { PurchasePresentationProvider } from "../src/lib/purchase-presentation";
 import {
   OpenGeniLinkProvider,
   type OpenGeniHostLink,
@@ -28,6 +29,20 @@ function hostChip(link: OpenGeniHostLink) {
 }
 
 describe("host-owned links in agent Markdown", () => {
+  test("a host can omit Stripe payment links without hiding ordinary links", () => {
+    const reply =
+      "[Continue to checkout](https://checkout.stripe.com/fixture)\n\n[Docs](https://docs.stripe.com/example)";
+    expect(renderToStaticMarkup(<Markdown>{reply}</Markdown>)).toContain("Continue to checkout");
+    const html = renderToStaticMarkup(
+      <PurchasePresentationProvider showPurchasePrompts={false}>
+        <Markdown>{reply}</Markdown>
+      </PurchasePresentationProvider>,
+    );
+    expect(html).not.toContain("Continue to checkout");
+    expect(html).not.toContain("checkout.stripe.com");
+    expect(html).toContain('href="https://docs.stripe.com/example"');
+  });
+
   test("the host draws its own scheme from the exact authored href", () => {
     const { seen, renderLink } = recording(hostChip);
     const html = renderToStaticMarkup(

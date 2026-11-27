@@ -2,6 +2,7 @@
 import "./lib/content-security-boot";
 import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
+import { iosAppContext } from "./lib/ios-app-context-boot";
 import "./lib/signup-attribution-boot";
 import "./lib/checkout-return-boot";
 import "./lib/console-host-boot";
@@ -9,6 +10,7 @@ import "./lib/simplified-interface-landing-boot";
 // Backs the shared session UI with this app's router and API helpers.
 import "./app-host";
 import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
+import { PurchasePresentationProvider } from "@opengeni/react/app/lib/purchase-presentation";
 import { SimplifiedInterfaceProvider } from "@opengeni/react/app/lib/simplified-interface";
 import { markClassicScrollbars } from "@opengeni/react/scrollbars";
 import React from "react";
@@ -106,13 +108,15 @@ if (reportClientSignals) {
 function renderApp() {
   createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
-      <SimplifiedInterfaceProvider>
-        <AppearanceProvider>
-          <SimplifiedInterfaceChrome>
-            <App />
-          </SimplifiedInterfaceChrome>
-        </AppearanceProvider>
-      </SimplifiedInterfaceProvider>
+      <PurchasePresentationProvider showPurchasePrompts={!iosAppContext}>
+        <SimplifiedInterfaceProvider>
+          <AppearanceProvider>
+            <SimplifiedInterfaceChrome>
+              <App />
+            </SimplifiedInterfaceChrome>
+          </AppearanceProvider>
+        </SimplifiedInterfaceProvider>
+      </PurchasePresentationProvider>
     </React.StrictMode>,
   );
 }

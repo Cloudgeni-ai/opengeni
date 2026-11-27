@@ -1,5 +1,90 @@
 # @opengeni/worker-bundle
 
+## 6.42.0
+
+### Patch Changes
+
+- 1b8fd9c: Credit balance reads no longer sum the whole credit ledger: a per-account totals table (`credit_ledger_account_totals`), kept exact by statement-level ledger triggers, holds each account's balance and API spend, and both the balance read and the `credit_balance_by_account` metric use it. The migration installs the triggers without reading the ledger and an online batched backfill completes one account per transaction; until an account is complete, reads recount its ledger. The runtime role can read but not write the totals, a ledger TRUNCATE clears them, and the worker samples accounts each metrics cycle and reports any totals that differ from a recount (`opengeni_credit_ledger_totals_mismatched_accounts`). The subscription plan maintenance inventory reads the same accounts with a cheaper plan, helped by a partial index on verified signup trial grants.
+- 52c2fea: A sandbox whose workspace was already saved, but whose box was gone before the drain could stop it, now finishes draining on the next reaper tick instead of failing every 30 seconds and staying fenced. Leases already stuck this way recover on their own. Warm time is charged up to an earlier attempt's recorded stop cutoff, and not past the last meter tick when there is none. The drain-failure warning names the thrown error's class, and `opengeni_sandbox_provider_gone_after_save_total` counts these drains. A sandbox refused by a running-box or daily limit answers 429 with `Retry-After` so retrying clients back off: a young organization's spent first-day box time names when it is a day old, and the turnless first-day bound is a non-retryable 429.
+
+  Model calls to a customer's own OpenAI-compatible endpoint whose physical request cannot reach it (connection refused or reset, name not found, TLS, socket or timeout) or that answer a client error other than 400, 404, 405, 413 or 422 now count as `customer_provider` failures instead of platform failures. Our own dispatch checkpoint and resolver failures stay platform.
+
+- 9d0896d: Email sign-in can now require the same Turnstile challenge as email sign-up, to stop scripted password guessing. Turn it on with `OPENGENI_SIGN_IN_CHALLENGE_ENABLED=true` (default off; needs the signup challenge on). The client config then reports `signInChallengeRequired`, the Sign in form shows the widget and sends its token, and refusals use sign-up's error codes.
+
+  Failed rows in the missing quiescence-receipt wake repair now log their error class and PostgreSQL SQLSTATE (no IDs or messages), so the worker's repair failures can be diagnosed.
+
+- f88a948: A turn that fails because the organization's plan refuses a sandbox (no paid plan or credit, a card to verify, or the Free plan's daily box time spent) now counts as `failure_origin="customer_plan"` instead of a platform failure, and the turn-failure alert and Runtime Failures dashboard leave it out of the platform ratio.
+- 27ba8d2: Record a failed automation run when dispatch exhausts its retries, and notify its owner, if any, once without pausing the automation.
+- b731e71: Sandbox reaper failures are diagnosable from logs. "sandbox reaper: per-sandbox drain failed" and "sandbox reaper: retained-process settlement failed" now record a protected failure diagnostic (throw site, process correlation) and log its `correlationId`, the hashed `sandboxLeaseKey`, lease epoch and backend, the cause's reviewed class, sandbox fence code (`causeFenceCode`) and SQLSTATE, and a one-way `causeFingerprint` of its message that `scripts/resolve-rejection-fingerprint.ts` maps back to the source literal. Before, both lines dropped their error entirely, and the settlement line carried no correlation at all.
+
+  A viewer attach (`POST /v1/workspaces/:workspaceId/sessions/:id/viewers`) whose caller disconnects while the attach waits on a sandbox lifecycle transition now answers 499 with no body, the client-gone convention, instead of logging a 500 `internal_error`.
+
+- ae08e32: Restoring an archived chat from long-term storage no longer fails forever when one of its inbox updates carried accepted subscription authority (for example a background result caused by a turn accepted before a provider cutover). The restore now copies that authority record again, as when the update was first accepted. Session archive failure logs also keep the database SQLSTATE, never the message.
+- df9d061: An approval or question answer can no longer stop a session with "Open suffix resume event does not match an interruption".
+
+  - Only an answer recorded for the paused turn resumes it. Previously, a message sent while an earlier turn waited for approval could be resumed by that earlier turn's decision once it paused for its own approval.
+  - The scheduler and the resume claim now share one rule for this.
+  - A resume whose answer no longer matches an open call applies the pause's other decisions and keeps waiting for the rest, instead of failing the turn.
+  - A call that was still waiting for approval when its turn ended (for example because a new message replaced the pause) is now recorded as never run, instead of as an unknown outcome.
+  - The Connected Machine checkpoint note now shows only for sandbox failures.
+
+- Updated dependencies [81c930e]
+- Updated dependencies [531532b]
+- Updated dependencies [1b8fd9c]
+- Updated dependencies [82de8aa]
+- Updated dependencies [c79fae8]
+- Updated dependencies [52c2fea]
+- Updated dependencies [9d0896d]
+- Updated dependencies [c00db19]
+- Updated dependencies [2f8dd47]
+- Updated dependencies [a55b31b]
+- Updated dependencies [bf87544]
+- Updated dependencies [dda9e3b]
+- Updated dependencies [cd461f0]
+- Updated dependencies [bf91461]
+- Updated dependencies [f88a948]
+- Updated dependencies [e042760]
+- Updated dependencies [27ba8d2]
+- Updated dependencies [42dc05c]
+- Updated dependencies [826dcce]
+- Updated dependencies [b731e71]
+- Updated dependencies [3ace70b]
+- Updated dependencies [b70dfb9]
+- Updated dependencies [ae08e32]
+- Updated dependencies [b7064b0]
+- Updated dependencies [d8d2b46]
+- Updated dependencies [024d5ee]
+- Updated dependencies [962c6d7]
+- Updated dependencies [ebca2a8]
+- Updated dependencies [df9d061]
+  - @opengeni/db@6.42.0
+  - @opengeni/core@6.42.0
+  - @opengeni/observability@6.42.0
+  - @opengeni/runtime@6.42.0
+  - @opengeni/config@6.42.0
+  - @opengeni/contracts@6.42.0
+  - @opengeni/sdk@6.42.0
+  - @opengeni/documents@6.42.0
+  - @opengeni/events@6.42.0
+  - @opengeni/tool-gateway@6.42.0
+  - @opengeni/github@6.42.0
+  - @opengeni/storage@6.42.0
+  - @opengeni/capabilities@6.42.0
+  - @opengeni/codemode@6.42.0
+  - @opengeni/codex@6.42.0
+  - @opengeni/decisions@6.42.0
+  - @opengeni/interaction@6.42.0
+  - @opengeni/vaults@6.42.0
+  - @opengeni/vaults-bitwarden@6.42.0
+  - @opengeni/vaults-keeper@6.42.0
+  - @opengeni/vaults-onepassword@6.42.0
+  - @opengeni/vaults-protonpass@6.42.0
+  - @opengeni/jev@6.42.0
+  - @opengeni/agent-proto@6.42.0
+  - @opengeni/network@6.42.0
+  - @opengeni/subscriptions@6.42.0
+  - @opengeni/xai-subscription@6.42.0
+
 ## 6.41.0
 
 ### Patch Changes

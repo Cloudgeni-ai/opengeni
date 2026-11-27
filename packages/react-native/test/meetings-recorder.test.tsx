@@ -91,6 +91,7 @@ const started: string[] = [];
 const stopped: string[] = [];
 const setStates = new Map<string, (state: string) => void>();
 const registeredCaptures: { ownerId: string | null }[] = [];
+const captureCalls: string[] = [];
 mock.module("../src/recordings", () => ({
   useNativeRecorderPlatform: (options: { storeScope?: string }) => ({
     scope: options.storeScope ?? "",
@@ -107,7 +108,19 @@ mock.module("@opengeni/react/recordings", () => ({
   useRecorder: (options: { workspaceId?: string; platform: { scope: string } }) => {
     const id = `${options.platform.scope}/${options.workspaceId ?? ""}`;
     const [state, setState] = useState("idle");
-    const recorder = useMemo(() => ({ state, recordingId: null, id }), [state, id]);
+    const recorder = useMemo(
+      () => ({
+        state,
+        recordingId: null,
+        id,
+        start: async () => void captureCalls.push(`start ${id}`),
+        importAudio: async () => {
+          captureCalls.push(`import ${id}`);
+          return "rec-1";
+        },
+      }),
+      [state, id],
+    );
     useEffect(() => {
       setStates.set(id, setState);
       started.push(id);
@@ -130,7 +143,11 @@ function Screen() {
   return null;
 }
 
-function tree(props: { storeScope?: string; workspaceId: string | null }): ReactNode {
+function tree(props: {
+  storeScope?: string;
+  workspaceId: string | null;
+  beforeCapture?: () => Promise<boolean>;
+}): ReactNode {
   return (
     <MeetingRecorderProvider client={{}} {...props}>
       <Screen />
@@ -139,6 +156,43 @@ function tree(props: { storeScope?: string; workspaceId: string | null }): React
 }
 
 describe("MeetingRecorderProvider", () => {
+  test("a recording starts and audio is imported only once the host allows it", async () => {
+    captureCalls.length = 0;
+    let allow = false;
+    const asked: string[] = [];
+    const beforeCapture = async () => {
+      asked.push("asked");
+      return allow;
+    };
+    let recorder: { start(): Promise<void>; importAudio(input: object): Promise<string> } | null =
+      null;
+    function Grab() {
+      recorder = useMeetingRecorder() as unknown as typeof recorder;
+      return null;
+    }
+    const rendered = await renderComponent(
+      <MeetingRecorderProvider
+        client={{}}
+        storeScope="g"
+        workspaceId="w1"
+        beforeCapture={beforeCapture}
+      >
+        <Grab />
+      </MeetingRecorderProvider>,
+    );
+    await recorder!.start();
+    const declined = await recorder!.importAudio({}).catch((error: unknown) => error);
+    expect(declined).toMatchObject({ name: "AudioImportError", reason: "declined" });
+    expect(captureCalls).toEqual([]);
+
+    allow = true;
+    await recorder!.start();
+    expect(await recorder!.importAudio({})).toBe("rec-1");
+    expect(captureCalls).toEqual(["start g/w1", "import g/w1"]);
+    expect(asked).toHaveLength(4);
+    await rendered.unmount();
+  });
+
   test("a new account gets a fresh recorder while the screens below stay mounted", async () => {
     mounts = 0;
     seen = [];

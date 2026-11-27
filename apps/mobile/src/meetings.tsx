@@ -22,17 +22,21 @@ import { Stack } from "expo-router";
 import type { ReactNode } from "react";
 import { ActivityIndicator, Text, View } from "react-native";
 import { useAccount } from "@/account";
+import { useAiConsent } from "@/ai-consent";
 
 export { isCapturing, useMeetingRecorder, type MeetingRecorder };
 
 export function MeetingRecorderProvider({ children }: { children: ReactNode }) {
   const { account, client, workspaceId } = useAccount();
+  // Recordings are transcribed by the AI providers: ask for permission first.
+  const consent = useAiConsent();
   // A new account is a new client and a new store: the provider starts a fresh
   // recorder for it, and the screens below stay as they are.
   return (
     <SharedRecorderProvider
       client={client}
       workspaceId={account && workspaceId ? workspaceId : null}
+      beforeCapture={consent.ensure}
       {...(account ? { storeScope: account.id } : {})}
     >
       <SharedAudioImport />

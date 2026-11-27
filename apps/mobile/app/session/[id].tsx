@@ -35,6 +35,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Linking, Platform, Pressable, Share, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
+import { useAiConsentGatedSession } from "@/ai-consent";
 import { BrandMark } from "@/brand-mark";
 import { useAgentCall } from "@/call";
 import {
@@ -252,11 +253,13 @@ function LiveSession(props: {
   useEffect(() => {
     rememberOpenedSession({ workspaceId: props.workspaceId, sessionId: props.sessionId });
   }, [props.workspaceId, props.sessionId]);
-  const controller = useOpenGeniNativeSession({
+  const native = useOpenGeniNativeSession({
     client: props.client,
     sessionId: props.sessionId,
     workspaceId: props.workspaceId,
   });
+  // Send, Steer and answers to the agent wait for the person's AI provider permission.
+  const controller = useAiConsentGatedSession(native);
   const session = controller.session.session;
   // The lists underneath follow this chat's row while it is open, so going back
   // shows them already in order rather than reordering under the next tap.

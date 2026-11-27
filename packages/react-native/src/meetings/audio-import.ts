@@ -33,6 +33,8 @@ export {
 
 /** Say why a file didn't become a meeting, in the person's terms. */
 export function showAudioImportError(msg: OpenGeniText, error: unknown): void {
+  // The person said no; there's nothing to tell them.
+  if (error instanceof AudioImportError && error.reason === "declined") return;
   const body =
     error instanceof AudioImportError && error.reason === "unsupported"
       ? msg("native.meetings.audioImport.unsupported")

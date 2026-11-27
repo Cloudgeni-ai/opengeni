@@ -82,12 +82,12 @@ function creditCoverageGap(
 }
 
 /** Headline for a credit stop that free credits could avoid on another model. */
-export function freeCreditGapReason(gap: FreeCreditGap): string {
+export function freeCreditGapReason(gap: FreeCreditGap, showPurchasePrompts = true): string {
   const subject = `Your free credits don't cover ${gap.modelLabel}.`;
   if (gap.selectionUsable) return `${subject} Send a message to continue with the selected model.`;
   const [first, second] = gap.covered;
   const examples = second ? `${first!.label} or ${second.label}` : first!.label;
-  return `${subject} Switch to a model they cover, such as ${examples}, or add credits.`;
+  return `${subject} Switch to a model they cover, such as ${examples}${showPurchasePrompts ? ", or add credits" : ""}.`;
 }
 
 /**

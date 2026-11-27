@@ -1,8 +1,37 @@
-import { Linking } from "react-native";
+import { Linking, Platform } from "react-native";
 
-/** The deployment's web address for a path, such as a chat's shareable link. */
+/**
+ * The deployment's web address for a path, such as a chat's shareable link.
+ * Plain: for links people share and for the app's own API requests. A page
+ * the app opens itself goes through `hostedUrl`.
+ */
 export function webUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/u, "")}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+/** The query the iOS app adds to the deployment's pages it opens. */
+export const HOSTED_CLIENT_PARAM = "client";
+export const HOSTED_CLIENT_IOS = "ios";
+
+/**
+ * A deployment page the app opens (in the browser or a web view). On iOS it
+ * says so with `client=ios`, so the hosted pages show their in-app context
+ * (no purchase prompts). The page's own query and hash are kept.
+ */
+export function markHostedUrl(url: string, platform: string = Platform.OS): string {
+  if (platform !== "ios") return url;
+  try {
+    const marked = new URL(url);
+    marked.searchParams.set(HOSTED_CLIENT_PARAM, HOSTED_CLIENT_IOS);
+    return marked.toString();
+  } catch {
+    return url;
+  }
+}
+
+/** `webUrl` for a page the app opens itself; see `markHostedUrl`. */
+export function hostedUrl(baseUrl: string, path: string, platform: string = Platform.OS): string {
+  return markHostedUrl(webUrl(baseUrl, path), platform);
 }
 
 /**
@@ -10,7 +39,7 @@ export function webUrl(baseUrl: string, path: string): string {
  * browser, which shares the sign-in the app was approved from.
  */
 export function openOnWeb(baseUrl: string, path: string): void {
-  void Linking.openURL(webUrl(baseUrl, path));
+  void Linking.openURL(hostedUrl(baseUrl, path));
 }
 
 export const webPaths = {
@@ -21,6 +50,9 @@ export const webPaths = {
     `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
   organizationSettings: (workspaceId: string) =>
     `/workspaces/${encodeURIComponent(workspaceId)}/organization`,
+  /** The organization's people, where owners are made. */
+  organizationMembers: (workspaceId: string) =>
+    `/workspaces/${encodeURIComponent(workspaceId)}/organization?section=people`,
   workspaceSettings: (workspaceId: string) =>
     `/workspaces/${encodeURIComponent(workspaceId)}/settings`,
   /** One agent's page, where it is managed. */

@@ -3,6 +3,7 @@ import {
   listAppPackageExportKeys,
   nestedPostgresSqlState,
   safeDatabaseErrorFacts,
+  type Database,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
@@ -17,16 +18,18 @@ export async function deleteWorkspaceForRequest(
     accountId: string;
     workspaceId: string;
     organizationAdministratorSubjectId?: string;
+    accountDeletionRequestId?: string;
+    beforeClosureCascade?: (tx: Database) => Promise<unknown>;
   },
 ): Promise<void> {
   const observer = workspaceDeleteObserver(deps.observability, input);
   // Site SQL rows in Postgres cascade with the workspace; the Durable Objects
   // holding the data do not, so note them first and drop them after.
-  const siteSqlSites = await siteSqlSitesOfWorkspace(deps, input);
+  const siteSqlSites = input.beforeClosureCascade ? [] : await siteSqlSitesOfWorkspace(deps, input);
   // Stored app package files: their rows cascade too, so note the objects.
-  const packageExports = await listAppPackageExportKeys(deps.db, input.workspaceId).catch(
-    () => [] as string[],
-  );
+  const packageExports = input.beforeClosureCascade
+    ? []
+    : await listAppPackageExportKeys(deps.db, input.workspaceId).catch(() => [] as string[]);
   let deleted;
   try {
     deleted = await deleteWorkspaceIfQuiescent(deps.db, {
@@ -41,7 +44,7 @@ export async function deleteWorkspaceForRequest(
     if (state === "P0002") {
       throw new HTTPException(404, { message: "workspace not found" });
     }
-    if (state === "23503") {
+    if (state === "23503" && !input.accountDeletionRequestId) {
       // Retention and linked-record FKs are intentional deletion boundaries.
       // The failed transaction has rolled back: do not erase history, retry
       // the cascade, or dispatch any external schedule cleanup.

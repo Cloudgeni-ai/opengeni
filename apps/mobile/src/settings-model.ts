@@ -19,6 +19,8 @@ export type SettingsRow =
       title: string;
       subtitle?: string;
       symbol?: SFSymbol;
+      /** Shown dimmed and does nothing, such as Delete account before it's confirmed. */
+      disabled?: boolean;
       onPress: () => void;
     }
   | {
@@ -46,7 +48,16 @@ export type SettingsRow =
       onPress?: (() => void) | undefined;
     }
   /** A paragraph, such as an automation's instructions; long ones fold to a few lines. */
-  | { kind: "text"; id: string; text: string; lines?: number };
+  | { kind: "text"; id: string; text: string; lines?: number }
+  /** One line of text the person types, such as a typed confirmation. */
+  | {
+      kind: "field";
+      id: string;
+      placeholder: string;
+      onChange: (text: string) => void;
+      /** `characters` for a word typed in capitals; no autocorrection either way. */
+      capitalization?: "characters";
+    };
 
 export interface SettingsSection {
   id: string;

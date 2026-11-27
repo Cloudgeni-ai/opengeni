@@ -2,6 +2,7 @@ import type { KnowledgeEntryListResponse, KnowledgeIndexStatus } from "@opengeni
 import { Link } from "@tanstack/react-router";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
 
 const labels: Record<KnowledgeIndexStatus, string> = {
   saved: "Saved · indexing not started",
@@ -22,6 +23,7 @@ export function KnowledgeIndexNotice({
   workspaceId: string;
 }) {
   const context = useAppContext();
+  const showPurchasePrompts = useShowPurchasePrompts();
   if (!status) return null;
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
   const accountId = workspace?.accountId;
@@ -47,7 +49,9 @@ export function KnowledgeIndexNotice({
   return (
     <div role="status" className="text-sm text-fg-muted">
       <span>{labels[status]}.</span>
-      {status === "awaiting_funding" ? (
+      {status === "awaiting_funding" && !showPurchasePrompts ? (
+        <span> The original and keyword search remain available.</span>
+      ) : status === "awaiting_funding" ? (
         <span>
           {" "}
           The original and keyword search remain available. Indexing resumes automatically after
@@ -66,7 +70,11 @@ export function KnowledgeIndexNotice({
           )}
         </span>
       ) : status === "provider_failed" ? (
-        <span> Indexing will retry; adding credits will not fix a provider outage.</span>
+        <span>
+          {showPurchasePrompts
+            ? " Indexing will retry; adding credits will not fix a provider outage."
+            : " Indexing will retry."}
+        </span>
       ) : status === "source_unavailable" ? (
         <span> Indexing will retry when the source is available.</span>
       ) : null}
@@ -86,6 +94,7 @@ export function KnowledgeSearchFallback({
   workspaceId: string;
 }) {
   const context = useAppContext();
+  const showPurchasePrompts = useShowPurchasePrompts();
   if (!reason) return null;
   const accountId = context.workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
   const canBuy = Boolean(
@@ -104,7 +113,7 @@ export function KnowledgeSearchFallback({
   return (
     <p role="status" className="text-sm text-fg-muted">
       {message}{" "}
-      {reason === "awaiting_funding" ? (
+      {showPurchasePrompts && reason === "awaiting_funding" ? (
         canBuy ? (
           <Link
             to="/workspaces/$workspaceId/organization"

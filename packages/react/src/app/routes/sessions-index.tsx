@@ -117,6 +117,7 @@ import {
 } from "../components/credits/own-subscription-plan-notice";
 import { useDismissedNotice } from "../components/agents/agent-notices";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import {
   pickerPolicyRunnable,
   ComposerSendBlockerNotice,
@@ -300,6 +301,7 @@ function SessionsIndexRouteContent({
   const starters = useSessionUiFeature("starters");
   const hostStarters = useAppHost().starters;
   const addCredits = useSessionUiFeature("addCredits");
+  const showPurchasePrompts = useShowPurchasePrompts();
   // Without the chat list, the new-chat page shows no other chats either: no
   // recent chats and no project picker that files the chat among them.
   const chatList = useSessionUiFeature("chatList");
@@ -1144,7 +1146,7 @@ function SessionsIndexRouteContent({
       workspaceId,
       sent: sentSignature,
       current: currentSendSignature(),
-      message: composerSubmissionErrorMessage(t, error),
+      message: composerSubmissionErrorMessage(t, error, true, showPurchasePrompts),
     });
     if (!failure) return false;
     setCreateFailure(failure);
@@ -1575,7 +1577,12 @@ function SessionsIndexRouteContent({
                 connectionAccounts.onSelectionError(refused.error);
                 if (!noteCreateFailure(refused.error, sentSignature)) {
                   toast.error("Failed to start session", {
-                    description: composerSubmissionErrorMessage(t, refused.error),
+                    description: composerSubmissionErrorMessage(
+                      t,
+                      refused.error,
+                      true,
+                      showPurchasePrompts,
+                    ),
                   });
                 }
               }
@@ -1902,6 +1909,7 @@ function SessionsIndexRouteContent({
   // turn off addCredits (side panes) get the notice's billing link instead of
   // the dialog.
   const canTopUpCredits =
+    showPurchasePrompts &&
     addCredits &&
     context.clientConfig.billingMode === "stripe" &&
     Boolean(workspace?.accountId) &&

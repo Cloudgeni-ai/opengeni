@@ -71,6 +71,7 @@ import { type MicrophoneAccess, useMicrophoneAccess } from "./microphone-access"
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { errorMessage } from "@opengeni/contracts/values";
 import { isRegionRestricted, regionRestrictedText } from "../inference-region";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 
 export {
   codexRealtimeAdmissionAllowed,
@@ -92,10 +93,18 @@ export type {
 export type { MicrophoneAccess } from "./microphone-access";
 
 /** Short status label for a credit/availability refusal (shared with the model menu). */
-function realtimeRefusalLabel(t: OpenGeniText, code: string | null | undefined): string | null {
+function realtimeRefusalLabel(
+  t: OpenGeniText,
+  code: string | null | undefined,
+  showPurchasePrompts: boolean,
+): string | null {
   switch (code) {
     case "insufficient_credits":
-      return t("realtime.realtimeControl.creditsNeeded");
+      return t(
+        showPurchasePrompts
+          ? "realtime.realtimeControl.creditsNeeded"
+          : "realtime.realtimeControl.voiceUnavailable",
+      );
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
       return t("realtime.realtimeControl.usageLimitReached");
@@ -459,6 +468,7 @@ export function RealtimeVoiceControl(props: {
 }) {
   const t = useOpenGeniText();
   const reduceMotion = useReducedMotion();
+  const showPurchasePrompts = useShowPurchasePrompts();
   const selectedModel = props.selectedModel ?? {
     ...CODEX_LIVE_MODEL(t),
     available: props.modelAvailable,
@@ -481,6 +491,7 @@ export function RealtimeVoiceControl(props: {
     selectedModel.unavailableCode ?? null,
     props.loadState ?? "ready",
     microphone,
+    showPurchasePrompts,
   );
   const modeOwned = props.snapshot.mode?.state === "active";
   const retryConnection =
@@ -1268,6 +1279,7 @@ function statusContent(
   unavailableCode: string | null = null,
   loadState: RealtimeLoadState = "ready",
   microphone: MicrophoneAccess = "unknown",
+  showPurchasePrompts = true,
 ): { phase: RealtimeVisualPhase; label: string; detail: string } {
   if (snapshot.audibleOutput === "blocked" && !snapshot.outputMuted) {
     return {
@@ -1334,9 +1346,12 @@ function statusContent(
         return {
           phase: "unavailable",
           label:
-            realtimeRefusalLabel(t, snapshot.refusal.code) ??
+            realtimeRefusalLabel(t, snapshot.refusal.code, showPurchasePrompts) ??
             t("realtime.realtimeControl.voiceUnavailable"),
-          detail: snapshot.refusal.message,
+          detail:
+            !showPurchasePrompts && snapshot.refusal.code === "insufficient_credits"
+              ? t("realtime.sessionRealtime.thisVoiceModelIsUnavailable")
+              : snapshot.refusal.message,
         };
       }
       return {
@@ -1372,7 +1387,7 @@ function statusContent(
         };
       }
       if (!modelAvailable) {
-        const refusal = realtimeRefusalLabel(t, unavailableCode);
+        const refusal = realtimeRefusalLabel(t, unavailableCode, showPurchasePrompts);
         const detail = admissionBlocker ?? t("realtime.realtimeControl.chooseAnotherVoiceModel");
         return {
           phase: "unavailable",

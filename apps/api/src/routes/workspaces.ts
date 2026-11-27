@@ -1,6 +1,7 @@
 import { AZURE_LIVE_MODEL_ID } from "../azure-live";
 import { billingOriginForAccessGrant } from "../access-grant-rls";
 import { elevenLabsKeyAvailable, realtimeVoiceOptions } from "../realtime-websocket";
+import { isNativeIosRequest, purchaseRefusalMessage } from "../http/native-purchase-presentation";
 import {
   createRealtimeVoiceBilling,
   checkOwnSubscriptionPlan,
@@ -1433,6 +1434,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationDefaults,
       residencySettings,
       subscriptionAdmission,
+      ios,
     ] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiOperationAvailable(deps.db, deps.settings, {
@@ -1452,6 +1454,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       billingOriginForAccessGrant(deps, grant).then((origin) =>
         checkOwnSubscriptionPlan(deps, grant.accountId, origin),
       ),
+      isNativeIosRequest(c, deps),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1512,8 +1515,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
             ? { available: true, unavailableReason: null, unavailableCode: null }
             : {
                 available: false,
-                unavailableReason:
-                  creditStanding === "promotional_only"
+                unavailableReason: ios
+                  ? "Live voice isn't available for this organization."
+                  : creditStanding === "promotional_only"
                     ? "Promotional credits don't cover live voice. Add credits to use it."
                     : "Add credits to use live voice",
                 unavailableCode: "insufficient_credits",
@@ -1529,7 +1533,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(!subscriptionAdmission.allowed
           ? {
               available: false,
-              unavailableReason: subscriptionAdmission.message,
+              unavailableReason: purchaseRefusalMessage(
+                subscriptionAdmission.code,
+                subscriptionAdmission.message,
+                "live voice",
+                ios,
+              ),
               unavailableCode: subscriptionAdmission.code,
             }
           : {}),
@@ -1544,7 +1553,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(!subscriptionAdmission.allowed
           ? {
               available: false,
-              unavailableReason: subscriptionAdmission.message,
+              unavailableReason: purchaseRefusalMessage(
+                subscriptionAdmission.code,
+                subscriptionAdmission.message,
+                "live voice",
+                ios,
+              ),
               unavailableCode: subscriptionAdmission.code,
             }
           : {}),

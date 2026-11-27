@@ -30,6 +30,7 @@ import {
 } from "react";
 import { cn } from "../lib/cn";
 import { useComposerFooterSignal } from "../lib/composer-footer-signals";
+import { useShowPurchasePrompts } from "../lib/purchase-presentation";
 import { useVoiceInput, type VoiceInputRecordingsClient } from "../hooks/use-voice-input";
 import type { RecorderPlatform } from "@opengeni/sdk/recordings";
 import type { VoiceRecordingStore } from "../voice-recording-store";
@@ -195,7 +196,14 @@ export function ComposerTranscriptionControl({
 }: ComposerTranscriptionControlProps) {
   const t = useOpenGeniText();
   const composer = useChatComposer();
-  const messages = { ...defaultMessages(t), ...overrides };
+  const showPurchasePrompts = useShowPurchasePrompts();
+  const messages = {
+    ...defaultMessages(t),
+    ...overrides,
+    ...(!showPurchasePrompts && {
+      errorInsufficientCredits: t("composerTranscriptionControl.voiceInputNoCreditsRecordingSaved"),
+    }),
+  };
   // Where the click that started this dictation happened: other voice
   // controls there let go of the microphone once the dictation may start.
   const startScope = useRef<EventTarget | null>(null);

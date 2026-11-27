@@ -17,6 +17,7 @@ import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 export * from "./app-sync";
 export * from "./app-webhooks";
+export * from "./setup-connection-requests";
 export * from "./app-server";
 export * from "./site-tool-data";
 export * from "./app-package-exports";
@@ -421,6 +422,7 @@ import {
 } from "./organization-api-key-access";
 export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
 export * from "./personal-api-keys";
+export * from "./account-deletion";
 export * from "./organization-privacy-preferences";
 export * from "./organization-inference-residency";
 export * from "./workspace-content-flow";
@@ -1496,6 +1498,8 @@ export * from "./signup-network";
 export * from "./verified-signup-trial-switch";
 export * from "./managed-auth-new-signups-switch";
 export * from "./nango-integrations";
+export * from "./oauth-grant-siblings";
+import { oauthGrantReauthSiblings } from "./oauth-grant-siblings";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -4571,6 +4575,9 @@ export async function deleteWorkspaceIfQuiescent(
     workspaceId: string;
     observer?: WorkspaceDeleteObserver;
     organizationAdministratorSubjectId?: string;
+    /** Internal closure only; checked against the locked account row. */
+    accountDeletionRequestId?: string;
+    beforeClosureCascade?: (tx: Database) => Promise<unknown>;
   },
 ): Promise<DeleteWorkspaceIfQuiescentResult> {
   const transactionStartedAt = performance.now();
@@ -4630,7 +4637,14 @@ export async function deleteWorkspaceIfQuiescent(
           // the same way; FOR UPDATE here deadlocked those writers against the
           // workspace locks below.
           const [account] = await tx
-            .select({ id: schema.managedAccounts.id })
+            .select({
+              id: schema.managedAccounts.id,
+              closedByDeletion: input.accountDeletionRequestId
+                ? sql<
+                    string | null
+                  >`to_jsonb(${schema.managedAccounts}) ->> 'closed_by_account_deletion'`
+                : sql<null>`null`,
+            })
             .from(schema.managedAccounts)
             .where(eq(schema.managedAccounts.id, input.accountId))
             .for("no key update")
@@ -4693,7 +4707,11 @@ export async function deleteWorkspaceIfQuiescent(
             });
             return { status: "not_found" as const };
           }
-          if (accountWorkspaces.length <= 1) {
+          if (
+            accountWorkspaces.length <= 1 &&
+            (!input.accountDeletionRequestId ||
+              account.closedByDeletion !== input.accountDeletionRequestId)
+          ) {
             observeWorkspaceDeletePhase(input.observer, {
               phase: "account_workspace_lock",
               outcome: "only_workspace",
@@ -5052,6 +5070,12 @@ export async function deleteWorkspaceIfQuiescent(
           // cascade, not between rows. Activity and retention constraint
           // triggers stay immediate.
           await tx.execute(sql`select opengeni_private.defer_workspace_cascade_foreign_keys()`);
+          if (
+            input.accountDeletionRequestId &&
+            account.closedByDeletion === input.accountDeletionRequestId
+          ) {
+            await input.beforeClosureCascade?.(tx);
+          }
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -22526,8 +22550,12 @@ export async function listScheduledTasks(
    * null reads shared schedules only.
    */
   viewerSubjectId?: string | null,
-  /** Only automations whose runs are chats with this agent, or one of these (`agentConfig.agentId`). */
-  filters: { agentId?: string; agentIds?: readonly string[] } = {},
+  /**
+   * Only automations whose runs are chats with this agent, or one of these
+   * (`agentConfig.agentId`). `activeFirst` lists active ones before paused
+   * ones, so paused rows never use up the limit ahead of active ones.
+   */
+  filters: { agentId?: string; agentIds?: readonly string[]; activeFirst?: boolean } = {},
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -22567,7 +22595,11 @@ export async function listScheduledTasks(
             : []),
         ),
       )
-      .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
+      .orderBy(
+        ...(filters.activeFirst ? [sql`(${schema.scheduledTasks.status} = 'active') DESC`] : []),
+        desc(schema.scheduledTasks.createdAt),
+        desc(schema.scheduledTasks.id),
+      )
       .limit(limit)
       .offset(offset);
     return rows.map(mapScheduledTask);
@@ -103019,6 +103051,7 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
     setStatus: setConnectionStatus,
     recordUsed: recordConnectionUsed,
     refresh: refreshOAuthConnectionCredentialCore,
+    findGrantReauthSiblings: oauthGrantReauthSiblings,
     encrypt: encryptEnvironmentValue,
     keyBytes: environmentsEncryptionKeyBytes,
     now: () => new Date(),
@@ -103055,6 +103088,7 @@ export {
   isPrivateAddress,
   normalizeBearerScheme,
   refreshOAuthConnectionCredential,
+  SHARED_GRANT_REFUSED_ERROR,
   type ConnectionBrokerDeps,
   type ConnectionCredentialForBroker,
   type ConnectionCredentialLookupInput,

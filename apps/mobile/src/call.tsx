@@ -13,6 +13,7 @@ import {
 import * as Haptics from "expo-haptics";
 import { useCallback, useEffect, useMemo, type ReactNode } from "react";
 import { useAccount } from "@/account";
+import { useAiConsent } from "@/ai-consent";
 import {
   forgetOpenedSession,
   getLastOpenedSessionId,
@@ -75,6 +76,9 @@ async function resolveOutsideCall(context: NativeOutsideCallContext): Promise<st
  */
 export function CallProvider({ children }: { children: ReactNode }) {
   const { client, workspaceId, models, status, account } = useAccount();
+  // A call shares what's said with the AI providers, so it waits for the
+  // person's permission before it starts.
+  const consent = useAiConsent();
   const callAdapter = useMemo(() => sharedCallAdapter(), []);
   useEffect(() => (callAdapter ? connectCallAudioToWebRtc(callAdapter) : undefined), [callAdapter]);
   useVoiceCommandCatalog(
@@ -102,6 +106,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       callAdapter={callAdapter}
       webrtc={webrtc}
       resolveOutsideCall={resolveOutsideCall}
+      beforeCall={consent.ensure}
       onCallStarting={onCallStarting}
       renderSurface={renderSurface}
     >

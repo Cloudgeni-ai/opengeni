@@ -1234,6 +1234,20 @@ spec:
             description: The bounded inventory reports at least one BatchSandbox beyond the 180-second provider TTL cleanup bound. Verify controller health, finalizers, and exact resource ownership in Kubernetes.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         {{- end }}
+        - alert: OpenGeniAccountDeletionBlocked
+          expr: |
+            max by (state) (opengeni_account_deletion_requests{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state=~"terminal|overdue|stalled"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'A requested account deletion is blocked or overdue.'
+            headline: 'Account deletion needs attention'
+            user_impact: 'The person has been signed out, but some data may not yet have been erased.'
+            next_step: 'Use the request inventory to inspect the blocked reason, fix the underlying dependency, and retry the exact request.'
+            description: 'Counts terminal failures, requests without progress in 24 hours, and requests not completed within 30 days. This global gauge is replicated, so use the maximum rather than a sum.'
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/account-deletion.md#deployment-and-operations
         - alert: OpenGeniSandboxOperationFailureRatio
           expr: |
             (

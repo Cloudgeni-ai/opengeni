@@ -199,6 +199,22 @@ const CREDIT_REFUSAL_ASK_OWNER_KEYS = {
   api_credits_required: "lib.format.apiCreditsRequiredAskOwner",
 } as const;
 
+/** The same failure, without a purchase remedy. */
+export function creditRefusalStatus(t: OpenGeniText, kind?: CreditRefusalKind | null): string {
+  switch (kind) {
+    case "subscription_upgrade_required":
+      return t("lib.format.subscriptionUnavailableOnPlan");
+    case "byok_upgrade_required":
+      return t("lib.format.ownKeyUnavailableOnPlan");
+    case "byok_paid_credit_required":
+      return t("lib.format.ownKeyCreditsUnavailable");
+    case "api_credits_required":
+      return t("lib.format.apiCreditsUnavailable");
+    default:
+      return t("lib.format.modelCreditsUnavailable");
+  }
+}
+
 /**
  * The short sentence that names a refusal of this kind and its one fix,
  * without what was kept. Someone who can't buy credits or upgrade is told to
@@ -480,6 +496,7 @@ export function composerSubmissionErrorMessage(
   t: OpenGeniText,
   error: Error,
   canFix = true,
+  showPurchasePrompts = true,
 ): string {
   if (error instanceof ComposerReconciliationRequiredError) {
     return t("lib.format.reconcileBeforeRetry");
@@ -510,6 +527,10 @@ export function composerSubmissionErrorMessage(
         : COMPOSER_MEMBER_ALLOWANCE_MESSAGE(t);
     return composerErrorReference(t, error, message);
   }
+  const kind = creditRefusalKind(error) ?? creditRefusalKindFromText(error.message);
+  if (!showPurchasePrompts && (kind || isComposerCreditRefusal(error))) {
+    return composerErrorReference(t, error, creditRefusalStatus(t, kind));
+  }
   if (!isComposerCreditRefusal(error)) {
     // A refusal the server explains says why, never a generic "check your input".
     if (error instanceof OpenGeniApiError && (error.status === 400 || error.status === 422)) {
@@ -518,7 +539,6 @@ export function composerSubmissionErrorMessage(
     return formatErrorMessage(error);
   }
   // Own-key and API refusals name their one fix; no model choice helps.
-  const kind = creditRefusalKind(error) ?? creditRefusalKindFromText(error.message);
   return composerErrorReference(
     t,
     error,
@@ -549,8 +569,12 @@ const EXPLAINED_CREATE_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 409
  * or effort and send again. Uncertain outcomes keep the neutral copy, because
  * the stock new chat then offers the exact retry.
  */
-export function newConversationErrorMessage(t: OpenGeniText, error: Error): string {
-  const message = composerSubmissionErrorMessage(t, error);
+export function newConversationErrorMessage(
+  t: OpenGeniText,
+  error: Error,
+  showPurchasePrompts = true,
+): string {
+  const message = composerSubmissionErrorMessage(t, error, true, showPurchasePrompts);
   if (
     !(error instanceof OpenGeniApiError) ||
     error.outcomeUnknown ||
@@ -696,6 +720,7 @@ export function isDiagnosticFailureCode(code: unknown): boolean {
 export function presentFailure(
   t: OpenGeniText,
   payload: Record<string, unknown>,
+  showPurchasePrompts = true,
 ): {
   reason: string | null;
   safetyRefusal: boolean;
@@ -737,6 +762,19 @@ export function presentFailure(
     typeof payload.code === "string" && AUTHORED_ONLY_FAILURE_CODES.has(payload.code)
       ? null
       : (text("lastRetryableError") ?? text("detail"));
+  if (!showPurchasePrompts) {
+    const refusal = creditRefusalKindFromText(message, detail);
+    const neutralReason = refusal
+      ? creditRefusalStatus(t, refusal)
+      : payload.code === "sandbox_card_required"
+        ? t("lib.format.sandboxUnavailableInApp")
+        : payload.code === "codex_plan_entitlement"
+          ? t("lib.format.modelUnavailable")
+          : payload.code === "provider_billing_error"
+            ? t("lib.format.providerPaymentUnavailable")
+            : null;
+    if (neutralReason) return { reason: neutralReason, safetyRefusal: false, diagnostic: false };
+  }
   const safetyRefusal =
     payload.code === "provider_safety_refusal" ||
     [message, detail].some(

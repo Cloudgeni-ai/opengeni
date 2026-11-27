@@ -10,10 +10,12 @@ import {
   Section,
   Spacer,
   Text,
+  TextField,
   Toggle,
   VStack,
 } from "@expo/ui/swift-ui";
 import {
+  autocorrectionDisabled,
   background,
   disabled,
   font,
@@ -23,6 +25,7 @@ import {
   onTapGesture,
   refreshable,
   scrollContentBackground,
+  textInputAutocapitalization,
   tint,
 } from "@expo/ui/swift-ui/modifiers";
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
@@ -109,6 +112,18 @@ function Row({
       );
     case "text":
       return <FoldedText text={row.text} lines={row.lines ?? 4} rowBackground={rowBackground} />;
+    case "field":
+      return (
+        <TextField
+          placeholder={row.placeholder}
+          onTextChange={row.onChange}
+          modifiers={[
+            autocorrectionDisabled(true),
+            ...(row.capitalization ? [textInputAutocapitalization(row.capitalization)] : []),
+            rowBackground,
+          ]}
+        />
+      );
     case "navigate": {
       const content = (
         <HStack spacing={8} {...(row.onPress ? {} : { modifiers: [rowBackground] })}>
@@ -142,14 +157,17 @@ function Row({
         <Button
           role="destructive"
           onPress={row.onPress}
-          modifiers={[rowBackground]}
+          modifiers={row.disabled ? [disabled(true), rowBackground] : [rowBackground]}
           label={row.title}
           {...(row.symbol ? { systemImage: row.symbol } : {})}
         />
       );
     default:
       return (
-        <Button onPress={row.onPress} modifiers={[rowBackground]}>
+        <Button
+          onPress={row.onPress}
+          modifiers={row.disabled ? [disabled(true), rowBackground] : [rowBackground]}
+        >
           <HStack>
             {row.symbol ? (
               <Label systemImage={row.symbol}>

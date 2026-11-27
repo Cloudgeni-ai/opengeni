@@ -1944,7 +1944,12 @@ const DROP_CALL_TIMEOUT_MS = 5_000;
 /** No drop starts after this long, so a large workspace cannot hold the request. */
 const DROP_DEADLINE_MS = 20_000;
 
-export type SiteSqlDropResult = { dropped: string[]; failed: string[]; skipped: string[] };
+export type SiteSqlDropResult = {
+  status: "configured" | "not_configured";
+  dropped: string[];
+  failed: string[];
+  skipped: string[];
+};
 
 /**
  * Drop the data of Site databases whose workspace was deleted, best effort:
@@ -1957,8 +1962,13 @@ export async function dropSiteSqlDatabases(
   siteIds: readonly string[],
   context: { workspaceId?: string } = {},
 ): Promise<SiteSqlDropResult> {
-  const result: SiteSqlDropResult = { dropped: [], failed: [], skipped: [] };
   const configured = deps.settings ? siteSqlGatewayConfig(deps.settings) : null;
+  const result: SiteSqlDropResult = {
+    status: configured ? "configured" : "not_configured",
+    dropped: [],
+    failed: [],
+    skipped: [],
+  };
   if (!configured || siteIds.length === 0) return result;
   const gateway = {
     ...configured,

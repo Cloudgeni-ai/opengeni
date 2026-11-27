@@ -1,5 +1,7 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
+import { useShowPurchasePrompts } from "@opengeni/react/app/lib/purchase-presentation";
+import { newConversationErrorMessage } from "@opengeni/react/session";
 import { homeSessionSections } from "@opengeni/react/session-list-model";
 import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { useNativeFileAttachments } from "@opengeni/react-native";
@@ -52,6 +54,8 @@ import { createSessionFromDraft } from "@/new-session-create";
 import { SignInScreen } from "@/sign-in-screen";
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
+import { useAiConsent } from "@/ai-consent";
+import { isAiConsentRequired } from "@/ai-consent-gate";
 import { AccountMenuButton, WorkspaceSwitcherTitle } from "@/workspace-switcher";
 import { openOnWeb, webPaths } from "@/web-links";
 import { rememberPendingPrompt } from "@/pending-prompt";
@@ -102,6 +106,15 @@ function Gate() {
    and the quiet Recent sessions list under it. The rail lives behind the menu. */
 function Home() {
   const t = useOpenGeniText();
+  const showPurchasePrompts = useShowPurchasePrompts();
+  // A refused first message says why in the stock new chat's words; in the iOS
+  // app without a way to buy what's missing.
+  const createFailure = (caught: unknown) =>
+    newConversationErrorMessage(
+      t,
+      caught instanceof Error ? caught : new Error(String(caught)),
+      showPurchasePrompts,
+    );
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const {
@@ -247,11 +260,16 @@ function Home() {
     !attachments.uploading &&
     !attachments.hasUnresolved;
 
-  const create = async () => {
+  const consent = useAiConsent();
+  // `retried`: the one Send again after the server asked for permission and the person gave it.
+  const create = async (retried = false) => {
     const text = draft.trim();
     if (!workspaceId || !canCreate) return;
+    // Not now keeps the draft and sends nothing.
+    if (!(await consent.ensure())) return;
     setCreating(true);
     const sentAt = new Date().toISOString();
+    let again = false;
     try {
       // The exact snapshot being sent; acknowledged once the session exists.
       const flushed = await draftSync.flushForSend().catch(() => null);
@@ -292,10 +310,13 @@ function Home() {
       options.reset();
       router.push(`/session/${created.id}`);
     } catch (caught) {
-      setListError(caught instanceof Error ? caught.message : String(caught));
+      // Permission withdrawn elsewhere: ask again, and send once more only if allowed.
+      if (!retried && isAiConsentRequired(caught)) again = await consent.refused();
+      else setListError(createFailure(caught));
     } finally {
       setCreating(false);
     }
+    if (again) await create(true);
   };
 
   // A call from the empty composer starts a new conversation as a call, with
@@ -304,6 +325,8 @@ function Home() {
   const [calling, setCalling] = useState(false);
   const startCall = async () => {
     if (!workspaceId || calling || creating) return;
+    // Before the conversation exists: Not now starts nothing.
+    if (!(await consent.ensure())) return;
     setCalling(true);
     void Haptics.selectionAsync();
     try {
@@ -325,7 +348,7 @@ function Home() {
       router.push(`/session/${created.id}`);
       agentCall.callSession(created.id);
     } catch (caught) {
-      setListError(caught instanceof Error ? caught.message : String(caught));
+      setListError(createFailure(caught));
     } finally {
       setCalling(false);
     }

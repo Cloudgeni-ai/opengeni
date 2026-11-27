@@ -424,12 +424,15 @@ export function viewAsVisitorUrl(publication: Pick<SitePublication, "url" | "acc
 }
 
 /** A platform refusal (Opengeni-wide brake or the workspace's allowance), in words. */
-export function platformRefusal(error: unknown): { title: string; body: string } | null {
+export function platformRefusal(
+  error: unknown,
+  showPurchasePrompts = true,
+): { title: string; body: string } | null {
   const code = siteErrorCode(error);
   if (code === SITE_PLATFORM_QUOTA_ERROR_CODE)
     return {
       title: "Apps allowance used up",
-      body: "This workspace has used this month's apps allowance and has no credits left. Add credits to publish again.",
+      body: `This workspace has used this month's apps allowance and has no credits left.${showPurchasePrompts ? " Add credits to publish again." : ""}`,
     };
   if (code === SITE_PLATFORM_BRAKE_ERROR_CODE)
     return {
