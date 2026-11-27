@@ -72,15 +72,20 @@ export function readyMadeAppTileSeed(template: AppTemplate): string {
   return templatePackageId(template) ?? template.key;
 }
 
-/** The active app here added from this ready-made app's package, if any. */
+/**
+ * The active app here added from this ready-made app's package, when it
+ * counts as added: by the same rule as Available, so a template offered
+ * again (every copy customized, the template newer) can still be added.
+ */
 export function addedReadyMadeApp(
   template: AppTemplate,
   installed: Iterable<AppPackageStatus>,
 ): AppPackageStatus | null {
   const packageId = templatePackageId(template);
   if (!packageId) return null;
-  for (const app of installed) if (app.packageId === packageId && !app.archived) return app;
-  return null;
+  const apps = [...installed];
+  if (availableTemplates([template], apps).length > 0) return null;
+  return apps.find((app) => app.packageId === packageId && !app.archived) ?? null;
 }
 
 export function AvailableApps({

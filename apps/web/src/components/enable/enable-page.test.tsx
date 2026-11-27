@@ -529,3 +529,27 @@ test("a ready-made app already added here: it offers Open app and never installs
   installedApps = [];
   root.unmount();
 });
+
+test("a ready-made app: Turn on stays off until it is known whether the app is already here", async () => {
+  appTemplates = [workSummary];
+  context.accessContext = {
+    workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["artifacts:publish"] }],
+  };
+  let release: (apps: unknown[]) => void = () => undefined;
+  client.listAppPackageStatus.mockImplementationOnce(
+    () => new Promise<unknown[]>((resolve) => (release = resolve)),
+  );
+  client.installAppPackage.mockClear();
+  const { container, root } = await render({ kind: "app", templateKey: "work-summary" });
+  expect(
+    container.querySelector<HTMLButtonElement>("[data-enable-turn-on]")?.disabled ?? true,
+  ).toBe(true);
+  await act(async () => release([]));
+  await settle();
+  expect(turnOnButton(container).disabled).toBe(false);
+  context.accessContext = {
+    workspaceGrants: [{ workspaceId: "workspace-a", permissions: ["sessions:create"] }],
+  };
+  appTemplates = [];
+  root.unmount();
+});

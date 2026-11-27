@@ -56,7 +56,7 @@ const { AgentsPage, BOT_TEMPLATES_MOVED, SLACK_AGENTS_MOVED, duplicateNamesText 
 const { AgentPage, AgentSettingsPage } = await import("../src/app/components/agents/agent-page");
 const { ReadyMadeAgentPreview } =
   await import("../src/app/components/agents/ready-made-agent-preview");
-const { AvailableApps, availableTemplates } =
+const { AvailableApps, addedReadyMadeApp, availableTemplates } =
   await import("../src/app/components/artifacts/available-apps");
 const { installReadyMadeApp } = await import("../src/app/lib/ready-made-apps");
 const { logoTileHue } = await import("../src/ui/logo-tile");
@@ -2409,6 +2409,12 @@ test("a newer ready-made version is offered again beside a customized copy, whic
   expect(availableTemplates(template, [app(true, version)])).toEqual([]);
   expect(availableTemplates(template, [app(false, "0.0.1")])).toEqual([]);
   expect(availableTemplates(template, [app(true, "0.0.1"), app(false, "0.0.1")])).toEqual([]);
+  // Enable follows the same rule: a customized older copy doesn't count as
+  // added, so the newer version can still be turned on; any other copy does.
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(true, "0.0.1")])).toBeNull();
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(true, version)])).not.toBeNull();
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [app(false, "0.0.1")])).not.toBeNull();
+  expect(addedReadyMadeApp(APP_TEMPLATE as never, [])).toBeNull();
 });
 
 test("Installing a ready-made app names its Skills and automations, then opens it", async () => {

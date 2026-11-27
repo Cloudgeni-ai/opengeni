@@ -690,7 +690,8 @@ function AppEnable({
       back={back}
       step={step}
       readiness={readiness}
-      loading={template === undefined && failed === null}
+      // Until the app status is read it can't tell Turn on from Open app.
+      loading={(template === undefined || !packages.loaded) && failed === null}
       loadError={failed}
       onRetry={() => setRevision((value) => value + 1)}
       facts={facts}
