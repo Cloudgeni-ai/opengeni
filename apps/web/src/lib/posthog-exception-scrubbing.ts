@@ -7,6 +7,13 @@
 // any URL query, fragment or page address are removed, because they can quote
 // what the person typed or saw. PostHog groups issues server-side from the
 // type and frames, which are kept, so grouping does not depend on a message.
+//
+// Frames need the same care as the message: Chrome puts the whole message into
+// `error.stack`, and the SDK's parser skips only its first line, so lines 2 and
+// later of a multi-line message come back as frames whose function or location
+// is message text. A frame is kept only when it looks like one the engine
+// rendered: an identifier-like function name (or none), a line number, and a
+// script location this projection recognizes.
 
 /** What a scrubbed exception says instead of its message. */
 export const REDACTED_EXCEPTION_MESSAGE = "[redacted]";
@@ -21,17 +28,20 @@ const SEVERITY_LEVELS = new Set(["fatal", "error", "warning", "log", "info", "de
 const PLATFORMS = new Set(["web:javascript", "node:javascript", "hermes"]);
 // Constructor names such as `TypeError`, `DOMException` or `NotAllowedError`.
 const SAFE_TYPE = /^[A-Za-z_$][\w$.]{0,99}$/u;
-// Engine-rendered function names: `Object.render`, `async Promise.all`,
-// `new Foo`, `<anonymous>`, Firefox's `foo/bar<`.
-const SAFE_FUNCTION = /^[\w$.<>/[\] -]{1,200}$/u;
+// Engine-rendered function names: `Object.render`, `Object.<anonymous>`,
+// `async Promise.all`, `new Foo`, `Foo.bar [as baz]`, Firefox's `foo/bar<`.
+// No other spaces: a space-separated name is message text parsed as a frame.
+const SAFE_FUNCTION = /^(?:async |new )?[\w$.<>/-]{1,200}(?: \[as [\w$]{1,100}\])?$/u;
 const SAFE_TOKEN = /^[\w.:-]{1,100}$/u;
 // SDK mechanism names: `generic`, `onerror`, `onunhandledrejection`.
 const MECHANISM_TYPE = /^[a-z][a-z_]{0,39}$/u;
 // Script resources. Any other path (an inline script reports the page URL)
 // is a page address, which can carry private keys such as share links.
 const SCRIPT_PATH = /\.(?:m?js|cjs|jsx|tsx?|wasm)$/iu;
-// Location strings that are not URLs: `<anonymous>`, `native`, `[native code]`.
-const SAFE_PSEUDO_LOCATION = /^[\w$.<>[\] -]{1,100}$/u;
+// Location strings that are not URLs, as engines render them.
+const PSEUDO_LOCATIONS = new Set(["<anonymous>", "native", "[native code]"]);
+/** A frame on another web origin: real third-party code, or a URL a message quoted. */
+export const EXTERNAL_LOCATION = "<external>";
 
 type Json = Record<string, unknown>;
 
@@ -49,23 +59,23 @@ function matching(value: unknown, pattern: RegExp): string | undefined {
 
 /**
  * A script location without query, fragment, credentials or page address.
- * `data:` URLs carry their content inline and keep only the scheme; `blob:`
- * URLs keep only their origin.
+ * Only the page's own origin keeps its script paths; another web origin is
+ * reported as `<external>`, since a host named in a message could be the
+ * customer's. `data:` URLs carry their content inline and keep only the
+ * scheme, and `blob:` URLs keep only the scheme.
  */
-export function safeScriptLocation(value: unknown): string | undefined {
+export function safeScriptLocation(value: unknown, pageOrigin: string): string | undefined {
   if (typeof value !== "string" || value.length === 0) return undefined;
   if (/^data:/iu.test(value)) return "data:";
-  if (/^blob:/iu.test(value)) {
-    const origin = urlOrigin(value.slice("blob:".length));
-    return origin ? `blob:${origin}` : "blob:";
-  }
+  if (/^blob:/iu.test(value)) return "blob:";
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    return SAFE_PSEUDO_LOCATION.test(value) ? value : undefined;
+    return PSEUDO_LOCATIONS.has(value) ? value : undefined;
   }
   if (url.protocol === "http:" || url.protocol === "https:") {
+    if (url.origin !== pageOrigin) return EXTERNAL_LOCATION;
     return SCRIPT_PATH.test(url.pathname) ? `${url.origin}${url.pathname}` : `${url.origin}/<page>`;
   }
   // Extension and engine schemes (`chrome-extension:`, `webkit-masked-url:`).
@@ -77,28 +87,23 @@ export function safeScriptLocation(value: unknown): string | undefined {
     : `${scheme}://${host}`;
 }
 
-function urlOrigin(value: string): string | undefined {
-  try {
-    const origin = new URL(value).origin;
-    return origin === "null" ? undefined : origin;
-  } catch {
-    return undefined;
-  }
-}
-
-function scrubFrame(frame: unknown): Json | null {
+function scrubFrame(frame: unknown, pageOrigin: string): Json | null {
   if (!isRecord(frame)) return null;
+  // Anything that does not look engine-rendered may be message text: drop
+  // the whole frame rather than keep a part of it.
+  const fn = frame.function;
+  if (fn !== undefined && fn !== null && matching(fn, SAFE_FUNCTION) === undefined) return null;
+  const lineno = safeInteger(frame.lineno);
+  const filename = safeScriptLocation(frame.filename, pageOrigin);
+  if (lineno === undefined || filename === undefined) return null;
   const safe: Json = {};
   const platform = typeof frame.platform === "string" ? frame.platform : undefined;
   safe.platform = platform && PLATFORMS.has(platform) ? platform : "web:javascript";
-  const filename = safeScriptLocation(frame.filename);
-  if (filename) safe.filename = filename;
-  const absPath = safeScriptLocation(frame.abs_path);
+  safe.filename = filename;
+  const absPath = safeScriptLocation(frame.abs_path, pageOrigin);
   if (absPath) safe.abs_path = absPath;
-  const fn = matching(frame.function, SAFE_FUNCTION);
-  if (fn) safe.function = fn;
-  const lineno = safeInteger(frame.lineno);
-  if (lineno !== undefined) safe.lineno = lineno;
+  if (typeof fn === "string") safe.function = fn;
+  safe.lineno = lineno;
   const colno = safeInteger(frame.colno);
   if (colno !== undefined) safe.colno = colno;
   if (typeof frame.in_app === "boolean") safe.in_app = frame.in_app;
@@ -129,7 +134,7 @@ export function safeExceptionType(value: unknown): string {
   return matching(value, SAFE_TYPE) ?? "Error";
 }
 
-function scrubException(exception: unknown): Json | null {
+function scrubException(exception: unknown, pageOrigin: string): Json | null {
   if (!isRecord(exception)) return null;
   const safe: Json = {
     type: safeExceptionType(exception.type),
@@ -143,7 +148,7 @@ function scrubException(exception: unknown): Json | null {
     // are at the end and are the ones kept.
     const frames = stacktrace.frames
       .slice(-MAX_FRAMES)
-      .map(scrubFrame)
+      .map((frame) => scrubFrame(frame, pageOrigin))
       .filter((frame): frame is Json => frame !== null);
     safe.stacktrace = { type: "raw", frames };
   }
@@ -171,12 +176,12 @@ export function leadingException(
  */
 export function scrubPosthogExceptionProperties(
   properties: Json,
-  context: { revision: string },
+  context: { revision: string; pageOrigin: string },
 ): Json | null {
   const list = Array.isArray(properties.$exception_list) ? properties.$exception_list : [];
   const exceptions = list
     .slice(0, MAX_EXCEPTIONS)
-    .map(scrubException)
+    .map((exception) => scrubException(exception, context.pageOrigin))
     .filter((exception): exception is Json => exception !== null);
   if (exceptions.length === 0) return null;
   const safe: Json = {};

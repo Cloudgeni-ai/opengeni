@@ -110,8 +110,8 @@ function renderApp() {
   createRoot(document.getElementById("root")!, {
     // Boundaries keep their own fallback; this only adds the consented,
     // scrubbed PostHog report (see lib/analytics.ts) to React's default log.
-    onCaughtError: (error) => {
-      console.error(error);
+    onCaughtError: (error, errorInfo) => {
+      console.error(error, errorInfo.componentStack);
       reportCaughtExceptionToAnalytics(error, "react_boundary");
     },
   }).render(

@@ -440,6 +440,28 @@ describe("analytics providers", () => {
       });
       expect(JSON.stringify(sharePage)).not.toContain("Zq3secretShareKey");
       expect(sharePage?.properties.page).toBe("other");
+      // The SDK sends person properties beside `properties` for identified
+      // users; their initial landing URLs are projected too.
+      const withPersonProperties = (
+        beforeSend as unknown as (event: Record<string, unknown>) => Record<string, unknown> | null
+      )({
+        uuid: "3b",
+        event: "$exception",
+        properties: { $exception_list: [{ type: "TypeError", value: "x" }] },
+        $set: { $current_url: "https://app.opengeni.ai/?draft=sensitive", plan: "team" },
+        $set_once: {
+          $initial_current_url: "https://app.opengeni.ai/?code=sensitive",
+          $initial_pathname: "/share/sensitive",
+          $initial_referrer: "https://private.example/?q=sensitive",
+          $initial_referring_domain: "www.producthunt.com",
+        },
+      });
+      expect(JSON.stringify(withPersonProperties)).not.toMatch(/sensitive|private/);
+      expect(withPersonProperties).toMatchObject({
+        $set: { plan: "team" },
+        $set_once: { $initial_referring_domain: "www.producthunt.com" },
+      });
+      expect(withPersonProperties?.$set_once).not.toHaveProperty("$geoip_disable");
       // Exceptions are autocaptured and leave the browser without message
       // text, source lines or page addresses.
       expect(initCall?.[2]).toMatchObject({

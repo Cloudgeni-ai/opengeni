@@ -346,10 +346,17 @@ async function initializePostHog(projectKey: string, host: string): Promise<void
     before_send: (event) => {
       if (!event) return null;
       try {
-        const properties = safePosthogProperties(event.properties);
-        if (event.event !== "$exception") return { ...event, properties };
-        const scrubbed = safeExceptionProperties(properties);
-        return scrubbed ? { ...event, properties: scrubbed } : null;
+        // The SDK puts person properties (`$set`, and `$set_once` with the
+        // initial landing URLs) beside `properties`, not inside them.
+        const safe = { ...event, properties: safePosthogProperties(event.properties) };
+        for (const key of ["$set", "$set_once"] as const) {
+          const value: unknown = safe[key];
+          if (value && typeof value === "object" && !Array.isArray(value))
+            safe[key] = safePosthogProperties(value as Record<string, unknown>, true);
+        }
+        if (event.event !== "$exception") return safe;
+        const scrubbed = safeExceptionProperties(safe.properties);
+        return scrubbed ? { ...safe, properties: scrubbed } : null;
       } catch {
         // A projection that fails sends nothing.
         return null;
@@ -419,13 +426,18 @@ const CLICK_IDENTIFIER_KEY =
   /(^|[_$])(gad_source|mc_cid|gclid|gclsrc|dclid|gbraid|wbraid|fbclid|msclkid|twclid|li_fat_id|igshid|ttclid|rdt_cid|epik|qclid|sccid|irclid|_kx|ph_keyword|search_engine)$/i;
 
 /** A third-party sink projection only; never modifies application data. */
-function safePosthogProperties(properties: Record<string, unknown>): Record<string, unknown> {
-  const safe: Record<string, unknown> = { ...properties, $geoip_disable: true };
+function safePosthogProperties(
+  properties: Record<string, unknown>,
+  personProperties = false,
+): Record<string, unknown> {
+  const safe: Record<string, unknown> = personProperties
+    ? { ...properties }
+    : { ...properties, $geoip_disable: true };
   for (const key of Object.keys(safe)) {
     // SDK-generated person properties can also contain initial URLs/campaigns.
     if (key === "$set" || key === "$set_once") {
       if (safe[key] && typeof safe[key] === "object" && !Array.isArray(safe[key])) {
-        safe[key] = safePosthogProperties(safe[key] as Record<string, unknown>);
+        safe[key] = safePosthogProperties(safe[key] as Record<string, unknown>, true);
       }
     } else if (CAMPAIGN_TOKEN_KEY.test(key)) {
       if (!isSignupAttributionValue(safe[key])) delete safe[key];
@@ -457,6 +469,7 @@ function safeExceptionProperties(
   if (leading && isChunkLoadError(leading)) return null;
   const scrubbed = scrubPosthogExceptionProperties(properties, {
     revision: clientRevision(bundleDeploymentRevision || "dev"),
+    pageOrigin: window.location.origin,
   });
   if (!scrubbed) return null;
   return { ...scrubbed, ...(latestPathname ? journeyPage(latestPathname, latestSearch) : {}) };

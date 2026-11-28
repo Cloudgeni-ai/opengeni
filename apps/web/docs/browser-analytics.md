@@ -410,7 +410,9 @@ exception autocapture code is bundled with the lazy analytics chunk
 refuses PostHog's asset host.
 
 Every `$exception` event passes through `before_send`, which applies the
-general URL projection above and then
+general URL projection above (to `properties` and to the person properties
+`$set`/`$set_once` the SDK sends beside them, which carry the initial landing
+URLs) and then
 `src/lib/posthog-exception-scrubbing.ts`. What is kept: the exception type (a
 constructor-like name, otherwise `Error`), the mechanism (handled, synthetic,
 the SDK's mechanism name), stack frames as file, function, line and column, the
@@ -419,9 +421,15 @@ severity, the bundle revision as `opengeni_revision`, and the content-free
 message (`value` becomes `[redacted]`; `$exception_message` and
 `$exception_values` are dropped), source context lines, frame variables,
 exception steps, client fingerprints and any other exception property the SDK
-adds. Frame locations keep only the origin and path of a script file, never a
-query or fragment; any other path, such as the page an inline script ran on,
-becomes `<origin>/<page>`, a `data:` URL keeps only its scheme and a `blob:` URL
-only its origin. PostHog groups issues from the kept type and frames. A
+adds. Chrome puts the whole message into the stack and the SDK parses its
+second and later lines as frames, so a frame is kept only when it looks
+engine-rendered: an identifier-like function name or none (a name with other
+spaces drops the frame), a line number, and a recognized location. Locations on
+the page's own origin keep the path of a script file, never a query or
+fragment; any other path, such as the page an inline script ran on, becomes
+`<origin>/<page>`. Another web origin becomes `<external>`, `data:` and `blob:`
+URLs keep only their scheme, and the only non-URL locations kept are
+`<anonymous>`, `native` and `[native code]`. PostHog groups issues from the
+kept type and frames. A
 projection that fails drops the event. Stale lazy-chunk failures, and every
 exception after one in the same document, are left to the first-party beacon.

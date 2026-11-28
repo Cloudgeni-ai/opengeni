@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  EXTERNAL_LOCATION,
   REDACTED_EXCEPTION_MESSAGE,
   leadingException,
   safeExceptionType,
@@ -11,6 +12,8 @@ import {
 // Every value a customer could have typed or seen carries this marker, so a
 // single search of the serialized result proves none of it survives.
 const SECRET = "customer-secret-7f3a";
+const ORIGIN = "https://app.opengeni.ai";
+const context = { revision: "rev-1", pageOrigin: ORIGIN };
 
 function exceptionEvent(): Record<string, unknown> {
   return {
@@ -37,8 +40,8 @@ function exceptionEvent(): Record<string, unknown> {
           frames: [
             {
               platform: "web:javascript",
-              filename: `https://app.opengeni.ai/assets/index-abc123.js?token=${SECRET}#${SECRET}`,
-              abs_path: `https://app.opengeni.ai/assets/index-abc123.js?token=${SECRET}`,
+              filename: `${ORIGIN}/assets/index-abc123.js?token=${SECRET}#${SECRET}`,
+              abs_path: `${ORIGIN}/assets/index-abc123.js?token=${SECRET}`,
               function: "Object.render",
               lineno: 12,
               colno: 3456,
@@ -55,10 +58,9 @@ function exceptionEvent(): Record<string, unknown> {
               platform: "web:javascript",
               // An inline script reports the page itself; a share link's
               // address is the key to the conversation.
-              filename: `https://app.opengeni.ai/share/${SECRET}`,
-              function: `${SECRET} "quoted" (text)`,
-              lineno: -1,
-              colno: 1.5,
+              filename: `${ORIGIN}/share/${SECRET}`,
+              lineno: 3,
+              colno: 7,
             },
           ],
         },
@@ -74,7 +76,7 @@ function exceptionEvent(): Record<string, unknown> {
 
 describe("PostHog exception scrubbing", () => {
   test("keeps type, mechanism, frames and revision, and drops all content", () => {
-    const scrubbed = scrubPosthogExceptionProperties(exceptionEvent(), { revision: "rev-1" });
+    const scrubbed = scrubPosthogExceptionProperties(exceptionEvent(), context);
     expect(JSON.stringify(scrubbed)).not.toContain(SECRET);
     expect(scrubbed).toEqual({
       token: "phc_project",
@@ -94,15 +96,15 @@ describe("PostHog exception scrubbing", () => {
             frames: [
               {
                 platform: "web:javascript",
-                filename: "https://app.opengeni.ai/assets/index-abc123.js",
-                abs_path: "https://app.opengeni.ai/assets/index-abc123.js",
+                filename: `${ORIGIN}/assets/index-abc123.js`,
+                abs_path: `${ORIGIN}/assets/index-abc123.js`,
                 function: "Object.render",
                 lineno: 12,
                 colno: 3456,
                 in_app: true,
                 chunk_id: "chunk-1",
               },
-              { platform: "web:javascript", filename: "https://app.opengeni.ai/<page>" },
+              { platform: "web:javascript", filename: `${ORIGIN}/<page>`, lineno: 3, colno: 7 },
             ],
           },
         },
@@ -115,12 +117,91 @@ describe("PostHog exception scrubbing", () => {
     });
   });
 
+  test("drops frames the SDK parsed out of a multi-line message", () => {
+    // Chrome renders `${name}: ${message}\n    at …`; the SDK's parser skips
+    // only the first line, so message lines 2+ come back as frames. These are
+    // the shapes it produces for them, then two engine-rendered frames.
+    const scrubbed = scrubPosthogExceptionProperties(
+      {
+        $exception_list: [
+          {
+            type: "Error",
+            value: `Request failed\n${SECRET} plan for acme at https://acme.example/x.js:1:2`,
+            stacktrace: {
+              type: "raw",
+              frames: [
+                {
+                  platform: "web:javascript",
+                  function: `${SECRET} plan for acme at `,
+                  filename: "https://acme.example/x.js",
+                  lineno: 1,
+                  colno: 2,
+                },
+                {
+                  platform: "web:javascript",
+                  function: `${SECRET} two words`,
+                  filename: "<anonymous>",
+                  lineno: 1,
+                },
+                // `at acme` alone parses as a location without a line.
+                { platform: "web:javascript", filename: SECRET },
+                { platform: "web:javascript", filename: SECRET, lineno: 4 },
+                // A host a message named, without a function: kept, but only as external.
+                {
+                  platform: "web:javascript",
+                  filename: `https://${SECRET}.example/a.js`,
+                  lineno: 9,
+                },
+                { platform: "web:javascript", function: "JSON.parse", filename: "<anonymous>" },
+                {
+                  platform: "web:javascript",
+                  function: "async Promise.all",
+                  filename: "<anonymous>",
+                  lineno: 1,
+                  colno: 1,
+                },
+                {
+                  platform: "web:javascript",
+                  function: "Object.<anonymous> [as handle]",
+                  filename: `${ORIGIN}/assets/app-1.js`,
+                  lineno: 20,
+                  colno: 4,
+                },
+              ],
+            },
+          },
+        ],
+      },
+      context,
+    );
+    expect(JSON.stringify(scrubbed)).not.toContain(SECRET);
+    expect(JSON.stringify(scrubbed)).not.toContain("acme");
+    expect((scrubbed?.$exception_list as { stacktrace: unknown }[])[0]!.stacktrace).toEqual({
+      type: "raw",
+      frames: [
+        { platform: "web:javascript", filename: EXTERNAL_LOCATION, lineno: 9 },
+        {
+          platform: "web:javascript",
+          function: "async Promise.all",
+          filename: "<anonymous>",
+          lineno: 1,
+          colno: 1,
+        },
+        {
+          platform: "web:javascript",
+          function: "Object.<anonymous> [as handle]",
+          filename: `${ORIGIN}/assets/app-1.js`,
+          lineno: 20,
+          colno: 4,
+        },
+      ],
+    });
+  });
+
   test("drops an event without a usable exception", () => {
+    expect(scrubPosthogExceptionProperties({ $exception_message: SECRET }, context)).toBeNull();
     expect(
-      scrubPosthogExceptionProperties({ $exception_message: SECRET }, { revision: "r" }),
-    ).toBeNull();
-    expect(
-      scrubPosthogExceptionProperties({ $exception_list: [SECRET, null] }, { revision: "r" }),
+      scrubPosthogExceptionProperties({ $exception_list: [SECRET, null] }, context),
     ).toBeNull();
   });
 
@@ -128,6 +209,7 @@ describe("PostHog exception scrubbing", () => {
     const frames = Array.from({ length: 100 }, (_, index) => ({
       platform: "web:javascript",
       function: `f${index}`,
+      filename: `${ORIGIN}/assets/a.js`,
       lineno: index,
     }));
     const scrubbed = scrubPosthogExceptionProperties(
@@ -138,7 +220,7 @@ describe("PostHog exception scrubbing", () => {
           stacktrace: { type: "raw", frames },
         })),
       },
-      { revision: "r" },
+      context,
     );
     const list = scrubbed?.$exception_list as { stacktrace: { frames: { lineno: number }[] } }[];
     expect(list).toHaveLength(10);
@@ -153,29 +235,29 @@ describe("PostHog exception scrubbing", () => {
         exception_source: SECRET,
         $exception_list: [{ type: "Error", value: SECRET }],
       },
-      { revision: "r" },
+      context,
     );
     expect(scrubbed).not.toHaveProperty("$exception_level");
     expect(scrubbed).not.toHaveProperty("exception_source");
   });
 
-  test("script locations lose query, fragment, credentials and inline content", () => {
-    expect(safeScriptLocation("https://user:pass@app.opengeni.ai/assets/a.js?x=1#y")).toBe(
-      "https://app.opengeni.ai/assets/a.js",
+  test("script locations lose query, fragment, credentials, other hosts and inline content", () => {
+    const location = (value: unknown) => safeScriptLocation(value, ORIGIN);
+    expect(location(`https://user:pass@app.opengeni.ai/assets/a.js?x=1#y`)).toBe(
+      `${ORIGIN}/assets/a.js`,
     );
-    expect(safeScriptLocation(`https://app.opengeni.ai/workspaces/w/sessions/s?q=${SECRET}`)).toBe(
-      "https://app.opengeni.ai/<page>",
-    );
-    expect(safeScriptLocation(`data:text/javascript,alert("${SECRET}")`)).toBe("data:");
-    expect(safeScriptLocation("blob:https://app.opengeni.ai/0f8f0e0e-uuid")).toBe(
-      "blob:https://app.opengeni.ai",
-    );
-    expect(safeScriptLocation("chrome-extension://abcdef/content.js?x=1")).toBe(
+    expect(location(`${ORIGIN}/workspaces/w/sessions/s?q=${SECRET}`)).toBe(`${ORIGIN}/<page>`);
+    expect(location("https://www.googletagmanager.com/gtag/js?id=G-1")).toBe(EXTERNAL_LOCATION);
+    expect(location(`data:text/javascript,alert("${SECRET}")`)).toBe("data:");
+    expect(location(`blob:${ORIGIN}/0f8f0e0e-uuid`)).toBe("blob:");
+    expect(location("chrome-extension://abcdef/content.js?x=1")).toBe(
       "chrome-extension://abcdef/content.js",
     );
-    expect(safeScriptLocation("<anonymous>")).toBe("<anonymous>");
-    expect(safeScriptLocation(`${SECRET} "free text"`)).toBeUndefined();
-    expect(safeScriptLocation(42)).toBeUndefined();
+    expect(location("<anonymous>")).toBe("<anonymous>");
+    expect(location("native")).toBe("native");
+    expect(location(SECRET)).toBeUndefined();
+    expect(location(`${SECRET} "free text"`)).toBeUndefined();
+    expect(location(42)).toBeUndefined();
   });
 
   test("exception types are constructor-like names", () => {
