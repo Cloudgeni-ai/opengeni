@@ -500,9 +500,24 @@ type PreferenceRegistryListInput = {
   limit: number;
 };
 
-async function listPreferenceRegistryScoped(db: Database, input: PreferenceRegistryListInput) {
+function organizationSkillInAttemptReach(accountId: string, workspaceId: string) {
+  const p = schema.preferenceRegistryPreferences;
+  return sql`(${p.scope} <> 'organization' OR NOT EXISTS (
+    SELECT 1 FROM organization_skill_reach reach
+    WHERE reach.account_id=${p.accountId} AND reach.preference_id=${p.id}
+      AND CASE WHEN get_workspace_kind(${accountId}::uuid, ${workspaceId}::uuid)='personal'
+        THEN NOT reach.allow_personal_workspaces
+        ELSE reach.allowed_workspace_ids IS NOT NULL AND NOT (${workspaceId}::uuid=ANY(reach.allowed_workspace_ids)) END
+  ))`;
+}
+
+async function listPreferenceRegistryScoped(
+  db: Database,
+  input: PreferenceRegistryListInput,
+  reachCondition?: SQL,
+) {
   const now = new Date();
-  const conditions: SQL[] = [];
+  const conditions: SQL[] = reachCondition ? [reachCondition] : [];
   if (input.scope) conditions.push(eq(schema.preferenceRegistryPreferences.scope, input.scope));
   if (input.status === "active") {
     conditions.push(
@@ -697,15 +712,23 @@ export async function listPreferenceRegistryForAttempt(
   input: PreferenceRegistryAttemptClaims & PreferenceRegistryListInput,
 ) {
   return await withPreferenceRegistryAttemptAuthority(db, input, async (scopedDb) => {
-    return await listPreferenceRegistryScoped(scopedDb, input);
+    return await listPreferenceRegistryScoped(
+      scopedDb,
+      input,
+      organizationSkillInAttemptReach(input.accountId, input.workspaceId),
+    );
   });
 }
 
-async function getPreferenceRegistryDetailScoped(db: Database, preferenceId: string) {
+async function getPreferenceRegistryDetailScoped(
+  db: Database,
+  preferenceId: string,
+  reachCondition?: SQL,
+) {
   const [preference] = await db
     .select()
     .from(schema.preferenceRegistryPreferences)
-    .where(eq(schema.preferenceRegistryPreferences.id, preferenceId))
+    .where(and(eq(schema.preferenceRegistryPreferences.id, preferenceId), reachCondition))
     .limit(1);
   if (!preference) throw new PreferenceRegistryNotFoundError("Preference was not found");
   const [revisions, events] = await Promise.all([
@@ -746,7 +769,11 @@ export async function getPreferenceRegistryDetailForAttempt(
   input: PreferenceRegistryAttemptClaims & { preferenceId: string },
 ) {
   return await withPreferenceRegistryAttemptAuthority(db, input, async (scopedDb) => {
-    return await getPreferenceRegistryDetailScoped(scopedDb, input.preferenceId);
+    return await getPreferenceRegistryDetailScoped(
+      scopedDb,
+      input.preferenceId,
+      organizationSkillInAttemptReach(input.accountId, input.workspaceId),
+    );
   });
 }
 

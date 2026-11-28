@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import type {
   SkillRecord as ContractRecord,
   SkillWriteReceipt as ContractReceipt,
+  SaveOrganizationSkillRequest as ContractOrganizationSave,
 } from "@opengeni/contracts";
-import type { SkillRecord, SkillWriteReceipt } from "../src/skills";
+import type { SaveOrganizationSkillRequest, SkillRecord, SkillWriteReceipt } from "../src/skills";
 import { OpenGeniClient } from "../src/client";
 
 test("shared Skill SDK records and receipts match both directions", () => {
@@ -11,11 +12,49 @@ test("shared Skill SDK records and receipts match both directions", () => {
   const toContract = (value: SkillRecord): ContractRecord => value;
   const receiptToSdk = (value: ContractReceipt): SkillWriteReceipt => value;
   const receiptToContract = (value: SkillWriteReceipt): ContractReceipt => value;
+  const orgSaveToSdk = (value: ContractOrganizationSave): SaveOrganizationSkillRequest => value;
+  const orgSaveToContract = (value: SaveOrganizationSkillRequest): ContractOrganizationSave =>
+    value;
   expect(
-    [toSdk, toContract, receiptToSdk, receiptToContract].every(
+    [toSdk, toContract, receiptToSdk, receiptToContract, orgSaveToSdk, orgSaveToContract].every(
       (value) => typeof value === "function",
     ),
   ).toBe(true);
+});
+
+test("organization Skill saves send initial reach without introducing a second write", async () => {
+  const calls: unknown[] = [];
+  const client = new OpenGeniClient({
+    baseUrl: "https://example.test",
+    fetch: (async (input, init) => {
+      calls.push({
+        url: String(input),
+        method: init?.method,
+        body: JSON.parse(String(init?.body)),
+      });
+      return Response.json({ outcome: "applied" });
+    }) as typeof fetch,
+  });
+  const request: SaveOrganizationSkillRequest = {
+    operationId: "operation",
+    skillId: "skill",
+    stableKey: "procedure",
+    expectedRevisionId: null,
+    expectedScopeVersion: 1,
+    files: [{ path: "SKILL.md", content: "test" }],
+    reason: "Publish",
+    initialReach: { allowedWorkspaceIds: ["tenant"], allowPersonalWorkspaces: false },
+  };
+  expect(await client.saveOrganizationSkill("workspace", request)).toMatchObject({
+    outcome: "applied",
+  });
+  expect(calls).toEqual([
+    {
+      url: "https://example.test/v1/workspaces/workspace/organization-skills/save",
+      method: "POST",
+      body: request,
+    },
+  ]);
 });
 
 test("Skill catalog pagination preserves the server cursor and sends bounded query options", async () => {

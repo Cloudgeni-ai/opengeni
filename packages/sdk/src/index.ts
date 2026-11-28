@@ -985,6 +985,7 @@ export type {
   SkillWriteReceipt,
   SkillPublicationReceipt,
   SkillSourceReleaseReceipt,
+  SaveOrganizationSkillRequest,
   SaveWorkspaceSkillRequest,
   RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,

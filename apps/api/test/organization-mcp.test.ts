@@ -141,6 +141,19 @@ describe("organization MCP action catalog", () => {
     expect(ACTION_CATALOG.some((entry) => entry.path === path)).toBe(false);
   });
 
+  test("the direct organization Skill writer adds no agent action", () => {
+    const base = "/v1/workspaces/:workspaceId/organization-skills";
+    for (const [method, path] of [
+      ["POST", `${base}/save`],
+      ["POST", `${base}/:skillId/remove`],
+      ["PUT", `${base}/:skillId/reach`],
+    ]) {
+      expect(registeredApiRoutes()).toContainEqual(expect.objectContaining({ method, path }));
+      expect(isActionCatalogExempt(path!)).toBe(true);
+      expect(ACTION_CATALOG.some((entry) => entry.path === path)).toBe(false);
+    }
+  });
+
   test("compact UI configuration reads do not add a redundant agent action", () => {
     const path = "/v1/workspaces/:workspaceId/sessions/:sessionId";
     expect(isActionCatalogExempt(`${path}/configuration`)).toBe(true);
