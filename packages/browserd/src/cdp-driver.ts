@@ -11359,6 +11359,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // so Chromium answers it as an aborted load. It ran: the tab keeps its
     // page (or shows the document the script returned), and that is success.
     if (errorText === "net::ERR_ABORTED" && /^\s*javascript:/iu.test(url)) errorText = null;
+    // A response the browser saves as a file ends the navigation there: the
+    // tab keeps its page and the file appears among the session's downloads,
+    // as after a click on a download link. Chromium reports the save as an
+    // aborted load, but nothing failed.
+    if (result.isDownload === true) errorText = null;
     if (errorText !== null && !isPageLoadError(errorText)) {
       throw new InteractionDefiniteDriverError(
         "resource_unavailable",

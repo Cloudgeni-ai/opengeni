@@ -211,6 +211,86 @@ e2e(
 );
 
 e2e(
+  "navigating to a file the browser downloads completes and keeps the tab on its page",
+  async () => {
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(request) {
+        const url = new URL(request.url);
+        // A document link that answers with a file to save, as document
+        // archives do with `?download=true`.
+        if (url.pathname === "/document.pdf")
+          return new Response("%PDF-1.4\n%%EOF\n", {
+            headers: {
+              "content-type": "application/pdf",
+              "content-disposition": 'attachment; filename="document.pdf"',
+            },
+          });
+        return new Response(livePage("list"), { headers: { "content-type": "text/html" } });
+      },
+    });
+    const root = await mkdtemp("/tmp/ogb-navigation-download-");
+    const supervisor = await BrowserSupervisor.open({ rootDirectory: root, maxSessions: 1 });
+    const origin = `http://127.0.0.1:${server.port}`;
+    const browserSessionId = randomUUID();
+    const controllerGeneration = randomUUID();
+    const reference = { browserSessionId, controllerGeneration };
+    try {
+      const status = await supervisor.createSession({
+        ...reference,
+        headed: false,
+        transport: { kind: "managed", engine: "chromium" },
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+        initialUrl: `${origin}/list`,
+      });
+      const targetId = status.observation!.target.id;
+      const files = ["/document.pdf", "/document.pdf?download=true"];
+      for (const file of files) {
+        const observation = await supervisor.observe(reference, targetId);
+        const downloaded = await supervisor.action({
+          protocolVersion: 1,
+          operationId: randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedDocumentGeneration: observation.target.documentGeneration!,
+          expectedFrameId: observation.frameId!,
+          actor: { kind: "human", subjectId: "navigation-download-fixture" },
+          action: { type: "navigate", url: `${origin}${file}` },
+        });
+        // The browser saved the file instead of showing it. The navigation
+        // did what was asked, as a click on a download link does.
+        expect(downloaded.error ?? null).toBeNull();
+        expect(downloaded.state).toBe("completed");
+        expect(downloaded.observation?.target.url).toBe(`${origin}/list`);
+      }
+      // Each file is among the session's downloads, ready to read.
+      let downloads = await supervisor.listDownloads(reference);
+      for (
+        let attempt = 0;
+        attempt < 100 &&
+        (downloads.length < files.length ||
+          downloads.some((download) => download.status !== "completed"));
+        attempt++
+      ) {
+        await Bun.sleep(100);
+        downloads = await supervisor.listDownloads(reference);
+      }
+      expect(downloads.map((download) => download.status)).toEqual(["completed", "completed"]);
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+e2e(
   "a browser opens on its first page even when that page fails to load",
   async () => {
     const root = await mkdtemp("/tmp/ogb-open-error-");
