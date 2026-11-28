@@ -30,6 +30,7 @@ import {
   BrowserRecordingSummary,
   BrowserRecordingUploadRequest,
   BrowserRecordingUploadStatus,
+  BrowserDiagnosticKind,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserExternalAuthCommand,
@@ -3424,15 +3425,17 @@ function parseImageFormat(value: string | null): "jpeg" | "png" {
   throw new ProtocolError("invalid_action", "image format is invalid", 400);
 }
 
-function parseDiagnosticKinds(
-  value: string,
-): Array<"console" | "page_error" | "failed_request" | "download"> {
+function parseDiagnosticKinds(value: string): BrowserDiagnosticKind[] {
   const kinds = value.split(",").filter(Boolean);
-  const allowed = new Set(["console", "page_error", "failed_request", "download"]);
-  if (kinds.length === 0 || kinds.length > 4 || kinds.some((kind) => !allowed.has(kind))) {
+  const allowed = new Set<string>(BrowserDiagnosticKind.options);
+  if (
+    kinds.length === 0 ||
+    kinds.length > allowed.size ||
+    kinds.some((kind) => !allowed.has(kind))
+  ) {
     throw new ProtocolError("invalid_action", "diagnostic kinds are invalid", 400);
   }
-  return [...new Set(kinds)] as Array<"console" | "page_error" | "failed_request" | "download">;
+  return [...new Set(kinds)] as BrowserDiagnosticKind[];
 }
 
 function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): void {

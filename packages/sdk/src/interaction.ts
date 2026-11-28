@@ -840,7 +840,12 @@ export type BrowserObservation = {
   observedAt: string;
 };
 
-export type BrowserDiagnosticKind = "console" | "page_error" | "failed_request" | "download";
+export type BrowserDiagnosticKind =
+  | "console"
+  | "page_error"
+  | "failed_request"
+  | "download"
+  | "request";
 
 export type BrowserDiagnosticEntry = {
   sequence: number;

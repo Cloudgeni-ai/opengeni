@@ -291,6 +291,13 @@ const HTTP_ERROR_STATUS_LOAD_ERROR = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
 /** Recent main-frame loaders remembered per tab, to recognize a navigation's
  * commit even after a later document (a client redirect) replaced it. */
 const COMMITTED_LOADER_HISTORY = 16;
+/** Finished requests remembered per tab for a caller that asks for them.
+ * Kept apart from errors and downloads so a busy page cannot push those out. */
+const REQUEST_DIAGNOSTIC_HISTORY = 500;
+/** Request types listed as a tab's requests: its documents and the calls its
+ * scripts make. Images, fonts, styles and scripts would bury them, and one
+ * that fails is still reported as a failed request. */
+const LISTED_REQUEST_TYPES = new Set(["Document", "XHR", "Fetch", "Other"]);
 /** Captures of a tab that keeps committing new documents before giving up. */
 const SCREENSHOT_DOCUMENT_ATTEMPTS = 3;
 /** Bound for each step that keeps scrollbar gutters during a full-page capture. */
@@ -961,6 +968,12 @@ type TargetState = {
   diagnostics: Diagnostics;
   diagnosticEntries: BrowserDiagnosticEntry[];
   diagnosticSequence: number;
+  /** The highest sequence dropped from diagnosticEntries to keep it bounded. */
+  droppedDiagnosticSequence: number;
+  /** The tab's finished requests (kind "request"), listed only on request. */
+  requestEntries: BrowserDiagnosticEntry[];
+  /** The highest sequence dropped from requestEntries to keep it bounded. */
+  droppedRequestSequence: number;
   /** Chrome's buffered console messages and exceptions already reported for
    * this tab, so each on-demand replay appends only what is new. */
   runtimeDiagnosticKeys: Set<string>;
@@ -2484,13 +2497,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (!kinds || kinds.has("console") || kinds.has("page_error")) {
         await this.harvestRuntimeDiagnostics(state);
       }
-      const available = state.diagnosticEntries.filter(
+      // Finished requests are listed only when asked for by name.
+      const listsRequests = kinds?.has("request") ?? false;
+      const listsOthers = !kinds || [...kinds].some((kind) => kind !== "request");
+      const pool = listsRequests
+        ? [...(listsOthers ? state.diagnosticEntries : []), ...state.requestEntries].sort(
+            (left, right) => left.sequence - right.sequence,
+          )
+        : state.diagnosticEntries;
+      const available = pool.filter(
         (entry) => entry.sequence > afterSequence && (!kinds || kinds.has(entry.kind)),
       );
       const entries = available.slice(0, limit);
       const droppedBeforeCursor =
-        state.diagnosticEntries.length > 0 &&
-        state.diagnosticEntries[0]!.sequence > afterSequence + 1;
+        (listsOthers && state.droppedDiagnosticSequence > afterSequence) ||
+        (listsRequests && state.droppedRequestSequence > afterSequence);
       const limited = available.length > entries.length;
       const batch = BrowserDiagnosticBatch.parse({
         browserSessionId: this.browserSessionId,
@@ -4746,6 +4767,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       },
       diagnosticEntries: [],
       diagnosticSequence: 0,
+      droppedDiagnosticSequence: 0,
+      requestEntries: [],
+      droppedRequestSequence: 0,
       runtimeDiagnosticKeys: new Set(),
       inflightRequests: new Set(),
       networkTrackingOverflow: false,
@@ -4953,6 +4977,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (event) => {
           const requestId = stringField(event.params, "requestId");
           const request = requestId ? state.requests.get(requestId) : undefined;
+          if (request) this.recordFinishedRequest(state, request, null);
           if (requestId) {
             state.inflightRequests.delete(requestId);
             state.failedRequests.delete(requestId);
@@ -4968,6 +4993,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (event) => {
           const requestId = stringField(event.params, "requestId");
           const request = requestId ? state.requests.get(requestId) : undefined;
+          if (request) {
+            this.recordFinishedRequest(state, request, {
+              text: boundedTextField(event.params.errorText, 8_192) ?? "Network request failed",
+              cancelled:
+                event.params.canceled === true || event.params.errorText === "net::ERR_ABORTED",
+            });
+          }
           if (requestId) {
             state.inflightRequests.delete(requestId);
             // A document request's id is its navigation's loader id. One the
@@ -5006,6 +5038,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const response = isRecord(event.params.response) ? event.params.response : null;
           const request = requestId ? state.requests.get(requestId) : undefined;
           if (request) request.respondedAt = Date.now();
+          if (request && typeof response?.status === "number") {
+            request.status = Math.trunc(response.status);
+          }
           if (
             request &&
             typeof response?.mimeType === "string" &&
@@ -12632,6 +12667,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
+  /** Remember one of the tab's requests as it ends, for a caller that lists
+   * the tab's requests: with its status and any network error that ended it.
+   * A page that stops reading a response, or never reads it, cancels it after
+   * its status arrived; that request still got its answer. */
+  private recordFinishedRequest(
+    state: TargetState,
+    request: TrackedRequest,
+    networkError: { text: string; cancelled: boolean } | null,
+  ): void {
+    if (request.browserInitiated || !LISTED_REQUEST_TYPES.has(request.type ?? "Other")) return;
+    const status =
+      request.status !== undefined && request.status >= 100 && request.status <= 999
+        ? request.status
+        : null;
+    const failed =
+      (status !== null && status >= 400) ||
+      (networkError !== null && (status === null || !networkError.cancelled));
+    const outcome =
+      status === null
+        ? (networkError?.text ?? "Finished")
+        : networkError === null
+          ? `HTTP ${status}`
+          : `HTTP ${status}, then ${networkError.text}`;
+    const entry = BrowserDiagnosticEntry.parse({
+      kind: "request",
+      level: failed ? "error" : "info",
+      message: request.type ? `${outcome} (${request.type})` : outcome,
+      url: request.url,
+      method: request.method,
+      status,
+      filename: null,
+      sequence: ++state.diagnosticSequence,
+      occurredAt: this.timestamp(),
+    });
+    state.requestEntries.push(entry);
+    if (state.requestEntries.length > REQUEST_DIAGNOSTIC_HISTORY) {
+      const dropped = state.requestEntries.splice(
+        0,
+        state.requestEntries.length - REQUEST_DIAGNOSTIC_HISTORY,
+      );
+      state.droppedRequestSequence = dropped.at(-1)!.sequence;
+    }
+  }
+
   /**
    * Append the tab's console messages and uncaught exceptions that were not
    * reported yet. The page session never keeps Runtime enabled, because a page
@@ -12755,10 +12834,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
     state.diagnosticEntries.push(parsed);
     if (state.diagnosticEntries.length > INTERACTION_MAX_DIAGNOSTIC_ENTRIES) {
-      state.diagnosticEntries.splice(
+      const dropped = state.diagnosticEntries.splice(
         0,
         state.diagnosticEntries.length - INTERACTION_MAX_DIAGNOSTIC_ENTRIES,
       );
+      state.droppedDiagnosticSequence = dropped.at(-1)!.sequence;
     }
   }
 

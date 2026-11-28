@@ -3489,6 +3489,7 @@ function diagnosticKindLabel(
     case "page_error":
       return t("browserViewer.pageError");
     case "failed_request":
+    case "request":
       return t("browserViewer.request");
     case "download":
       return t("browserViewer.download");

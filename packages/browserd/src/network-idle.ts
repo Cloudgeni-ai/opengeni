@@ -26,6 +26,8 @@ export type TrackedRequest = {
   /** When the response headers arrived, and when body data last did. */
   respondedAt: number | null;
   dataAt: number | null;
+  /** The HTTP status of the response, once its headers arrived. */
+  status?: number;
 };
 
 /** A response whose body has had no data for this long is a stream or a body
