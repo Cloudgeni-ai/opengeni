@@ -2696,7 +2696,20 @@ function SessionChatPane(props: {
       }),
     [navigate],
   );
-  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId, openSession);
+  // `meeting:` links open the meeting page in this workspace the same way.
+  const openMeeting = useCallback(
+    (workspaceId: string, recordingId: string) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/meetings/$recordingId",
+        params: { workspaceId, recordingId },
+      }),
+    [navigate],
+  );
+  const resolveLink = useWorkspaceAppLinkResolver(
+    props.session.workspaceId,
+    openSession,
+    openMeeting,
+  );
   const hostMessageContext = useHostMessageContext();
   const gutter = props.placement === "panel" ? "px-3" : "px-4 sm:px-6";
   // Live voice starts only from the current build: a tab opened before a

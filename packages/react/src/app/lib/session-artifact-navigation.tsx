@@ -80,17 +80,23 @@ export function useAppLinkResolver(): OpenGeniLinkResolver {
 
 /**
  * {@link useAppLinkResolver} inside one workspace's session: a workspace-less
- * `artifact:` file/editor link or `session:` chat link belongs to that workspace, as
- * it does in the agent's chat replies, so links in its questions and other
+ * `artifact:` file/editor link, `session:` chat link or `meeting:` link belongs to
+ * that workspace, as it does in the agent's chat replies, so links in its questions and other
  * session text resolve the same way. The host's resolver still sees the link
- * first. With `openSession`, a plain click on a chat link opens the chat here
- * without reloading the app, while the link keeps the chat's page as its href,
+ * first. With `openSession` (and `openMeeting`), a plain click on a chat (or
+ * meeting) link opens it here without reloading the app, while the link keeps its page as its href,
  * so ⌘/Ctrl-click and the context menu treat it as an ordinary page (a new
  * tab, or the browser from the desktop app). An embed opens it beside the host.
+ *
+ * A meeting link opens in this workspace even when another workspace stores
+ * the meeting: the meeting page here shows the person's own Only me meeting
+ * from their other workspaces (where it works here) and one shared here from
+ * a Personal workspace, the same meetings the agent's meeting tools reach.
  */
 export function useWorkspaceAppLinkResolver(
   workspaceId: string,
   openSession?: (workspaceId: string, sessionId: string) => void,
+  openMeeting?: (workspaceId: string, recordingId: string) => void,
 ): OpenGeniLinkResolver {
   const host = useOpenGeniLinkResolver();
   const app = useAppLinkResolver();
@@ -107,15 +113,24 @@ export function useWorkspaceAppLinkResolver(
               return href ? { href, open: () => openSession(workspace, target.sessionId) } : null;
             }
           : null,
+        openMeeting && !opensBeside
+          ? (target) => {
+              if (target.kind !== "meeting") return null;
+              const workspace = target.workspaceId ?? workspaceId;
+              const href = openGeniConsolePath(target, workspace);
+              return href ? { href, open: () => openMeeting(workspace, target.recordingId) } : null;
+            }
+          : null,
         app,
         (target) =>
           (target.kind === "file" ||
             target.kind === "editable-artifact" ||
-            target.kind === "session") &&
+            target.kind === "session" ||
+            target.kind === "meeting") &&
           target.workspaceId === null
             ? app({ ...target, workspaceId })
             : null,
       ) ?? app,
-    [app, host, opensBeside, openSession, workspaceId],
+    [app, host, opensBeside, openSession, openMeeting, workspaceId],
   );
 }

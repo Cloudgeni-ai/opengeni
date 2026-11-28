@@ -298,6 +298,7 @@ const UNAVAILABLE_LABEL = (
   "editable-artifact": t("markdown.thisArtifactNeedsAWorkspace"),
   site: t("markdown.thisSiteNeedsAWorkspace"),
   session: t("markdown.thisChatNeedsAWorkspace"),
+  meeting: t("markdown.thisMeetingNeedsAWorkspace"),
 });
 
 function linkActionTitle(t: OpenGeniText, target: OpenGeniLinkTarget): string {
@@ -307,6 +308,7 @@ function linkActionTitle(t: OpenGeniText, target: OpenGeniLinkTarget): string {
       : t("markdown.openPath", { path: target.path });
   }
   if (target.kind === "session") return t("markdown.openChat");
+  if (target.kind === "meeting") return t("markdown.openMeeting");
   return target.kind === "file"
     ? t("markdown.openFile")
     : target.kind === "site"
@@ -457,10 +459,10 @@ const markdownComponents: Components = {
         );
       }
       // Never navigate: a console path resolves against the host origin and 404s.
-      // A chat reference's text is its title, which reads fine on its own.
-      if (target.kind === "session") {
+      // A chat or meeting reference's text is its title, which reads fine on its own.
+      if (target.kind === "session" || target.kind === "meeting") {
         return (
-          <span title={UNAVAILABLE_LABEL(t).session} data-og-link-unavailable="session">
+          <span title={UNAVAILABLE_LABEL(t)[target.kind]} data-og-link-unavailable={target.kind}>
             {children}
           </span>
         );

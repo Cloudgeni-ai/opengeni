@@ -4697,6 +4697,7 @@ export type FirstPartyMcpToolName =
   | "meetings_search"
   | "meeting_read"
   | "meeting_notes_save"
+  | "meeting_update"
   | "knowledge_retain_message"
   | "knowledge_archive"
   | "instruction_policy_save"

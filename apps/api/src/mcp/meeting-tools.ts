@@ -1,4 +1,5 @@
-// Agents find and read recorded meetings, and write their notes. They act as
+// Agents find and read recorded meetings, write their notes, and rename,
+// share and name the speakers of a meeting as its page does. They act as
 // the person the session works for, so an agent sees exactly the meetings
 // that person can see: everything shared with the workspace, and their own
 // Only me recordings, including those stored in their other workspaces of the
@@ -6,8 +7,10 @@
 // with people's corrections applied, in parts a model can page through.
 // Opengeni's own meeting-summary chat is fenced to the one meeting it was
 // started for: it cannot search, every other meeting is not found, and it
-// writes only the first notes or its own. An Only me summary reads that
-// meeting as its owner.
+// writes only the first notes or its own; it never changes the meeting. An
+// Only me summary reads that meeting as its owner. Every meeting the tools
+// return is linked as `meeting:<id>`, which opens in the conversation's
+// workspace: its meeting page shows the same meetings these tools reach there.
 import {
   defaultRecordingSpeakerName,
   RECORDING_NOTE_MAX_BYTES,
@@ -40,8 +43,11 @@ import {
   recordingVisible,
   sharedRecordingHome,
   RecordingConflictError,
+  RecordingForbiddenError,
   RecordingNotFoundError,
   saveRecordingNote,
+  updateRecording,
+  updateRecordingSpeakers,
   type OwnRecordingWorkspace,
   type RecordingActor,
 } from "@opengeni/db";
@@ -184,6 +190,17 @@ function failure(json: JsonResult, code: string, message: string) {
   return { ...json({ error: { code, message } }), isError: true };
 }
 
+/** How a meeting is linked for the person in chat Markdown. */
+export function meetingLink(recordingId: string): string {
+  return `meeting:${recordingId}`;
+}
+
+/** Same name, ignoring case and spacing. */
+function sameName(left: string, right: string): boolean {
+  const normal = (value: string) => value.replace(/\s+/gu, " ").trim().toLocaleLowerCase();
+  return normal(left) === normal(right);
+}
+
 export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
   const { server, deps, grant, sessionId, authorize, json } = input;
 
@@ -289,7 +306,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     "meetings_search",
     {
       description:
-        "Find recorded meetings the person you act for can see: those shared with the workspace (including from members' Personal workspaces) and their own, including their own Only me meetings from their other workspaces of this organization (marked recordedIn). Filter by words said or in the title, a named speaker, when they started, or a product's reference. Newest first, with each meeting's speakers and, when searching for words, the first transcript lines that contain them. Read a meeting with meeting_read.",
+        "Find recorded meetings the person you act for can see: those shared with the workspace (including from members' Personal workspaces) and their own, including their own Only me meetings from their other workspaces of this organization (marked recordedIn). Filter by words said or in the title, a named speaker, when they started, or a product's reference. Newest first, with each meeting's speakers and, when searching for words, the first transcript lines that contain them. Read a meeting with meeting_read. Link a meeting for the person as [its title](meeting:<id>).",
       inputSchema: {
         query: z
           .string()
@@ -393,6 +410,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
                   ),
                 }
               : {}),
+            link: meetingLink(recording.id),
           };
         }),
         nextCursor: page.nextBefore ? encodeSearchCursor(page.nextBefore) : null,
@@ -404,7 +422,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     "meeting_read",
     {
       description:
-        'Read a recorded meeting the person you act for can see: its details, speakers (each with its label, and its personId when it is a person from the workspace), notes and transcript, as lines like "[12:31] Ingrid Solberg: …" with names and corrections applied. The notepad is what people jotted down during the meeting; the notes are its written-up summary, with their revision for meeting_notes_save. Long transcripts come in parts: pass nextCursor to continue, or from and to (such as "12:00" and "1:05:00") to read one stretch. While a meeting is still being recorded, the lines are its rough live preview if one is on.',
+        'Read a recorded meeting the person you act for can see: its details, speakers (each with its label, and its personId when it is a person from the workspace), notes and transcript, as lines like "[12:31] Ingrid Solberg: …" with names and corrections applied. The notepad is what people jotted down during the meeting; the notes are its written-up summary, with their revision for meeting_notes_save. Long transcripts come in parts: pass nextCursor to continue, or from and to (such as "12:00" and "1:05:00") to read one stretch. While a meeting is still being recorded, the lines are its rough live preview if one is on. Link a meeting for the person as [its title](meeting:<id>).',
       inputSchema: {
         meetingId: z.uuid().describe("A meeting id from meetings_search."),
         from: z
@@ -648,6 +666,259 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     },
   );
 
+  server.registerTool(
+    "meeting_update",
+    {
+      description:
+        "Change a meeting for the person you act for, as they could on its page: rename it, share it with this workspace or make it Only me, or name its speakers. Everyone who can see the meeting sees the change at once. Only the person who recorded a meeting can share it or make it Only me.",
+      inputSchema: {
+        meetingId: z.uuid().describe("A meeting id from meetings_search."),
+        title: z
+          .string()
+          .max(300)
+          .optional()
+          .describe(
+            "The meeting's new name, given by the person. It replaces any name from a calendar event or the conversation.",
+          ),
+        visibility: z
+          .enum(["workspace", "only_me"])
+          .optional()
+          .describe(
+            '"workspace" shares it with everyone in this workspace; "only_me" makes it visible only to the person who recorded it.',
+          ),
+        speakers: z
+          .array(
+            z.union([
+              z.object({
+                label: z.string().min(1).max(128),
+                name: z.string().min(1).max(200),
+              }),
+              z.object({
+                label: z.string().min(1).max(128),
+                personId: z.uuid(),
+              }),
+            ]),
+          )
+          .min(1)
+          .max(64)
+          .optional()
+          .describe(
+            "Speakers to name, by the label meeting_read gave: { label, name } for a plain name, or { label, personId } for a person from the workspace. Naming a suggested speaker confirms the suggestion.",
+          ),
+      },
+    },
+    async (request) => {
+      const title = request.title?.replace(/\s+/gu, " ").trim();
+      if (request.title !== undefined && !title) {
+        return failure(json, "invalid_title", "Give the meeting a name that isn't blank.");
+      }
+      if (title === undefined && request.visibility === undefined && !request.speakers) {
+        return failure(json, "nothing_to_change", "Pass a title, a visibility or speakers.");
+      }
+      const { who, recordedIn, readOnly } = await actorForMeeting(
+        request.meetingId,
+        "sessions:create",
+      );
+      // The meeting-summary chat writes notes; it never changes the meeting.
+      if (who.only) {
+        return failure(
+          json,
+          "not_allowed",
+          "This chat writes the notes of one meeting; it can't change the meeting.",
+        );
+      }
+      if (readOnly) {
+        return failure(
+          json,
+          "read_only",
+          "This meeting is shared with the workspace to read; only the person who recorded it can change it.",
+        );
+      }
+      let recording: Recording;
+      try {
+        recording = await getRecording(deps.db, { ...who, recordingId: request.meetingId });
+      } catch (error) {
+        if (error instanceof RecordingNotFoundError) return notVisible();
+        throw error;
+      }
+
+      // Who can open it, chosen the way the meeting page in this workspace
+      // does, then sent as its request to the recording's PATCH.
+      let sharing:
+        | {
+            visibility: "workspace" | "private";
+            sharedWorkspaceId?: string;
+            reachWorkspaceIds?: string[];
+          }
+        | undefined;
+      if (request.visibility !== undefined) {
+        const here = grant.workspaceId;
+        const storing = recording.workspaceId;
+        const person = { subjectId: who.subjectId, accountId: grant.accountId };
+        const personalHere = (await reachingHere({ ...person, workspaceId: here })) === null;
+        if (request.visibility === "only_me") {
+          // Only me again, it keeps working here, where the person is looking from.
+          const reach = Array.isArray(recording.reachWorkspaceIds)
+            ? recording.reachWorkspaceIds
+            : null;
+          const keepHere =
+            storing !== here &&
+            !personalHere &&
+            reach !== null &&
+            !reach.includes(here) &&
+            (await ownRecordingWorkspaces(deps.db, { ...person, workspaceId: storing })).some(
+              (workspace) => workspace.id === here && workspace.personal !== true,
+            );
+          sharing = {
+            visibility: "private",
+            ...(keepHere && reach ? { reachWorkspaceIds: [...reach, here] } : {}),
+          };
+        } else if (storing === here) {
+          // A Personal workspace is the person's alone: shared there, nobody
+          // else sees it, so the page offers their team workspaces instead.
+          if (personalHere && recording.visibility === "private") {
+            return failure(
+              json,
+              "not_shareable",
+              "This is the person's Personal workspace, where nobody else sees a meeting. Share it from a chat in the team workspace to share it with.",
+            );
+          }
+          sharing = { visibility: "workspace" };
+        } else {
+          // Stored in the person's Personal workspace, it can be shared with
+          // any of their team workspaces where they may start work; stored in
+          // a team workspace, only there.
+          const personalStoring =
+            (await reachingHere({ ...person, workspaceId: storing })) === null;
+          const target = personalStoring
+            ? (await ownRecordingWorkspaces(deps.db, { ...person, workspaceId: storing })).find(
+                (workspace) => workspace.id === here && workspace.personal !== true,
+              )
+            : undefined;
+          if (!personalStoring || personalHere) {
+            return failure(
+              json,
+              "not_shareable",
+              `This meeting belongs to ${recordedIn ?? "another workspace"}, so it can be shared only there.`,
+            );
+          }
+          if (!target || !hasPermission(target.permissions, "sessions:create")) {
+            return failure(
+              json,
+              "not_allowed",
+              "The person can't share meetings with this workspace.",
+            );
+          }
+          sharing = { visibility: "workspace", sharedWorkspaceId: here };
+        }
+      }
+
+      // Speakers are named by the labels meeting_read gave, in the transcript it reads.
+      let assignments: Array<{ label: string; name?: string; personId?: string }> | undefined;
+      if (request.speakers) {
+        let current: RecordingSpeaker[];
+        try {
+          const page = await getRecordingTranscriptPage(deps.db, {
+            ...who,
+            recordingId: recording.id,
+            limit: 1,
+          });
+          if (page.version.state !== "complete") throw new RecordingNotFoundError();
+          current = page.speakers;
+        } catch (error) {
+          if (!(error instanceof RecordingNotFoundError)) throw error;
+          return failure(
+            json,
+            "transcript_not_ready",
+            "This meeting has no finished transcript yet; name its speakers once it has.",
+          );
+        }
+        const byLabel = new Map(current.map((speaker) => [speaker.label, speaker]));
+        const unknown = request.speakers.filter((speaker) => !byLabel.has(speaker.label));
+        if (unknown.length > 0) {
+          return failure(
+            json,
+            "unknown_speaker",
+            `This meeting has no speaker ${unknown.map((speaker) => speaker.label).join(", ")}; its labels are ${[...byLabel.keys()].join(", ") || "none"}.`,
+          );
+        }
+        assignments = request.speakers.map((speaker) => {
+          if ("personId" in speaker) return { label: speaker.label, personId: speaker.personId };
+          // The suggested person, by name: confirmed, as the page's confirm does.
+          const suggested = byLabel.get(speaker.label)!;
+          return suggested.source === "suggested" &&
+            suggested.personId &&
+            sameName(suggested.name, speaker.name)
+            ? { label: speaker.label, personId: suggested.personId }
+            : { label: speaker.label, name: speaker.name.trim() };
+        });
+      }
+
+      try {
+        const updated =
+          title !== undefined || sharing
+            ? await updateRecording(deps.db, {
+                ...who,
+                recordingId: recording.id,
+                ...(title !== undefined ? { title } : {}),
+                ...sharing,
+              })
+            : recording;
+        let named: RecordingSpeaker[] | undefined;
+        if (assignments) {
+          try {
+            const speakers = await updateRecordingSpeakers(deps.db, {
+              ...who,
+              recordingId: recording.id,
+              assignments,
+            });
+            const labels = new Set(assignments.map((assignment) => assignment.label));
+            named = speakers.filter((speaker) => labels.has(speaker.label));
+          } catch (error) {
+            if (error instanceof RecordingNotFoundError && error.message === "Person not found") {
+              return failure(
+                json,
+                "person_not_found",
+                "No person with that personId is in this meeting's workspace; name the speaker instead.",
+              );
+            }
+            throw error;
+          }
+        }
+        return json({
+          updated: true,
+          ...(title !== undefined ? { title: updated.title } : {}),
+          ...(sharing
+            ? { visibility: updated.visibility === "private" ? "only_me" : "workspace" }
+            : {}),
+          ...(named
+            ? {
+                speakers: named.map((speaker) => ({
+                  label: speaker.label,
+                  name: speaker.name,
+                  ...(speaker.personId ? { personId: speaker.personId } : {}),
+                })),
+              }
+            : {}),
+          link: meetingLink(recording.id),
+        });
+      } catch (error) {
+        if (error instanceof RecordingNotFoundError) return notVisible();
+        if (error instanceof RecordingForbiddenError) {
+          return failure(
+            json,
+            "not_owner",
+            "Only the person who recorded this meeting can share it or make it Only me.",
+          );
+        }
+        if (error instanceof RecordingConflictError) {
+          return failure(json, error.code, error.message);
+        }
+        throw error;
+      }
+    },
+  );
+
   async function details(
     recording: Recording,
     who: RecordingActor,
@@ -694,6 +965,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       notes: written
         ? { revision: written.revision, text: noteText(written) }
         : { revision: 0, text: null },
+      link: meetingLink(recording.id),
     };
   }
 }

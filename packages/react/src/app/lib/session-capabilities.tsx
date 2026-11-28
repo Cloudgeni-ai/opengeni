@@ -146,10 +146,14 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
   {
     id: "meetings",
     name: "Meetings",
-    description: "Search recorded meetings, read their transcripts and save their notes.",
+    description:
+      "Search recorded meetings, read their transcripts, save their notes, rename and share them, and name their speakers.",
     kind: "opengeni",
     matches: (tool) =>
-      tool === "meetings_search" || tool === "meeting_read" || tool === "meeting_notes_save",
+      tool === "meetings_search" ||
+      tool === "meeting_read" ||
+      tool === "meeting_notes_save" ||
+      tool === "meeting_update",
   },
   {
     id: "app-actions",

@@ -1138,6 +1138,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "meetings_search",
   "meeting_read",
   "meeting_notes_save",
+  "meeting_update",
   "instruction_policy_save",
   "instruction_policy_get",
   "memory_search",

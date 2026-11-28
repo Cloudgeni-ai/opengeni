@@ -710,6 +710,7 @@ export {
   openGeniLinkScheme,
   parseRetainedFileReference,
   parseSessionReference,
+  parseMeetingReference,
   parseSandboxLink,
   SESSION_SCOPE_HEADER,
 } from "./message-links";

@@ -365,6 +365,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   meetings_search: "knowledge",
   meeting_read: "knowledge",
   meeting_notes_save: "knowledge",
+  meeting_update: "knowledge",
   knowledge_retain_message: "knowledge",
   knowledge_archive: "knowledge",
   instruction_policy_save: "knowledge",

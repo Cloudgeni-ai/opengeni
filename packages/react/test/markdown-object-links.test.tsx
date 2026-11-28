@@ -333,4 +333,45 @@ describe("Opengeni object links inside an embedding host", () => {
     expect(html).toContain('data-og-link-unavailable="session"');
     expect(html).toContain("Launch plan");
   });
+
+  test("a meeting reference goes to the host's resolver, which maps it to its own page", async () => {
+    const seen: OpenGeniLinkTarget[] = [];
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={(target) => {
+          seen.push(target);
+          return target.kind === "meeting"
+            ? {
+                href: `/crm/calls/${target.recordingId}`,
+                open: () => void opened.push(target.recordingId),
+              }
+            : null;
+        }}
+      >
+        <Markdown>{`See [Q3 pricing review](meeting:${SITE.toUpperCase()}).`}</Markdown>
+      </OpenGeniLinkProvider>,
+    );
+    await flush();
+    expect(seen).toEqual([{ kind: "meeting", recordingId: SITE, workspaceId: null }]);
+    const link = r.container.querySelector<HTMLAnchorElement>("a")!;
+    expect(link.textContent).toBe("Q3 pricing review");
+    expect(link.getAttribute("href")).toBe(`/crm/calls/${SITE}`);
+    await actRun(() => link.click());
+    expect(opened).toEqual([SITE]);
+    await r.unmount();
+  });
+
+  test("a meeting reference no host opens shows just its title, never a navigation", () => {
+    const html = renderToStaticMarkup(
+      <Markdown>{`See [Q3 pricing review](meeting:${SITE}) and [broken](meeting:nope).`}</Markdown>,
+    );
+    expect(html).not.toContain("<a ");
+    expect(html).not.toContain("meeting:");
+    expect(html).toContain('data-og-link-unavailable="meeting"');
+    expect(html).toContain("This meeting link needs a workspace-aware host to open");
+    expect(html).toContain("Q3 pricing review");
+    // A malformed one is still reserved: unavailable text, not a link on the host's origin.
+    expect(html).toContain("broken (link unavailable)");
+  });
 });

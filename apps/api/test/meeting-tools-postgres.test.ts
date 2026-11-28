@@ -11,6 +11,7 @@ import {
   completeRecordingTranscriptVersion,
   createDb,
   createRecording,
+  createRecordingPerson,
   createWorkspace,
   ensureManagedAccessForUser,
   finalizeRecording,
@@ -27,6 +28,7 @@ import {
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   formatMeetingTimestamp,
+  meetingLink,
   parseMeetingTimestamp,
   registerMeetingTools,
 } from "../src/mcp/meeting-tools";
@@ -245,6 +247,9 @@ describe("meeting tools", () => {
     expect(found.meetings.find((meeting: { id: string }) => meeting.id === standup)).toMatchObject({
       visibility: "only_me",
     });
+    // Each meeting carries its link last, after the fields results had before.
+    expect(walk.link).toBe(`meeting:${roof}`);
+    for (const meeting of found.meetings) expect(Object.keys(meeting).at(-1)).toBe("link");
 
     expect((await call("meetings_search", { person: "tomas" })).meetings).toHaveLength(1);
     const first = await call("meetings_search", { limit: 1 });
@@ -288,7 +293,9 @@ describe("meeting tools", () => {
         { label: "speaker_0", name: "Ingrid" },
         { label: "speaker_1", name: "Speaker 2" },
       ],
+      link: meetingLink(recordingId),
     });
+    expect(Object.keys(part.meeting).at(-1)).toBe("link");
     expect(part.transcript).toMatchObject({ version: 1, model: "scribe_v2", current: true });
     const lines = part.lines.split("\n");
     // One speaker's consecutive segments read as one line.
@@ -771,6 +778,20 @@ describe("meeting tools", () => {
         isError: true,
         error: { code: "not_allowed" },
       });
+      // It writes the notes; it never renames, shares or names the speakers.
+      for (const change of [
+        { title: "Renamed" },
+        { visibility: "workspace" },
+        { speakers: [{ label: "speaker_0", name: "Tomas" }] },
+      ]) {
+        expect(await call("meeting_update", { meetingId: meeting, ...change })).toMatchObject({
+          isError: true,
+          error: { code: "not_allowed" },
+        });
+      }
+      expect(await getRecording(client.db, { ...scope.actor, recordingId: meeting })).toMatchObject(
+        { title: meeting === own ? "Roof planning" : "All hands" },
+      );
       for (const elsewhere of [other, otherOfOwner, ownInSales]) {
         expect(await call("meeting_read", { meetingId: elsewhere })).toMatchObject({
           found: false,
@@ -831,5 +852,310 @@ describe("meeting tools", () => {
         await listRecordingNotes(client.db, { ...scope.actor, recordingId: untouched }),
       ).toEqual([]);
     }
+  });
+
+  test("meeting_update takes a name or a person for each speaker, and workspace or only_me", async () => {
+    const schemas = new Map<string, Record<string, unknown>>();
+    registerMeetingTools({
+      server: {
+        registerTool: (name: string, config: { inputSchema: Record<string, unknown> }) =>
+          void schemas.set(name, config.inputSchema),
+      } as never,
+      deps: {} as ApiRouteDeps,
+      grant: {} as AccessGrant,
+      sessionId: crypto.randomUUID(),
+      authorize: async () => undefined,
+      json: (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] }),
+    });
+    const { z } = await import("zod/v4");
+    const input = z.object(schemas.get("meeting_update") as never);
+    const meetingId = crypto.randomUUID();
+    const personId = crypto.randomUUID();
+    expect(
+      input.parse({
+        meetingId,
+        speakers: [
+          { label: "speaker_0", name: "Kari" },
+          { label: "speaker_1", personId },
+        ],
+      }),
+    ).toEqual({
+      meetingId,
+      speakers: [
+        { label: "speaker_0", name: "Kari" },
+        { label: "speaker_1", personId },
+      ],
+    });
+    expect(input.safeParse({ meetingId, visibility: "only_me" }).success).toBe(true);
+    expect(input.safeParse({ meetingId, visibility: "private" }).success).toBe(false);
+    expect(input.safeParse({ meetingId, speakers: [{ label: "speaker_0" }] }).success).toBe(false);
+    expect(input.safeParse({ meetingId, speakers: [] }).success).toBe(false);
+    expect(meetingLink(meetingId)).toBe(`meeting:${meetingId}`);
+  });
+
+  test("meeting_update renames, shares and names speakers as the meeting page does", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const colleague = `user:colleague-${crypto.randomUUID()}`;
+    const team = await scope.workspace("Team", {
+      accountId: scope.accountId,
+      members: [colleague],
+    });
+    const inTeam = { workspaceId: team.workspaceId, subjectId: scope.owner };
+    const call = toolsFor({ ...scope.grantFor(scope.owner), workspaceId: team.workspaceId });
+    const theirs = toolsFor({ ...scope.grantFor(colleague), workspaceId: team.workspaceId });
+    const meetingId = await scope.meeting({
+      visibility: "private",
+      segments: [
+        { at: 0, label: "speaker_0", text: "Tomas orders the tiles." },
+        { at: 10_000, label: "speaker_1", text: "Kari checks the budget." },
+        { at: 20_000, label: "speaker_2", text: "Ingrid books the crane." },
+      ],
+      in: team,
+    });
+    // Tomas is in the people directory and his voice suggested him for speaker_0.
+    const tomas = crypto.randomUUID();
+    await createRecordingPerson(client.db, {
+      ...inTeam,
+      accountId: team.accountId,
+      personId: tomas,
+      displayName: "Tomas Eriksen",
+    });
+    const ingrid = crypto.randomUUID();
+    await createRecordingPerson(client.db, {
+      ...inTeam,
+      accountId: team.accountId,
+      personId: ingrid,
+      displayName: "Ingrid Solberg",
+    });
+    await shared!.admin`
+      insert into recording_speaker_assignments
+        (account_id, workspace_id, recording_id, version_id, speaker_label, person_id, source, confidence)
+      select account_id, workspace_id, recording_id, id, 'speaker_0', ${tomas}, 'suggested', 0.91
+      from recording_transcript_versions where recording_id = ${meetingId} and is_current`;
+    expect((await call("meeting_read", { meetingId })).meeting.speakers[0]).toEqual({
+      label: "speaker_0",
+      name: "Tomas Eriksen",
+      personId: tomas,
+      suggested: true,
+    });
+
+    // Nobody else sees it yet.
+    expect(await theirs("meeting_read", { meetingId })).toMatchObject({ found: false });
+    expect(await theirs("meeting_update", { meetingId, title: "Mine now" })).toMatchObject({
+      found: false,
+    });
+
+    expect(
+      await call("meeting_update", {
+        meetingId,
+        title: "  Roof   planning ",
+        visibility: "workspace",
+        speakers: [
+          { label: "speaker_0", name: "tomas eriksen" },
+          { label: "speaker_1", name: "Kari Nordmann" },
+          { label: "speaker_2", personId: ingrid },
+        ],
+      }),
+    ).toEqual({
+      updated: true,
+      title: "Roof planning",
+      visibility: "workspace",
+      speakers: [
+        { label: "speaker_0", name: "Tomas Eriksen", personId: tomas },
+        { label: "speaker_1", name: "Kari Nordmann" },
+        { label: "speaker_2", name: "Ingrid Solberg", personId: ingrid },
+      ],
+      link: `meeting:${meetingId}`,
+      isError: false,
+    });
+    // A person's name: the conversation never names it over it.
+    expect(await getRecording(client.db, { ...inTeam, recordingId: meetingId })).toMatchObject({
+      title: "Roof planning",
+      titleSource: "person",
+      visibility: "workspace",
+    });
+    expect(
+      await call("meeting_notes_save", {
+        meetingId,
+        notes: "- Tiles.",
+        expectedRevision: 0,
+        title: "Tile order",
+      }),
+    ).toMatchObject({ saved: true, titleUsed: false });
+    // Shared: the colleague reads it with its speakers named, Tomas's suggestion confirmed.
+    const read = await theirs("meeting_read", { meetingId });
+    expect(read.meeting).toMatchObject({
+      title: "Roof planning",
+      visibility: "workspace",
+      speakers: [
+        { label: "speaker_0", name: "Tomas Eriksen", personId: tomas },
+        { label: "speaker_1", name: "Kari Nordmann" },
+        { label: "speaker_2", name: "Ingrid Solberg", personId: ingrid },
+      ],
+    });
+    expect(read.meeting.speakers[0].suggested).toBeUndefined();
+    expect(read.lines).toContain("Kari Nordmann: Kari checks the budget.");
+
+    // Anyone who can see it may rename it and name its speakers; only its
+    // owner shares it or makes it Only me.
+    expect(await theirs("meeting_update", { meetingId, title: "Crane day" })).toMatchObject({
+      updated: true,
+      title: "Crane day",
+      link: `meeting:${meetingId}`,
+    });
+    expect(await theirs("meeting_update", { meetingId, visibility: "only_me" })).toMatchObject({
+      isError: true,
+      error: { code: "not_owner" },
+    });
+    expect(await call("meeting_update", { meetingId, visibility: "only_me" })).toEqual({
+      updated: true,
+      visibility: "only_me",
+      link: `meeting:${meetingId}`,
+      isError: false,
+    });
+    expect(await theirs("meeting_read", { meetingId })).toMatchObject({ found: false });
+
+    // Labels come from meeting_read; a person must be in the meeting's directory.
+    expect(
+      await call("meeting_update", { meetingId, speakers: [{ label: "speaker_9", name: "X" }] }),
+    ).toMatchObject({ isError: true, error: { code: "unknown_speaker" } });
+    expect(
+      await call("meeting_update", {
+        meetingId,
+        speakers: [{ label: "speaker_1", personId: crypto.randomUUID() }],
+      }),
+    ).toMatchObject({ isError: true, error: { code: "person_not_found" } });
+    expect(await call("meeting_update", { meetingId })).toMatchObject({
+      isError: true,
+      error: { code: "nothing_to_change" },
+    });
+    expect(await call("meeting_update", { meetingId, title: "   " })).toMatchObject({
+      isError: true,
+      error: { code: "invalid_title" },
+    });
+    // Before its transcript is finished, its speakers can't be named yet.
+    const recordingNow = await scope.meeting({
+      title: "Recording now",
+      visibility: "private",
+      in: team,
+    });
+    expect(
+      await call("meeting_update", {
+        meetingId: recordingNow,
+        speakers: [{ label: "speaker_0", name: "Kari" }],
+      }),
+    ).toMatchObject({ isError: true, error: { code: "transcript_not_ready" } });
+    // Someone else's Only me meeting is not visible, and stays unchanged.
+    expect(await theirs("meeting_update", { meetingId, title: "Hidden" })).toMatchObject({
+      found: false,
+    });
+    expect(await getRecording(client.db, { ...inTeam, recordingId: meetingId })).toMatchObject({
+      title: "Crane day",
+    });
+  });
+
+  test("meeting_update shares a Personal workspace meeting with the team workspace the chat is in, and refuses what the page can't do", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const colleague = `user:colleague-${crypto.randomUUID()}`;
+    const team = await scope.workspace("Team", {
+      accountId: scope.accountId,
+      members: [colleague],
+    });
+    const call = toolsFor({ ...scope.grantFor(scope.owner), workspaceId: team.workspaceId });
+    const theirs = toolsFor({ ...scope.grantFor(colleague), workspaceId: team.workspaceId });
+    const inPersonal = toolsFor(scope.grantFor(scope.owner));
+    // The fixture's workspace is the owner's Personal workspace in their organization.
+    await shared!.admin`
+      insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${scope.accountId}, ${scope.owner}, 'owner', 'active', ${scope.workspaceId})
+      on conflict (account_id, subject_id) do update
+        set status = 'active', personal_workspace_id = excluded.personal_workspace_id`;
+    const customer = await scope.meeting({
+      title: "Customer call",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Acme renews in March." }],
+    });
+
+    // In the Personal workspace nobody else would see it.
+    expect(
+      await inPersonal("meeting_update", { meetingId: customer, visibility: "workspace" }),
+    ).toMatchObject({ isError: true, error: { code: "not_shareable" } });
+
+    // Working in Team too, the owner shares it from a chat there, with Team.
+    await updateRecording(client.db, {
+      ...scope.actor,
+      recordingId: customer,
+      reachWorkspaceIds: [team.workspaceId],
+    });
+    expect(await call("meeting_update", { meetingId: customer, visibility: "workspace" })).toEqual({
+      updated: true,
+      visibility: "workspace",
+      link: `meeting:${customer}`,
+      isError: false,
+    });
+    expect(await getRecording(client.db, { ...scope.actor, recordingId: customer })).toMatchObject({
+      visibility: "workspace",
+      sharedWorkspaceId: team.workspaceId,
+    });
+    expect((await theirs("meeting_read", { meetingId: customer })).lines).toContain(
+      "Acme renews in March.",
+    );
+    // Shared to read: only its owner changes it.
+    expect(await theirs("meeting_update", { meetingId: customer, title: "Ours" })).toMatchObject({
+      isError: true,
+      error: { code: "read_only" },
+    });
+
+    // Only me again from Team, it keeps working in Team, where the owner looks from.
+    await updateRecording(client.db, {
+      ...scope.actor,
+      recordingId: customer,
+      reachWorkspaceIds: [],
+    });
+    expect(await call("meeting_update", { meetingId: customer, visibility: "only_me" })).toEqual({
+      updated: true,
+      visibility: "only_me",
+      link: `meeting:${customer}`,
+      isError: false,
+    });
+    expect(await getRecording(client.db, { ...scope.actor, recordingId: customer })).toMatchObject({
+      visibility: "private",
+      reachWorkspaceIds: [team.workspaceId],
+    });
+    expect(await theirs("meeting_read", { meetingId: customer })).toMatchObject({ found: false });
+    expect((await call("meeting_read", { meetingId: customer })).meeting).toMatchObject({
+      title: "Customer call",
+      recordedIn: expect.any(String),
+      link: `meeting:${customer}`,
+    });
+
+    // A meeting a team workspace stores is shared only there, never from another one.
+    const sales = await scope.workspace("Sales", { accountId: scope.accountId });
+    const pipeline = await scope.meeting({ title: "Pipeline", visibility: "private", in: team });
+    await updateRecording(client.db, {
+      workspaceId: team.workspaceId,
+      subjectId: scope.owner,
+      recordingId: pipeline,
+      reachWorkspaceIds: [sales.workspaceId],
+    });
+    const inSales = toolsFor({ ...scope.grantFor(scope.owner), workspaceId: sales.workspaceId });
+    expect(
+      await inSales("meeting_update", { meetingId: pipeline, visibility: "workspace" }),
+    ).toMatchObject({
+      isError: true,
+      error: {
+        code: "not_shareable",
+        message: "This meeting belongs to Team, so it can be shared only there.",
+      },
+    });
+    // Renaming it from there is fine.
+    expect(await inSales("meeting_update", { meetingId: pipeline, title: "Q3 pipeline" })).toEqual({
+      updated: true,
+      title: "Q3 pipeline",
+      link: `meeting:${pipeline}`,
+      isError: false,
+    });
   });
 });

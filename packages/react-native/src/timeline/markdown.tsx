@@ -749,7 +749,7 @@ export interface MarkdownLinkOptions {
    * Draw a host-owned link (web `renderLink`). Return `undefined` to keep the
    * default link. Inline links sit inside text, so draw them with `Text`; a
    * standalone link may be any block. Opengeni object links (`artifact:`,
-   * `sandbox:`) never reach it; they go to `onOpenGeniLink`.
+   * `sandbox:`, `session:`, `meeting:`) never reach it; they go to `onOpenGeniLink`.
    */
   renderLink?: ((link: NativeHostLink) => ReactNode | undefined) | undefined;
   /**
