@@ -46,13 +46,26 @@ export const HTML_FRAME_HOST_VERSION = 1;
 /**
  * `interactive` runs the HTML as is. `still` renders a picture of it: the
  * written document starts with a policy that blocks every script and network
- * request (the gallery card of a Site).
+ * request. (A Site's gallery card renders `interactive`, with the stricter
+ * preview document of `@opengeni/sdk/site-preview`.)
  */
 export type HtmlFrameRenderMode = "interactive" | "still";
 
 /** The policy a `still` render writes first into its document. */
 export const HTML_FRAME_STILL_POLICY =
   "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'";
+
+/**
+ * The policy an artifact card's live preview of a Site writes first into its
+ * document (`@opengeni/sdk/site-preview`). The page's own scripts, styles,
+ * fonts and images may load from public hosts, so apps drawn by script and
+ * styled from a CDN look as they do when opened, but the page may not call
+ * for data (`connect-src 'none'`: no fetch, XHR, WebSocket or beacon), frame
+ * other pages or submit forms. It runs with no Site bridge, so it reaches
+ * neither the workspace nor the viewer's credentials.
+ */
+export const HTML_FRAME_PREVIEW_POLICY =
+  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https: data: blob:; style-src 'unsafe-inline' https: data:; img-src https: data: blob:; font-src https: data:; media-src https: data: blob:; worker-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'";
 
 /**
  * Sandbox flags for the frame host. Never `allow-same-origin`: the HTML runs

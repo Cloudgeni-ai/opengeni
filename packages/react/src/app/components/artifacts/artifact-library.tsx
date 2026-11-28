@@ -22,6 +22,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type MouseEvent,
@@ -56,7 +57,12 @@ import {
   type ToolbarFilterValue,
 } from "../../../ui/toolbar";
 import { useAppContext } from "../../app-context";
-import { HTML_FRAME_STILL_POLICY } from "@opengeni/contracts/html-frame-host";
+import {
+  SITE_PREVIEW_TIMEOUT_MS,
+  SITE_PREVIEW_WIDTH,
+  sitePreviewDocument,
+  sitePreviewPainted,
+} from "@opengeni/sdk/site-preview";
 import { useContentHosting } from "../../../lib/content-hosting";
 import { htmlFrameHostSrc, useHtmlFrameHost } from "../../../components/artifacts/html-frame-host";
 import { hasWorkspacePermission } from "../../lib/permissions";
@@ -192,9 +198,12 @@ function useLibraryFileAudience(workspaceId: string, item: ArtifactCatalogItem) 
 export function ArtifactThumbnail({
   children,
   placeholder = IMAGE_GLYPH,
+  whileInView = false,
 }: {
   children: ReactNode;
   placeholder?: ReactNode | undefined;
+  /** Unmount the children again once they leave the viewport (live Site frames). */
+  whileInView?: boolean | undefined;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
@@ -207,16 +216,18 @@ export function ArtifactThumbnail({
     }
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
+        const entry = entries.at(-1);
+        if (!entry) return;
+        if (entry.isIntersecting) {
           setVisible(true);
-          observer.disconnect();
-        }
+          if (!whileInView) observer.disconnect();
+        } else if (whileInView) setVisible(false);
       },
       { rootMargin: "200px 0px" },
     );
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [whileInView]);
   return (
     <div ref={host} className="flex h-full w-full items-center justify-center">
       {visible ? children : placeholder}
@@ -602,23 +613,24 @@ export function ArtifactRow({
 // ---------------------------------------------------------------------------
 
 /*
- * A Site's card shows its published HTML as a still: a srcdoc frame with an
- * empty sandbox (no scripts, forms, popups or same-origin) and a policy that
- * blocks every network request, so a card never runs Site code or phones
- * home. The first element of the document is the policy, so it always lands
- * in <head> whatever the Site's own markup.
+ * A Site's card shows its published HTML as it looks when opened, laid out at
+ * a desktop width and scaled into the card like a screenshot.
  *
- * The frame also requires the same policy from outside (the `csp` attribute,
- * CSP Embedded Enforcement), so browsers that support it enforce the policy
- * on the srcdoc document before any of its markup is parsed or speculatively
- * preloaded. The in-document policy keeps other browsers covered.
+ * With an HTML frame host configured (a page with a strict policy, see
+ * `configureContentHosting`), the card renders the preview document of
+ * `@opengeni/sdk/site-preview` there: the page's own scripts run in an
+ * opaque-origin frame that may run scripts and nothing else (no same-origin,
+ * forms, popups or navigation of the console), with no Site bridge, and its
+ * policy blocks the page's fetch and XHR calls (images, scripts and its own
+ * navigation can still reach the network). The page reports whether it
+ * painted anything; until it does the card keeps its type glyph, and a page
+ * that stays blank (or never reports) leaves the glyph in place.
+ *
+ * Without a frame host, the same preview document runs in a srcdoc frame
+ * with the same sandbox (scripts only, opaque origin), as a Site's own
+ * viewer does. A page that navigates itself away (it reports leaving) is
+ * dropped back to the glyph. Live frames run only while their card is near the viewport.
  */
-const SITE_STILL_POLICY = HTML_FRAME_STILL_POLICY;
-// `csp` is a standard iframe attribute React passes through but doesn't type.
-const SITE_STILL_FRAME_POLICY = { csp: SITE_STILL_POLICY };
-export function siteStillDocument(html: string) {
-  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${SITE_STILL_POLICY}"><meta name="color-scheme" content="light">${html}`;
-}
 
 // Display HTML per published version, shared across remounts (tabs, search).
 const siteHtmlCache = new Map<string, Promise<string>>();
@@ -656,6 +668,121 @@ function useSiteHtml(workspaceId: string, item: ArtifactCatalogItem) {
   return state?.key === key ? state.html : undefined;
 }
 
+/*
+ * Previews load a few at a time, so a page of cards never runs every Site's
+ * scripts at once. A slot is held from mount until the preview reports.
+ */
+const SITE_PREVIEW_SLOTS = 3;
+let sitePreviewsLoading = 0;
+const sitePreviewQueue: Array<() => void> = [];
+
+function releaseSitePreviewSlot() {
+  const next = sitePreviewQueue.shift();
+  if (next) next();
+  else sitePreviewsLoading = Math.max(0, sitePreviewsLoading - 1);
+}
+
+/* Pictures are drawn by the API a few at a time too. */
+const PICTURE_REQUEST_SLOTS = 4;
+let pictureRequestsRunning = 0;
+const pictureRequestQueue: Array<() => void> = [];
+
+function limitPictureRequest<T>(request: () => Promise<T>): Promise<T> {
+  return new Promise<void>((resolve) => {
+    if (pictureRequestsRunning < PICTURE_REQUEST_SLOTS) {
+      pictureRequestsRunning += 1;
+      resolve();
+    } else pictureRequestQueue.push(resolve);
+  })
+    .then(request)
+    .finally(() => {
+      const next = pictureRequestQueue.shift();
+      if (next) next();
+      else pictureRequestsRunning -= 1;
+    });
+}
+
+function useSitePreviewSlot(enabled: boolean): { granted: boolean; release: () => void } {
+  const [granted, setGranted] = useState(false);
+  const heldRef = useRef(false);
+  const release = useCallback(() => {
+    if (!heldRef.current) return;
+    heldRef.current = false;
+    releaseSitePreviewSlot();
+  }, []);
+  useEffect(() => {
+    if (!enabled) return;
+    let active = true;
+    const grant = () => {
+      if (!active) return releaseSitePreviewSlot();
+      heldRef.current = true;
+      setGranted(true);
+    };
+    if (sitePreviewsLoading < SITE_PREVIEW_SLOTS) {
+      sitePreviewsLoading += 1;
+      grant();
+    } else sitePreviewQueue.push(grant);
+    return () => {
+      active = false;
+      const queued = sitePreviewQueue.indexOf(grant);
+      if (queued >= 0) sitePreviewQueue.splice(queued, 1);
+      release();
+    };
+  }, [enabled, release]);
+  return { granted, release };
+}
+
+type SitePreviewState = "loading" | "painted" | "blank";
+/* Site versions found blank, by `id:versionId`. */
+const blankSitePreviews = new Set<string>();
+
+/*
+ * A preview is marked pending in this tab's session storage while it runs. A
+ * page that hangs the browser never clears its mark, so after a reload that
+ * version keeps its glyph instead of hanging the library again.
+ */
+const PENDING_SITE_PREVIEW = "opengeni:site-preview:pending:";
+/*
+ * Marks set by this tab. A tab that leaves normally (reload, sign-out,
+ * navigation) clears them on pagehide; a hung tab never gets there.
+ */
+const activeSitePreviewMarks = new Set<string>();
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    for (const versionKey of activeSitePreviewMarks) {
+      try {
+        sessionStorage.removeItem(PENDING_SITE_PREVIEW + versionKey);
+      } catch {
+        // Best effort.
+      }
+    }
+    activeSitePreviewMarks.clear();
+  });
+}
+const hungSitePreviews: ReadonlySet<string> = (() => {
+  const hung = new Set<string>();
+  try {
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index);
+      if (key?.startsWith(PENDING_SITE_PREVIEW)) hung.add(key.slice(PENDING_SITE_PREVIEW.length));
+    }
+  } catch {
+    // No session storage: nothing to remember.
+  }
+  return hung;
+})();
+
+function markSitePreviewPending(versionKey: string, pending: boolean) {
+  if (pending) activeSitePreviewMarks.add(versionKey);
+  else activeSitePreviewMarks.delete(versionKey);
+  try {
+    if (pending) sessionStorage.setItem(PENDING_SITE_PREVIEW + versionKey, "1");
+    else sessionStorage.removeItem(PENDING_SITE_PREVIEW + versionKey);
+  } catch {
+    // Best effort.
+  }
+}
+
 function SiteStill({
   workspaceId,
   item,
@@ -666,65 +793,278 @@ function SiteStill({
   placeholder: ReactNode;
 }) {
   const html = useSiteHtml(workspaceId, item);
+  const [preview, setPreview] = useState<{ html: string; state: SitePreviewState } | null>(null);
   if (!html) return placeholder;
+  const versionKey = `${item.id}:${item.versionId}`;
+  // A page found blank (or that hung the tab last time) isn't run again.
+  const state =
+    preview?.html === html
+      ? preview.state
+      : blankSitePreviews.has(versionKey) || hungSitePreviews.has(versionKey)
+        ? "blank"
+        : "loading";
+  const finish = (next: SitePreviewState, remember = true) => {
+    if (next === "blank" && remember) {
+      blankSitePreviews.add(versionKey);
+      if (blankSitePreviews.size > SITE_HTML_CACHE_LIMIT)
+        blankSitePreviews.delete(blankSitePreviews.values().next().value!);
+    }
+    setPreview({ html, state: next });
+  };
   return (
-    // Drawn at three times the card's width and scaled down, like a screenshot;
-    // a touch dimmer in dark so a white page doesn't glare.
-    <div
-      className="pointer-events-none absolute inset-0 overflow-hidden bg-white dark:brightness-[0.88]"
-      inert
-    >
-      <SiteStillFrame title={`Preview of ${item.title}`} html={html} />
+    <>
+      {state === "painted" ? null : placeholder}
+      {state === "blank" ? null : (
+        // A touch dimmer in dark, so a white page doesn't glare.
+        <div
+          className={cn(
+            "pointer-events-none absolute inset-0 overflow-hidden transition-opacity duration-200 dark:brightness-[0.88]",
+            state === "painted" ? "opacity-100" : "opacity-0",
+          )}
+          inert
+        >
+          <SiteStillFrame
+            key={html}
+            title={`Preview of ${item.title}`}
+            html={html}
+            versionKey={versionKey}
+            onSettled={(painted, reported) => finish(painted ? "painted" : "blank", reported)}
+            onLeft={() => finish("blank")}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
+/** The frame's box, and the scale that fits a desktop-width page into it. */
+function useSitePreviewScale(hostRef: { current: HTMLDivElement | null }) {
+  const [box, setBox] = useState<{ width: number; height: number } | null>(null);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const measure = () => {
+      const width = host.clientWidth;
+      const height = host.clientHeight;
+      if (width > 0 && height > 0)
+        setBox((current) =>
+          current && current.width === width && current.height === height
+            ? current
+            : { width, height },
+        );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, [hostRef]);
+  if (!box) return null;
+  const scale = box.width / SITE_PREVIEW_WIDTH;
+  return { scale, height: Math.ceil(box.height / scale) };
+}
+
+function SiteStillFrame({
+  title,
+  html,
+  versionKey,
+  onSettled,
+  onLeft,
+}: {
+  title: string;
+  html: string;
+  versionKey: string;
+  /** `reported` is false when the page never said, so it may be tried again later. */
+  onSettled: (painted: boolean, reported: boolean) => void;
+  /** The page navigated itself away: drop it. */
+  onLeft: () => void;
+}) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const frameHostSrc = htmlFrameHostSrc(useContentHosting().htmlFrameHost);
+  const live = frameHostSrc !== null;
+  // The page's theme, read once the card is placed; a later switch doesn't
+  // re-run the page.
+  const [theme, setTheme] = useState<"light" | "dark" | null>(null);
+  useEffect(() => setTheme(surroundingTheme(hostRef.current)), []);
+  const documentHtml = useMemo(
+    () => (theme ? sitePreviewDocument(html, { theme }) : html),
+    [html, theme],
+  );
+  const { granted: slotGranted, release: releaseSlot } = useSitePreviewSlot(true);
+  const fit = useSitePreviewScale(hostRef);
+  const onSettledRef = useRef(onSettled);
+  onSettledRef.current = onSettled;
+  const onLeftRef = useRef(onLeft);
+  onLeftRef.current = onLeft;
+  const settledRef = useRef(false);
+  // Loads of the frame: a srcdoc page loads once, so a second load is it
+  // navigating away; a frame host frame counts only loads after its page's
+  // own (the first of those may be the page itself, so leaving is a second).
+  const loadsRef = useRef(0);
+  const onFrameLoad = (afterPage: boolean) => {
+    if (afterPage && ++loadsRef.current > 1) onLeftRef.current();
+  };
+  const settle = useCallback(
+    (painted: boolean, reported: boolean) => {
+      if (settledRef.current) return;
+      settledRef.current = true;
+      markSitePreviewPending(versionKey, false);
+      releaseSlot();
+      onSettledRef.current(painted, reported);
+    },
+    [releaseSlot, versionKey],
+  );
+  const frameHost = useHtmlFrameHost({
+    frameRef,
+    enabled: live && slotGranted && theme !== null,
+    html: documentHtml,
+    mode: "interactive",
+  });
+  // The frame is mounted once its box is measured; its time runs from then.
+  const mounted = fit !== null && slotGranted && theme !== null;
+  useEffect(() => {
+    if (!mounted) return;
+    if (!settledRef.current) markSitePreviewPending(versionKey, true);
+    const receive = (event: MessageEvent) => {
+      // Only this card's own opaque-origin frame can report.
+      const frameWindow = frameRef.current?.contentWindow;
+      if (!frameWindow || event.source !== frameWindow || event.origin !== "null") return;
+      const painted = sitePreviewPainted(event.data);
+      if (painted === null) return;
+      // After its report, a page only says "not painted" when it leaves
+      // (navigates itself away): drop it.
+      if (settledRef.current) {
+        if (!painted) onLeftRef.current();
+      } else settle(painted, true);
+    };
+    window.addEventListener("message", receive);
+    const timer = setTimeout(() => settle(false, false), SITE_PREVIEW_TIMEOUT_MS);
+    return () => {
+      window.removeEventListener("message", receive);
+      clearTimeout(timer);
+      markSitePreviewPending(versionKey, false);
+    };
+  }, [mounted, settle, versionKey]);
+  const frameStyle = fit
+    ? {
+        width: `${SITE_PREVIEW_WIDTH}px`,
+        height: `${fit.height}px`,
+        transform: `scale(${fit.scale})`,
+      }
+    : undefined;
+  return (
+    <div ref={hostRef} className="absolute inset-0">
+      {!fit || !slotGranted || !theme ? null : live ? (
+        <iframe
+          ref={frameRef}
+          title={title}
+          sandbox="allow-scripts"
+          referrerPolicy="no-referrer"
+          src={frameHostSrc}
+          onLoad={() => onFrameLoad(frameHost.onFrameLoad())}
+          tabIndex={-1}
+          aria-hidden
+          className={SITE_STILL_FRAME_CLASS}
+          // A page that follows the system's scheme follows the card's theme.
+          style={{ ...frameStyle, colorScheme: theme }}
+        />
+      ) : (
+        <iframe
+          ref={frameRef}
+          title={title}
+          sandbox="allow-scripts"
+          referrerPolicy="no-referrer"
+          srcDoc={documentHtml}
+          onLoad={() => onFrameLoad(true)}
+          tabIndex={-1}
+          aria-hidden
+          className={SITE_STILL_FRAME_CLASS}
+          style={{ ...frameStyle, colorScheme: theme }}
+        />
+      )}
     </div>
   );
 }
 
-const SITE_STILL_FRAME_CLASS =
-  "absolute top-0 left-0 h-[300%] w-[300%] origin-top-left scale-[0.3333] border-0 bg-white";
+/** The theme the card is shown in: its nearest `data-og-theme`, else the system's. */
+function surroundingTheme(element: Element | null): "light" | "dark" {
+  const marked = element?.closest("[data-og-theme]")?.getAttribute("data-og-theme");
+  if (marked === "light" || marked === "dark") return marked;
+  if (element?.closest(".dark")) return "dark";
+  return typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
 
-/**
- * The still itself. With an HTML frame host configured (a page with a strict
- * policy, see `configureContentHosting`), the frame host renders it in
- * `still` mode: the written document starts with the same blocking policy,
- * and the frame may run only the host's loader (it lacks every other
- * sandbox permission).
+const SITE_STILL_FRAME_CLASS = "absolute top-0 left-0 origin-top-left border-0 bg-white";
+
+/*
+ * Documents, spreadsheets and presentations show a picture of their first
+ * page, sheet or slide: a static SVG of shapes and text the API draws from the
+ * current head. It is shown as an image, so nothing in it can run.
  */
-function SiteStillFrame({ title, html }: { title: string; html: string }) {
-  const frameRef = useRef<HTMLIFrameElement | null>(null);
-  const frameHostSrc = htmlFrameHostSrc(useContentHosting().htmlFrameHost);
-  const frameHost = useHtmlFrameHost({
-    frameRef,
-    enabled: frameHostSrc !== null,
-    html,
-    mode: "still",
-  });
-  if (frameHostSrc) {
-    return (
-      <iframe
-        key={html}
-        ref={frameRef}
-        title={title}
-        sandbox="allow-scripts"
-        referrerPolicy="no-referrer"
-        src={frameHostSrc}
-        onLoad={frameHost.onFrameLoad}
-        loading="lazy"
-        tabIndex={-1}
-        aria-hidden
-        className={SITE_STILL_FRAME_CLASS}
-      />
+const editablePictureCache = new Map<string, Promise<string>>();
+const EDITABLE_PICTURE_CACHE_LIMIT = 48;
+/* A failed picture is remembered for a minute, so remounting cards doesn't redo it. */
+const EDITABLE_PICTURE_RETRY_MS = 60_000;
+
+function useEditablePicture(workspaceId: string, item: ArtifactCatalogItem) {
+  const { client, accessKeyVersion } = useAppContext();
+  const key = `${accessKeyVersion}:${workspaceId}:${item.id}:${item.updatedAt}`;
+  const [state, setState] = useState<{ key: string; src: string | null } | null>(null);
+  useEffect(() => {
+    let active = true;
+    let request = editablePictureCache.get(key);
+    if (!request) {
+      const loading = limitPictureRequest(() =>
+        client.getEditableArtifactPreview(workspaceId, item.id),
+      ).then((svg) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+      request = loading;
+      editablePictureCache.set(key, loading);
+      if (editablePictureCache.size > EDITABLE_PICTURE_CACHE_LIMIT)
+        editablePictureCache.delete(editablePictureCache.keys().next().value!);
+      loading.catch(() =>
+        setTimeout(() => {
+          if (editablePictureCache.get(key) === loading) editablePictureCache.delete(key);
+        }, EDITABLE_PICTURE_RETRY_MS),
+      );
+    }
+    request.then(
+      (src) => active && setState({ key, src }),
+      () => active && setState({ key, src: null }),
     );
-  }
+    return () => {
+      active = false;
+    };
+  }, [client, item.id, key, workspaceId]);
+  return state?.key === key ? state.src : undefined;
+}
+
+function EditablePicture({
+  workspaceId,
+  item,
+  placeholder,
+}: {
+  workspaceId: string;
+  item: ArtifactCatalogItem;
+  placeholder: ReactNode;
+}) {
+  const src = useEditablePicture(workspaceId, item);
+  const [failed, setFailed] = useState<string | null>(null);
+  if (!src || failed === src) return placeholder;
   return (
-    <iframe
-      title={title}
-      sandbox=""
-      {...SITE_STILL_FRAME_POLICY}
-      srcDoc={siteStillDocument(html)}
-      loading="lazy"
-      tabIndex={-1}
+    <img
+      src={src}
+      alt=""
       aria-hidden
-      className={SITE_STILL_FRAME_CLASS}
+      draggable={false}
+      onError={() => setFailed(src)}
+      className={cn(
+        "absolute inset-0 size-full bg-white object-cover dark:brightness-[0.88]",
+        // A sheet reads from its top-left cell; a page or slide from its top centre.
+        item.kind === "spreadsheet" ? "object-left-top" : "object-top",
+      )}
     />
   );
 }
@@ -770,8 +1110,16 @@ function ArtifactPreview({
   if (item.kind === "site" && item.versionId)
     return (
       <div className="absolute inset-0">
-        <ArtifactThumbnail placeholder={placeholder}>
+        <ArtifactThumbnail placeholder={placeholder} whileInView>
           <SiteStill workspaceId={workspaceId} item={item} placeholder={placeholder} />
+        </ArtifactThumbnail>
+      </div>
+    );
+  if (item.kind === "document" || item.kind === "spreadsheet" || item.kind === "presentation")
+    return (
+      <div className="absolute inset-0">
+        <ArtifactThumbnail placeholder={placeholder}>
+          <EditablePicture workspaceId={workspaceId} item={item} placeholder={placeholder} />
         </ArtifactThumbnail>
       </div>
     );

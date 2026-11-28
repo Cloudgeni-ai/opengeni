@@ -6,33 +6,88 @@ import type {
   OpenGeniClient,
   RetainedArtifactReference,
 } from "@opengeni/sdk";
-import { memo, useEffect, useState, type ReactNode } from "react";
-import { Image, Pressable, Text, View } from "react-native";
+import {
+  SITE_PREVIEW_TIMEOUT_MS,
+  SITE_PREVIEW_WIDTH,
+  sitePreviewDocument,
+  sitePreviewPainted,
+} from "@opengeni/sdk/site-preview";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Image, Platform, Pressable, Text, View } from "react-native";
+import { parse, SvgXml } from "react-native-svg";
+import { captureRef } from "react-native-view-shot";
 import { WebView } from "react-native-webview";
 import {
   ARTIFACT_KIND_ICON,
   ARTIFACT_KIND_LABEL,
   editedLabel,
-  siteStillDocument,
+  isEditableKind,
+  sitePreviewFileName,
+  sitePreviewFilePrefix,
 } from "@/artifacts";
+import {
+  blankSitePreviews,
+  keepSitePreview,
+  onForgetArtifactPreviews,
+  sitePreviewGeneration,
+  storedSitePreview,
+} from "@/site-preview-store";
 
 export type ArtifactThumbnailClient = Pick<
   ChatClient<OpenGeniClient>,
-  "getWorkspaceArtifactHtml" | "createRetainedArtifactDownloadUrl"
+  "getWorkspaceArtifactHtml" | "createRetainedArtifactDownloadUrl" | "getEditableArtifactPreview"
 >;
 
-/* A Site's page and an image's address, shared across cards and remounts. */
+/* A Site's page, an image's address and a document's picture, shared across cards and remounts. */
 const siteHtml = new Map<string, Promise<string>>();
 const imageUrls = new Map<string, Promise<string>>();
+const editablePictures = new Map<string, Promise<string>>();
 const CACHE_LIMIT = 48;
+// Nothing of a signed-out account stays in memory either.
+onForgetArtifactPreviews(() => {
+  siteHtml.clear();
+  imageUrls.clear();
+  editablePictures.clear();
+  failedPictures.clear();
+});
+/* Pictures that couldn't be drawn keep their card's glyph. */
+const failedPictures = new Set<string>();
+
+/* The API draws pictures a few at a time. */
+const PICTURE_REQUEST_SLOTS = 4;
+let pictureRequestsRunning = 0;
+const pictureRequestQueue: Array<() => void> = [];
+
+function limitPictureRequest<T>(request: () => Promise<T>): Promise<T> {
+  return new Promise<void>((resolve) => {
+    if (pictureRequestsRunning < PICTURE_REQUEST_SLOTS) {
+      pictureRequestsRunning += 1;
+      resolve();
+    } else pictureRequestQueue.push(resolve);
+  })
+    .then(request)
+    .finally(() => {
+      const next = pictureRequestQueue.shift();
+      if (next) next();
+      else pictureRequestsRunning -= 1;
+    });
+}
+
+/* A failed load is remembered for a minute, so remounting cards doesn't redo it. */
+const FAILED_LOAD_RETRY_MS = 60_000;
 
 function cached<T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>) {
   let request = cache.get(key);
   if (!request) {
-    request = load();
-    cache.set(key, request);
+    const loading = load();
+    request = loading;
+    cache.set(key, loading);
     if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
-    request.catch(() => cache.delete(key));
+    loading.catch(() =>
+      setTimeout(() => {
+        if (cache.get(key) === loading) cache.delete(key);
+      }, FAILED_LOAD_RETRY_MS),
+    );
   }
   return request;
 }
@@ -52,6 +107,166 @@ function useLoaded<T>(key: string | null, load: () => Promise<T>): T | null {
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- the key names what is loaded
   }, [key]);
   return state && state.key === key ? state.value : null;
+}
+
+/* Two Sites render at a time, so a screen of cards never runs every page at once. */
+const SITE_PREVIEW_SLOTS = 2;
+let sitePreviewsRendering = 0;
+const sitePreviewQueue: Array<() => void> = [];
+
+function releaseSitePreviewSlot() {
+  const next = sitePreviewQueue.shift();
+  if (next) next();
+  else sitePreviewsRendering = Math.max(0, sitePreviewsRendering - 1);
+}
+
+function useSitePreviewSlot(): { granted: boolean; release: () => void } {
+  const [granted, setGranted] = useState(false);
+  const heldRef = useRef(false);
+  const release = useCallback(() => {
+    if (!heldRef.current) return;
+    heldRef.current = false;
+    releaseSitePreviewSlot();
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const grant = () => {
+      if (!active) return releaseSitePreviewSlot();
+      heldRef.current = true;
+      setGranted(true);
+    };
+    if (sitePreviewsRendering < SITE_PREVIEW_SLOTS) {
+      sitePreviewsRendering += 1;
+      grant();
+    } else sitePreviewQueue.push(grant);
+    return () => {
+      active = false;
+      const queued = sitePreviewQueue.indexOf(grant);
+      if (queued >= 0) sitePreviewQueue.splice(queued, 1);
+      release();
+    };
+  }, [release]);
+  return { granted, release };
+}
+
+/**
+ * A Site's page drawn at a desktop width and scaled into the tile, in an
+ * isolated web view (`@opengeni/sdk/site-preview`: no bridge, no calls, no
+ * shared cookies on iOS). Once the page reports it painted, the tile is
+ * captured and `onCaptured` gets the picture; a page that stays blank calls
+ * `onBlank`. If capturing fails the live page stays (`onLive`).
+ */
+function SiteRender({
+  html,
+  name,
+  replaces,
+  scheme,
+  onCaptured,
+  onBlank,
+  onLive,
+}: {
+  html: string;
+  name: string;
+  /** The start of this Site's earlier previews, replaced by this one. */
+  replaces: string;
+  scheme: "light" | "dark";
+  onCaptured: (uri: string) => void;
+  onBlank: () => void;
+  onLive: () => void;
+}) {
+  const shotRef = useRef<View>(null);
+  const [box, setBox] = useState<{ width: number; height: number } | null>(null);
+  const { granted: slotGranted, release: releaseSlot } = useSitePreviewSlot();
+  const settledRef = useRef(false);
+  const generation = useMemo(() => sitePreviewGeneration(), []);
+  const document = useMemo(() => sitePreviewDocument(html, { theme: scheme }), [html, scheme]);
+  const settle = useCallback(
+    (painted: boolean, reported = true) => {
+      if (settledRef.current) return;
+      settledRef.current = true;
+      if (!painted) {
+        // A page that said it drew nothing isn't tried again this run; one
+        // that never said (slow network) is, next time its card shows.
+        if (reported) blankSitePreviews.add(name);
+        releaseSlot();
+        onBlank();
+        return;
+      }
+      // One frame for the web view to present what it reported.
+      setTimeout(() => {
+        captureRef(shotRef, { format: "jpg", quality: 0.85, result: "tmpfile" }).then(
+          (uri) => {
+            releaseSlot();
+            const kept = keepSitePreview(name, uri, { generation, replaces });
+            if (kept) onCaptured(kept);
+          },
+          () => {
+            releaseSlot();
+            onLive();
+          },
+        );
+      }, 120);
+    },
+    [generation, name, onBlank, onCaptured, onLive, releaseSlot, replaces],
+  );
+  // The page's time runs from when its web view is laid out and mounted.
+  const mounted = slotGranted && box !== null;
+  useEffect(() => {
+    if (!mounted) return;
+    const timer = setTimeout(() => settle(false, false), SITE_PREVIEW_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [settle, mounted]);
+  const scale = box ? box.width / SITE_PREVIEW_WIDTH : 0;
+  return (
+    <View
+      ref={shotRef}
+      collapsable={false}
+      onLayout={(event) => {
+        const { width, height } = event.nativeEvent.layout;
+        if (width > 0 && height > 0) setBox({ width, height });
+      }}
+      style={{ flex: 1, overflow: "hidden", backgroundColor: "#ffffff" }}
+    >
+      {box && slotGranted ? (
+        <WebView
+          source={{ html: document }}
+          originWhitelist={["about:*"]}
+          javaScriptEnabled
+          // A separate cookie and storage jar on iOS. On Android the page has
+          // no origin of its own, so with third-party cookies off none of its
+          // requests carry the app's cookies.
+          incognito={Platform.OS === "ios"}
+          thirdPartyCookiesEnabled={false}
+          sharedCookiesEnabled={false}
+          scalesPageToFit={false}
+          scrollEnabled={false}
+          setSupportMultipleWindows={false}
+          javaScriptCanOpenWindowsAutomatically={false}
+          allowsLinkPreview={false}
+          mediaPlaybackRequiresUserAction
+          pointerEvents="none"
+          onMessage={(event) => {
+            const painted = sitePreviewPainted(event.nativeEvent.data);
+            if (painted !== null) settle(painted);
+          }}
+          onError={() => settle(false, false)}
+          onContentProcessDidTerminate={() => settle(false, false)}
+          onRenderProcessGone={() => settle(false, false)}
+          onShouldStartLoadWithRequest={(request) => request.url.startsWith("about:")}
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: SITE_PREVIEW_WIDTH,
+            height: Math.ceil(box.height / scale),
+            transformOrigin: "top left",
+            transform: [{ scale }],
+            backgroundColor: "#ffffff",
+          }}
+        />
+      ) : null}
+    </View>
+  );
 }
 
 /** The type glyph on a quiet tile: what a card shows before (or without) a still. */
@@ -83,8 +298,10 @@ function KindTile({ item, size }: { item: ArtifactCatalogItem; size: number }) {
 }
 
 /**
- * An artifact's still, as the web library draws it: a Site's page with no
- * scripts running, an image's own pixels, and the type glyph for the rest.
+ * An artifact's still, as the web library draws it: a Site's page as it looks
+ * when opened, an image's own pixels, the first page, slide or sheet of a
+ * document, presentation or spreadsheet, and the type glyph for the rest (and
+ * whenever a still can't be had).
  */
 export const ArtifactThumbnail = memo(function ArtifactThumbnail({
   client,
@@ -98,8 +315,25 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
   glyphSize?: number;
 }) {
   const theme = useNativeTimelineTheme();
+  const previewName =
+    item.kind === "site" && item.versionId
+      ? sitePreviewFileName(workspaceId, item.id, item.versionId, theme.scheme)
+      : null;
+  const stored = useMemo(
+    () => (previewName ? storedSitePreview(previewName) : null),
+    [previewName],
+  );
+  const [site, setSite] = useState<{ name: string; uri: string | null; live?: boolean } | null>(
+    null,
+  );
+  const siteState = site && site.name === previewName ? site : null;
+  const capturedUri = stored ?? siteState?.uri ?? null;
+  const blank = previewName !== null && blankSitePreviews.has(previewName);
   const siteKey =
-    item.kind === "site" && item.versionId ? `${workspaceId}:${item.id}:${item.versionId}` : null;
+    // A capture that failed keeps its live page, so its page stays loaded.
+    previewName && !capturedUri && !blank && (!siteState || siteState.live)
+      ? `${workspaceId}:${item.id}:${item.versionId}`
+      : null;
   const html = useLoaded(siteKey, () =>
     cached(siteHtml, siteKey!, () =>
       client.getWorkspaceArtifactHtml(workspaceId, item.id, { versionId: item.versionId! }),
@@ -112,47 +346,128 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
       client.createRetainedArtifactDownloadUrl(workspaceId, file!).then((link) => link.url),
     ),
   );
-  const [painted, setPainted] = useState(false);
+  const pictureKey = isEditableKind(item.kind)
+    ? `${workspaceId}:${item.id}:${item.updatedAt}`
+    : null;
+  const picture = useLoaded(pictureKey, () =>
+    cached(editablePictures, pictureKey!, () =>
+      limitPictureRequest(() => client.getEditableArtifactPreview(workspaceId, item.id)),
+    ),
+  );
+  const [pictureFailed, setPictureFailed] = useState<string | null>(null);
+  const onPictureFailed = useCallback(() => {
+    if (!pictureKey) return;
+    failedPictures.add(pictureKey);
+    setPictureFailed(pictureKey);
+  }, [pictureKey]);
+  // What has painted, by the still it was: a new version, edit or reused card
+  // shows its glyph again until its own still is up.
+  const [paintedKey, setPaintedKey] = useState<string | null>(null);
+  const stillKeyRef = useRef<string | null>(null);
+  const markPainted = useCallback(() => setPaintedKey(stillKeyRef.current), []);
+  const pictureShown = markPainted;
+  const onCaptured = useCallback(
+    (uri: string) => previewName && setSite({ name: previewName, uri }),
+    [previewName],
+  );
+  const onBlank = useCallback(
+    () => previewName && setSite({ name: previewName, uri: null }),
+    [previewName],
+  );
+  const onLive = useCallback(() => {
+    if (previewName) setSite({ name: previewName, uri: null, live: true });
+    markPainted();
+  }, [markPainted, previewName]);
   let still: ReactNode = null;
-  if (html) {
+  let stillKey: string | null = null;
+  if (capturedUri) {
+    stillKey = capturedUri;
     still = (
-      <WebView
-        source={{ html: siteStillDocument(html) }}
-        originWhitelist={["about:*"]}
-        javaScriptEnabled={false}
-        scrollEnabled={false}
-        pointerEvents="none"
-        scalesPageToFit
-        onLoadEnd={() => setPainted(true)}
-        onShouldStartLoadWithRequest={(request) => request.url.startsWith("about:")}
-        style={{ flex: 1, backgroundColor: "#ffffff", opacity: painted ? 1 : 0 }}
+      <Image
+        source={{ uri: capturedUri }}
+        resizeMode="cover"
+        onLoad={markPainted}
+        style={{ flex: 1, opacity: paintedKey === capturedUri ? 1 : 0 }}
+      />
+    );
+  } else if (html && previewName && (!siteState || siteState.live)) {
+    stillKey = `live:${previewName}`;
+    still = (
+      <SiteRender
+        html={html}
+        name={previewName}
+        replaces={sitePreviewFilePrefix(workspaceId, item.id)}
+        scheme={theme.scheme}
+        onCaptured={onCaptured}
+        onBlank={onBlank}
+        onLive={onLive}
       />
     );
   } else if (imageUrl) {
+    stillKey = imageUrl;
     still = (
       <Image
         source={{ uri: imageUrl }}
         resizeMode="cover"
-        onLoad={() => setPainted(true)}
-        style={{ flex: 1, opacity: painted ? 1 : 0 }}
+        onLoad={markPainted}
+        style={{ flex: 1, opacity: paintedKey === imageUrl ? 1 : 0 }}
       />
     );
+  } else if (
+    picture &&
+    pictureKey &&
+    pictureFailed !== pictureKey &&
+    !failedPictures.has(pictureKey)
+  ) {
+    stillKey = pictureKey;
+    still = <EditablePicture svg={picture} onShown={pictureShown} onFailed={onPictureFailed} />;
   }
+  stillKeyRef.current = stillKey;
+  const painted = stillKey !== null && paintedKey === stillKey;
   return (
     <View
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       style={{ flex: 1, overflow: "hidden", backgroundColor: theme.colors["surface-2"] }}
     >
+      {still}
       {!painted ? (
         <View style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0 }}>
           <KindTile item={item} size={glyphSize} />
         </View>
       ) : null}
-      {still}
     </View>
   );
 });
+
+/**
+ * A document's, presentation's or spreadsheet's first page as the server drew
+ * it. A picture that doesn't parse leaves the glyph in place.
+ */
+function EditablePicture({
+  svg,
+  onShown,
+  onFailed,
+}: {
+  svg: string;
+  onShown: () => void;
+  onFailed: () => void;
+}) {
+  const drawable = useMemo(() => {
+    try {
+      return parse(svg) !== null;
+    } catch {
+      return false;
+    }
+  }, [svg]);
+  useEffect(() => (drawable ? onShown() : onFailed()), [drawable, onFailed, onShown]);
+  if (!drawable) return null;
+  return (
+    <View style={{ flex: 1, backgroundColor: "#ffffff" }}>
+      <SvgXml xml={svg} width="100%" height="100%" />
+    </View>
+  );
+}
 
 /**
  * One artifact in the list: a large rounded card, its still on the left and

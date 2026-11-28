@@ -4085,6 +4085,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "artifacts:read"
   },
   {
+    "id": "getEditableArtifactPreview",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/preview",
+    "request": [],
+    "query": [
+      "replicaId"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
+  },
+  {
     "id": "getEventSource",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/event-sources/:sourceId",

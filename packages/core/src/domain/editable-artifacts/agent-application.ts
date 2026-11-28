@@ -58,6 +58,18 @@ import {
   type EditableArtifactStateHash,
 } from "./types";
 import type { EditableArtifactKernelState } from "./ports";
+import {
+  EDITABLE_ARTIFACT_PREVIEW_LIMITS,
+  EDITABLE_ARTIFACT_PREVIEW_VERSION,
+  documentPreviewSvg,
+  presentationPreviewSvg,
+  spreadsheetPreviewSvg,
+} from "./preview-picture";
+import type {
+  DocumentArtifactProjection,
+  PresentationArtifactQueryResponse,
+  SpreadsheetArtifactKernelProjection,
+} from "@opengeni/contracts/editable-artifacts";
 
 export type EditableArtifactAgentCommandBatch =
   | Readonly<{ modality: "spreadsheet"; commands: readonly SpreadsheetArtifactCommand[] }>
@@ -198,6 +210,20 @@ export type EditableArtifactAgentApplicationDependencies = Readonly<{
   officeImports: EditableArtifactOfficeImportPort;
   workspaceFiles: EditableArtifactAgentWorkspaceFilePort;
 }>;
+
+/*
+ * A query too large for the picture's bounds draws nothing; anything else
+ * fails. The kernel reports its bounds as `[ARTIFACT_LIMIT] …` (any error
+ * class); the contract decoders as a TypeError or RangeError that "exceeds".
+ */
+function previewBeyondBounds(error: unknown): null {
+  if (!(error instanceof Error)) throw error;
+  const code = (error as Error & { code?: unknown }).code;
+  if (code === "ARTIFACT_LIMIT" || /\[ARTIFACT_LIMIT\]/.test(error.message)) return null;
+  if ((error instanceof RangeError || error instanceof TypeError) && /exceed/i.test(error.message))
+    return null;
+  throw error;
+}
 
 /**
  * Attempt-neutral use cases shared by direct model tools and Codemode. This is
@@ -366,6 +392,154 @@ export class EditableArtifactAgentApplication {
       artifact: projectArtifact(state.artifact),
       projection,
       ...(inspectionReceiptId ? { inspectionReceiptId } : {}),
+    });
+  }
+
+  /**
+   * A small picture of the current head for artifact cards: the first page,
+   * slide or sheet as an SVG (`./preview-picture`). It reads like any viewer
+   * (the actor's read permission), with bounded queries, and leaves nothing
+   * behind: no session association, inspection proof or export.
+   */
+  async preview(
+    input: Readonly<{
+      scope: EditableArtifactScope;
+      actor: EditableArtifactActor;
+      artifactId: EditableArtifactId;
+      /** The tag of a picture the caller already has; when still current, no picture is drawn. */
+      knownTag?: string | undefined;
+    }>,
+  ): Promise<
+    Readonly<{ artifact: EditableArtifactAgentMetadata; tag: string; svg: string | null }>
+  > {
+    const scope = editableArtifactScope(input.scope);
+    validateEditableArtifactActor(input.actor);
+    const artifactId = editableArtifactId(input.artifactId);
+    const tagOf = (stateHash: string) => `${stateHash}.${EDITABLE_ARTIFACT_PREVIEW_VERSION}`;
+    // A picture the caller has is checked against the head's metadata alone
+    // (a read like any other), before anything is reconstructed.
+    if (input.knownTag) {
+      const artifact = await this.dependencies.domain.getArtifact({
+        scope,
+        actor: input.actor,
+        artifactId,
+      });
+      requireActive(artifact);
+      if (tagOf(artifact.stateHash) === input.knownTag)
+        return Object.freeze({
+          artifact: projectArtifact(artifact),
+          tag: input.knownTag,
+          svg: null,
+        });
+    }
+    const state = await this.dependencies.domain.readCurrentKernelState({
+      scope,
+      actor: input.actor,
+      artifactId,
+    });
+    requireActive(state.artifact);
+    const query = async (request: EditableArtifactAgentQuery): Promise<unknown> =>
+      decodeQueryResponse(
+        request.modality,
+        await this.dependencies.inspector.query({ state, queryBytes: encodeQuery(request) }),
+      );
+    const limits = EDITABLE_ARTIFACT_PREVIEW_LIMITS;
+    let svg: string;
+    if (state.modality === "document") {
+      const summary = (await query({
+        modality: "document",
+        query: { kind: "summary" },
+      })) as DocumentArtifactProjection;
+      const body = (await query({
+        modality: "document",
+        query: {
+          kind: "body",
+          startBlock: 0,
+          limits: {
+            maxItems: limits.documentBlocks,
+            maxTextUtf16: limits.documentTextUtf16,
+            maxTableCells: limits.documentTableCells,
+          },
+        },
+      })) as DocumentArtifactProjection;
+      svg = documentPreviewSvg(summary, body);
+    } else if (state.modality === "presentation") {
+      const metadata = (await query({
+        modality: "presentation",
+        query: { kind: "metadata", maxBytes: limits.presentationResponseBytes },
+      })) as Extract<PresentationArtifactQueryResponse, { kind: "metadata" }>;
+      const catalog = (await query({
+        modality: "presentation",
+        query: {
+          kind: "slide-catalog",
+          startSlide: 0,
+          maxSlides: 1,
+          maxTextBytes: 1_024,
+          maxBytes: limits.presentationResponseBytes,
+        },
+      })) as Extract<PresentationArtifactQueryResponse, { kind: "slide-catalog" }>;
+      const first = catalog.slides[0];
+      const slide = first
+        ? ((await query({
+            modality: "presentation",
+            query: {
+              kind: "editor-slide",
+              slideId: first.id,
+              maxNodes: limits.presentationNodes,
+              maxTextBytes: limits.presentationTextBytes,
+              maxBytes: limits.presentationResponseBytes,
+            },
+          })) as Extract<PresentationArtifactQueryResponse, { kind: "editor-slide" }>)
+        : null;
+      svg = presentationPreviewSvg(metadata.slideSize, slide);
+    } else {
+      // The catalog is never cut short: a workbook beyond the preview's
+      // bounds draws as an empty grid rather than failing every time. Any
+      // other failure (kernel or inspector down) still fails the request, so
+      // an empty grid is never cached under the head's tag by mistake.
+      const workbook = (await query({
+        modality: "spreadsheet",
+        query: {
+          kind: "workbook-metadata",
+          query: {
+            maxSheets: limits.spreadsheetSheets,
+            maxBytes: limits.spreadsheetMetadataBytes,
+          },
+        },
+      }).catch(previewBeyondBounds)) as Extract<
+        SpreadsheetArtifactKernelProjection,
+        { kind: "workbook-metadata" }
+      > | null;
+      const sheet = workbook?.projection.sheets[0] ?? null;
+      // Cells beyond the response bound (long text) draw as an empty grid too.
+      const viewport = sheet
+        ? ((
+            (await query({
+              modality: "spreadsheet",
+              query: {
+                kind: "viewport",
+                query: {
+                  sheetId: sheet.sheetId,
+                  startRow: 0,
+                  startColumn: 0,
+                  rowCount: limits.spreadsheetRows,
+                  columnCount: limits.spreadsheetColumns,
+                  maxCells: limits.spreadsheetRows * limits.spreadsheetColumns,
+                  maxBytes: limits.spreadsheetResponseBytes,
+                },
+              },
+            }).catch(previewBeyondBounds)) as Extract<
+              SpreadsheetArtifactKernelProjection,
+              { kind: "viewport" }
+            > | null
+          )?.projection ?? null)
+        : null;
+      svg = spreadsheetPreviewSvg(sheet, viewport);
+    }
+    return Object.freeze({
+      artifact: projectArtifact(state.artifact),
+      tag: tagOf(state.artifact.stateHash),
+      svg,
     });
   }
 

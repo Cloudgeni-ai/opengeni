@@ -18,6 +18,7 @@ import { Hono } from "hono";
 import {
   EDITABLE_ARTIFACT_LIVE_TICKET_REQUEST_MAX_BYTES,
   EditableArtifactApplicationError,
+  type EditableArtifactPreviewPort,
   editableArtifactActorForGrant,
   registerEditableArtifactRoutes,
 } from "../src/routes/editable-artifacts";
@@ -70,6 +71,8 @@ function routeFixture(
     audienceChange?: "store" | "not_owner" | "refused";
     /** The imported file is Only me to the caller. */
     sourcePrivate?: boolean;
+    /** Draws the card picture. */
+    preview?: EditableArtifactPreviewPort;
   }> = {},
 ): RecordedApplication {
   const modality = options.modality ?? "spreadsheet";
@@ -177,6 +180,7 @@ function routeFixture(
     },
     editableArtifactAudiences: audiencePort,
     ...(options.uncomposed ? {} : { editableArtifacts: application }),
+    ...(options.preview ? { editableArtifactAgent: options.preview } : {}),
   });
   return {
     app,
@@ -810,6 +814,98 @@ describe("editable artifact create/open routes", () => {
     );
     expect(response.status).toBe(status);
     expect(fixture.createCalls).toHaveLength(status === 201 ? 1 : 0);
+  });
+});
+
+describe("editable artifact card picture route", () => {
+  const STATE_HASH = `sha256:${"7".repeat(64)}`;
+  const SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text>Q3 plan</text></svg>';
+  const TAG = `${STATE_HASH}.1`;
+  const previewFixture = (fail: Error | null = null) => {
+    const calls: Array<Parameters<EditableArtifactPreviewPort["preview"]>[0]> = [];
+    const fixture = routeFixture({
+      preview: {
+        preview: async (input) => {
+          calls.push(input);
+          if (fail) throw fail;
+          return { tag: TAG, svg: input.knownTag === TAG ? null : SVG };
+        },
+      },
+    });
+    return { ...fixture, previewCalls: calls };
+  };
+  const plainUrl = `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${ARTIFACT_ID}/preview`;
+  const url = `${plainUrl}?replicaId=${REPLICA_ID}`;
+
+  test("returns the picture as an inert SVG, revalidated by the head's state", async () => {
+    const fixture = previewFixture();
+    const response = await fixture.app.request(url, {
+      headers: { authorization: await bearer({ permissions: ["artifacts:read"] }) },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(SVG);
+    expect(response.headers.get("content-type")).toBe("image/svg+xml; charset=utf-8");
+    expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("cache-control")).toBe("private, no-cache");
+    expect(response.headers.get("vary")).toBe("Authorization, Cookie");
+    expect(response.headers.get("etag")).toBe(`"${TAG}"`);
+    expect(fixture.previewCalls[0]).toMatchObject({
+      scope: { accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID },
+      artifactId: ARTIFACT_ID,
+      actor: { kind: "human", replicaId: REPLICA_ID },
+    });
+    expect(fixture.previewCalls[0]?.knownTag).toBeUndefined();
+
+    // A browser revalidates with the tag, weak or in a list.
+    for (const header of [`"${TAG}"`, `W/"${TAG}"`, `"${TAG}", "other"`]) {
+      const unchanged = await fixture.app.request(url, {
+        headers: {
+          authorization: await bearer({ permissions: ["artifacts:read"] }),
+          "if-none-match": header,
+        },
+      });
+      expect(unchanged.status).toBe(304);
+      expect(await unchanged.text()).toBe("");
+      expect(unchanged.headers.get("etag")).toBe(`"${TAG}"`);
+    }
+    expect(fixture.previewCalls.at(-1)?.knownTag).toBe(TAG);
+  });
+
+  test("needs no replica, so the URL stays the same and the browser can revalidate", async () => {
+    const fixture = previewFixture();
+    const response = await fixture.app.request(plainUrl, {
+      headers: { authorization: await bearer({ permissions: ["artifacts:read"] }) },
+    });
+    expect(response.status).toBe(200);
+    expect(fixture.previewCalls[0]).toMatchObject({ actor: { kind: "human" } });
+  });
+
+  test("needs artifact read access and maps denial and absence", async () => {
+    const fixture = previewFixture();
+    const denied = await fixture.app.request(url, {
+      headers: { authorization: await bearer({ permissions: ["files:read"] }) },
+    });
+    expect(denied.status).toBe(403);
+    expect(fixture.previewCalls).toHaveLength(0);
+    for (const [code, status] of [
+      ["not_found", 404],
+      ["forbidden", 403],
+    ] as const) {
+      const failing = previewFixture(new EditableArtifactApplicationError(code));
+      const response = await failing.app.request(url, {
+        headers: { authorization: await bearer() },
+      });
+      expect(response.status).toBe(status);
+    }
+  });
+
+  test("is unavailable on a deployment without the artifact engine", async () => {
+    const response = await routeFixture().app.request(url, {
+      headers: { authorization: await bearer() },
+    });
+    expect(response.status).toBe(503);
   });
 });
 

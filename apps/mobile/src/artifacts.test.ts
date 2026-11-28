@@ -11,7 +11,8 @@ import {
   emptyListWords,
   fileOpensInline,
   nativeViewPath,
-  siteStillDocument,
+  sitePreviewFileName,
+  sitePreviewFilePrefix,
   viewerKeepsNavigation,
   viewerMode,
   viewerParamsForLink,
@@ -209,8 +210,18 @@ test("Share and Copy link use the web address", () => {
   );
 });
 
-test("a Site's still runs no scripts", () => {
-  const still = siteStillDocument("<h1>Metronor demo overview</h1>");
-  expect(still).toContain("Content-Security-Policy");
-  expect(still).toContain("<h1>Metronor demo overview</h1>");
+test("a Site's cached preview is keyed by version and scheme, with a safe file name", () => {
+  expect(sitePreviewFileName("work-1", "site", "ver_2", "dark")).toBe(
+    "v2~work-1~site~ver_2~dark.jpg",
+  );
+  expect(sitePreviewFileName("../etc", "s/..", "a/b\\c.d", "light")).toBe(
+    "v2~etc~s~abcd~light.jpg",
+  );
+  expect(sitePreviewFileName("w", "s", "v1", "light")).not.toBe(
+    sitePreviewFileName("w", "s", "v2", "light"),
+  );
+  // Every version of one Site shares a start, so a new one replaces the old;
+  // ids that contain the old separator can't make two Sites share one.
+  expect(sitePreviewFilePrefix("a-b", "c")).not.toBe(sitePreviewFilePrefix("a", "b-c"));
+  expect(sitePreviewFileName("w", "s", "v2", "dark")).toStartWith(sitePreviewFilePrefix("w", "s"));
 });
