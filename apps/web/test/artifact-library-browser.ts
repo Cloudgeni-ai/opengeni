@@ -37,10 +37,10 @@ const browser = await chromium.launch({
   headless: true,
   executablePath: process.env.OPENGENI_TEST_CHROMIUM ?? "/usr/local/bin/chromium",
 });
-// The Site fixture's image points here, at another origin. A request from a
-// sandboxed still does not reach Playwright's request events (the frame has an
-// opaque origin in its own process), so the server's own log is the proof
-// that a still makes no network request.
+// The Site fixture's image points here, at another origin over plain http,
+// which the preview policy never allows. A request from a sandboxed frame does
+// not reach Playwright's request events (the frame has an opaque origin in its
+// own process), so the server's own log is the proof that nothing reached it.
 const outsideHits: string[] = [];
 const outsideServer = Bun.serve({
   hostname: "127.0.0.1",
@@ -119,25 +119,35 @@ try {
       element.scrollTop = 0;
     });
     await newArtifact("Create a workspace artifact: ");
-    // The gallery (default) shows a Site as a still: sandboxed with no scripts, no network.
+    // The gallery (default) shows a Site as it looks: its own scripts run in a
+    // scripts-only, opaque-origin frame under the preview policy.
     // Activate this card's viewport gate explicitly, rather than relying on the
     // preceding image scroll to happen to bring a nearby Site into view too.
     await site.scrollIntoViewIfNeeded();
     await still.waitFor({ state: "attached" });
     await still.contentFrame().getByText("Weekly active teams by plan.", { exact: true }).waitFor();
     assert.equal((await activity()).siteHtml.length, 1, "the visible Site fetches its HTML once");
-    assert.equal(await still.getAttribute("sandbox"), "", "a Site still runs no code");
+    assert.equal(
+      await still.getAttribute("sandbox"),
+      "allow-scripts",
+      "a Site preview may run scripts and nothing else",
+    );
     assert.match(
-      (await still.getAttribute("csp")) ?? "",
-      /^default-src 'none';/,
-      "the frame requires the no-network policy before the Site markup is parsed",
+      (await still.getAttribute("srcdoc")) ?? "",
+      /^<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none';[^"]*connect-src 'none'/,
+      "the preview policy comes before the Site markup is parsed",
     );
     assert.equal(
-      await page.locator("iframe:not([sandbox=''])").count(),
+      await page.locator("iframe:not([sandbox='allow-scripts'])").count(),
       0,
-      "catalog must not run a Site",
+      "no card frame gets more than scripts",
     );
-    assert.equal(await page.evaluate(() => Reflect.get(window, "siteRan") ?? false), false);
+    // The Site's own script ran, inside its frame.
+    await page.waitForFunction(() => Reflect.get(window, "siteRan") === true);
+    // Once the page reports it painted, the card shows it in place of the glyph.
+    await still
+      .locator("xpath=ancestor::*[contains(concat(' ', @class, ' '), ' opacity-100 ')][1]")
+      .waitFor({ state: "attached", timeout: 20_000 });
     // Chromium can report the still's image as a request it then blocks for the
     // policy (failure "csp") before anything leaves the browser. Only that exact
     // blocked attempt is allowed; any other outside request fails the run.
@@ -151,9 +161,9 @@ try {
         )
         .map((request) => request.url()),
       [],
-      "a Site still makes no network requests",
+      "a Site preview's disallowed image is blocked in the browser",
     );
-    assert.deepEqual(outsideHits, [], "a Site still's image never reaches its server");
+    assert.deepEqual(outsideHits, [], "a Site preview's disallowed image never reaches its server");
     assert.equal(
       await page.getByRole("radio", { name: "Gallery", exact: true }).getAttribute("aria-checked"),
       "true",
