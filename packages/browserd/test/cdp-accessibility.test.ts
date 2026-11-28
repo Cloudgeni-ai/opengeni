@@ -364,6 +364,41 @@ test("a page with document-sized accessible names still yields a valid snapshot"
   expect(InteractionSemanticNode.safeParse(snapshot.roots[0]).success).toBe(true);
 });
 
+test("a state too long to keep whole says it was cut instead of passing for the full value", () => {
+  const longUrl = `https://example.com/${"a".repeat(200)}`;
+  const fitting = `https://example.com/${"b".repeat(100)}`;
+  const snapshot = normalizeCdpAccessibilityTree({
+    controllerGeneration: "controller",
+    targetId: "target",
+    documentGeneration: "document",
+    nodes: [
+      {
+        nodeId: "root",
+        role: { value: "RootWebArea" },
+        name: { value: "Report" },
+        properties: [{ name: "url", value: { value: longUrl } }],
+        childIds: ["link"],
+        backendDOMNodeId: 1,
+      },
+      {
+        nodeId: "link",
+        parentId: "root",
+        role: { value: "link" },
+        name: { value: "Short" },
+        properties: [{ name: "url", value: { value: fitting } }],
+        backendDOMNodeId: 2,
+      },
+    ],
+  });
+  const root = snapshot.roots[0]!;
+  const clipped = root.states.find((state) => state.startsWith("url="))!;
+  expect(clipped).toHaveLength(128);
+  expect(clipped.endsWith("…")).toBe(true);
+  expect(longUrl.startsWith(clipped.slice("url=".length, -1))).toBe(true);
+  expect(root.children![0]!.states).toContain(`url=${fitting}`);
+  expect(InteractionSemanticNode.safeParse(root).success).toBe(true);
+});
+
 describe("protected page content", () => {
   const text = (nodeId: string, backendDOMNodeId: number, name: string): CdpAxNode => ({
     nodeId,

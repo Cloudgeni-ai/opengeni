@@ -799,13 +799,22 @@ function propertyStates(properties: unknown, numericValue: unknown = undefined):
       String(value) === numericText(numericValue)
     )
       continue;
-    if (value === true || value === "true") states.push(property.name.slice(0, 128));
+    if (value === true || value === "true") states.push(boundedState(property.name));
     else if (value !== false && value !== undefined && value !== null && value !== "false") {
-      states.push(`${property.name}=${String(value)}`.slice(0, 128));
+      states.push(boundedState(`${property.name}=${String(value)}`));
     }
     if (states.length === 64) break;
   }
   return states;
+}
+
+/** The longest state entry InteractionSemanticNode accepts. */
+const STATE_MAX_CHARS = 128;
+
+/** A state within STATE_MAX_CHARS. One cut to fit ends in "…", so a long
+ * value (a link's or page's url) never reads as the complete value. */
+function boundedState(state: string): string {
+  return state.length <= STATE_MAX_CHARS ? state : `${state.slice(0, STATE_MAX_CHARS - 1)}…`;
 }
 
 function nameSourceTokens(sources: unknown): string[] {
