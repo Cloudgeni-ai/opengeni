@@ -96,6 +96,31 @@ export async function discoverCompatibleModelReasoning(
  * response. Returns only the model id the provider reported serving (Azure
  * OpenAI reports a deployment's base model), never the rest of its answer.
  */
+/** A refusal reason is worth naming only as a plain identifier, never as prose. */
+const REFUSAL_CODE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u;
+
+/**
+ * The provider's own machine-readable refusal reason, when it is a plain
+ * identifier such as `MissingSessionID` or `model_not_found`. Anything else —
+ * a sentence, a key, a request detail — is dropped: this is the one field we
+ * are willing to quote, and only because it cannot carry endpoint output.
+ */
+async function refusalCode(response: Response): Promise<string | null> {
+  const body = (await response.json().catch(() => null)) as {
+    error?: unknown;
+    type?: unknown;
+    code?: unknown;
+  } | null;
+  const error = body?.error;
+  const candidate =
+    typeof error === "string"
+      ? error
+      : error && typeof error === "object"
+        ? ((error as { type?: unknown }).type ?? (error as { code?: unknown }).code)
+        : (body?.type ?? body?.code);
+  return typeof candidate === "string" && REFUSAL_CODE.test(candidate) ? candidate : null;
+}
+
 export async function verifyDirectModelAccess(
   input: DirectModelProviderMetadata,
   credential: DirectModelAccessCredential,
@@ -154,12 +179,18 @@ export async function verifyDirectModelAccess(
     });
   }
   if (response.status === 404 || response.status === 400) {
+    // A compatible endpoint frequently refuses with a reason it names in
+    // `error.type` / `error.code`: a header it did not receive, a model it has
+    // switched off. Naming that bounded identifier is not reflecting the
+    // endpoint's reply, and it turns an unactionable "couldn't use this model"
+    // into a cause the person can act on.
+    const refusal = compatible ? await refusalCode(response) : null;
     throw new HTTPException(422, {
       message:
         config.provider === "azure_openai"
           ? "Azure couldn’t use this deployment. Check the endpoint and deployment name."
           : compatible
-            ? "Your endpoint couldn’t use this model. Check the base URL (it often ends in /v1) and use a model ID exactly as your provider lists it."
+            ? `Your endpoint couldn’t use this model${refusal === null ? "" : ` (${refusal})`}. Check the base URL (it often ends in /v1) and use a model ID exactly as your provider lists it.`
             : "OpenAI couldn’t use this model. Check the model name and your account’s access.",
     });
   }
