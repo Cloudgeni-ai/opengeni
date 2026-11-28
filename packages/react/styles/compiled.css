@@ -16075,7 +16075,7 @@
 }
 @media (min-width: 720px) {
   :where(.og-root).og-connection-catalog[data-layout="row"] > *,:where(.og-root) .og-connection-catalog[data-layout="row"] > * {
-    flex-basis: calc((100% - 16px) / 3);
+    flex-basis: calc((100% - 24px) / 3.25);
   }
 }
 @media (prefers-reduced-motion: no-preference) {

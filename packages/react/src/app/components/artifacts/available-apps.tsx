@@ -6,7 +6,7 @@
  * with what the app is, a preview of it on sample records, the Skills it
  * turns on and the automations it adds.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { compareAppPackageVersions } from "@opengeni/contracts";
 import type { AppPackageStatus, AppTemplate } from "@opengeni/sdk";
 
@@ -123,6 +123,7 @@ export function AvailableApps({
   const [expanded, setExpanded] = useState(false);
   const [row, setRow] = useState<HTMLDivElement | null>(null);
   const [overflowing, setOverflowing] = useState(false);
+  const listId = useId();
   useEffect(() => {
     if (!row) {
       setOverflowing(false);
@@ -134,7 +135,7 @@ export function AvailableApps({
     const observer = new ResizeObserver(measure);
     observer.observe(row);
     return () => observer.disconnect();
-  }, [row, templates, installed, query]);
+  }, [row, templates, installed?.length, query]);
   useEffect(() => {
     let live = true;
     // Suggestions only: when they can't load, the page goes on without them.
@@ -183,6 +184,7 @@ export function AvailableApps({
             size="sm"
             className="h-auto px-0"
             aria-expanded={expanded}
+            aria-controls={listId}
             onClick={() => setExpanded((open) => !open)}
           >
             {expanded ? "Show less" : "See all"}
@@ -196,6 +198,7 @@ export function AvailableApps({
         data-columns="2"
         data-layout={expanded ? undefined : "row"}
         data-ready-made-apps=""
+        id={listId}
       >
         {shown.map((template) => (
           <CapabilityCatalogRow

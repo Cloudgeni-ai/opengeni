@@ -162,12 +162,12 @@
 .og-connection-catalog[data-columns="2"] { padding:8px; border:1px solid var(--og-color-border,#e4e4e4); border-radius:var(--og-radius-lg,14px); background:var(--og-color-surface-1,#fff); }
 @media (min-width: 720px) { .og-connection-catalog[data-columns="2"] { grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:8px; align-items:start; } }
 /* One row that scrolls sideways (the Apps page's Ready-made): a phone shows one
-   tile and the edge of the next, a wider page three. One-line descriptions. */
+   tile and the edge of the next, a wider page three and an edge. One-line descriptions. */
 .og-connection-catalog[data-layout="row"] { display:flex; gap:8px; overflow-x:auto; overscroll-behavior-x:contain; scroll-snap-type:x mandatory; scroll-padding-inline:8px; scrollbar-width:none; }
 .og-connection-catalog[data-layout="row"]::-webkit-scrollbar { display:none; }
 .og-connection-catalog[data-layout="row"] > * { flex:0 0 85%; scroll-snap-align:start; }
 .og-connection-catalog[data-layout="row"] .og-capability-catalog-copy > span { -webkit-line-clamp:1; }
-@media (min-width: 720px) { .og-connection-catalog[data-layout="row"] > * { flex-basis:calc((100% - 16px) / 3); } }
+@media (min-width: 720px) { .og-connection-catalog[data-layout="row"] > * { flex-basis:calc((100% - 24px) / 3.25); } }
 @media (prefers-reduced-motion: no-preference) { .og-connection-catalog[data-layout="row"] { scroll-behavior:smooth; } }
 .og-connection-details-action { display:grid; place-items:center; flex-shrink:0; width:36px; height:36px; padding:0; border:0; border-radius:8px; background:transparent; color:inherit; font-size:20px; cursor:pointer; }
 .og-connection-details-action:hover { background:var(--og-color-surface-2,#eef0f2); }
