@@ -740,7 +740,7 @@ way.
   has no room for a group and keeps both icons.
   The full console's rail has the same shape: Agents and Apps (sites in Artifacts) at the top
   under Inbox, and Get started, Capabilities, Automations, Knowledge, Artifacts and Meetings under
-  a closed "Setup" group. Each interface remembers its own group's open state in this browser.
+  a closed "More" group. Each interface remembers its own group's open state in this browser.
   A person's saved sidebar layout still applies; `apps` and `get_started` can be hidden like any
   other entry.
 - **The composer.** One action is left beside the message: add photos and files, shown as a

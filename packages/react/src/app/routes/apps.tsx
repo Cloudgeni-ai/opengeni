@@ -37,7 +37,7 @@ export function AppsRoute({
 }: {
   workspaceId: string;
   fromSession?: string | undefined;
-  /** Opens a ready-made app's Enable page; without it, Available opens the install dialog. */
+  /** Opens a ready-made app's Enable page; without it, Ready-made opens the install dialog. */
   onChooseReadyMade?: ((templateKey: string) => void) | undefined;
 }) {
   return (
@@ -177,9 +177,9 @@ function AppsPage({
   const packageActions = canPublish && actions ? actions : null;
   const extras = (item: ArtifactCatalogItem) =>
     appPackageExtras(status.apps.get(item.id), packageActions);
-  // Ready-made apps, not while searching or showing archived ones.
-  const showAvailable =
-    canPublish && status.loaded && filters.q.trim() === "" && filters.status === "active";
+  // Ready-made apps sit under the search bar (which filters them too), not
+  // while showing archived ones.
+  const showReadyMade = canPublish && filters.status === "active";
   return (
     <ContentPage width="standard" className="pt-6">
       <PageHeader
@@ -193,7 +193,7 @@ function AppsPage({
           </>
         }
       />
-      <div className="flex min-w-0 flex-col gap-8 pt-6">
+      <div className="flex min-w-0 flex-col pt-6">
         <ArtifactLibrary
           workspaceId={workspaceId}
           sessionId={fromSession}
@@ -206,9 +206,23 @@ function AppsPage({
           onRetry={catalog.retry}
           nextCursor={catalog.nextCursor}
           onLoadMore={catalog.loadMore}
+          // Ready-made first: a short list that stays in view however many apps are here.
+          lead={
+            showReadyMade ? (
+              <AvailableApps
+                workspaceId={workspaceId}
+                installed={status.loaded ? [...status.apps.values()] : null}
+                onChoose={onChooseReadyMade}
+                query={filters.q}
+              />
+            ) : undefined
+          }
+          listTitle="Your apps"
           empty={{
             title: "No apps yet",
-            description: "Install a ready-made app below, or ask an agent to make one.",
+            description: showReadyMade
+              ? "Add a ready-made app, or ask an agent to make one."
+              : "Ask an agent to make one.",
           }}
           itemExtras={extras}
           onPin={
@@ -221,13 +235,6 @@ function AppsPage({
               : undefined
           }
         />
-        {showAvailable ? (
-          <AvailableApps
-            workspaceId={workspaceId}
-            installed={[...status.apps.values()]}
-            onChoose={onChooseReadyMade}
-          />
-        ) : null}
       </div>
       {packageActions?.element}
     </ContentPage>

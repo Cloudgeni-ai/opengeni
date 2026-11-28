@@ -53,6 +53,16 @@ export function useKnowledgeList(
     useState<KnowledgeEntryListResponse["fallbackReason"]>();
   const [retry, setRetry] = useState(0);
   const generation = useRef(0);
+  // Another request never returns the previous one's entries, so a caller
+  // holding them while the new ones load knows which request they belong to.
+  const [shownKey, setShownKey] = useState(requestKey);
+  if (shownKey !== requestKey) {
+    setShownKey(requestKey);
+    setEntries([]);
+    setCursor(null);
+    setError(null);
+    setLoading(requestKey !== null);
+  }
 
   useEffect(() => {
     const current = ++generation.current;
@@ -113,6 +123,19 @@ export function useKnowledgeList(
   }, [context, cursor, loading, requestKey, workspaceId]);
 
   const reload = useCallback(() => setRetry((value) => value + 1), []);
+  // The render that sees a new request still holds the old entries: never hand them over.
+  if (shownKey !== requestKey) {
+    return {
+      entries: [],
+      cursor: null,
+      loading: requestKey !== null,
+      error: null,
+      errorCause,
+      fallbackReason,
+      loadMore,
+      reload,
+    };
+  }
   return { entries, cursor, loading, error, errorCause, fallbackReason, loadMore, reload };
 }
 

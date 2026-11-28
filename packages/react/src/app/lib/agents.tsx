@@ -90,7 +90,15 @@ export function useAgents(
       setAgents((current) => update(current ?? [])),
     [],
   );
-  return { agents, supported, error, reload, replace };
+  // The render that sees a new key still holds the old list: never hand it over.
+  const shownNow = shownKey === listKey;
+  return {
+    agents: shownNow ? agents : undefined,
+    supported,
+    error: shownNow ? error : null,
+    reload,
+    replace,
+  };
 }
 
 export type AgentState = {
@@ -160,6 +168,16 @@ export function useAgentChats(
   const [error, setError] = useState<Error | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  // Another list (Yours or Everyone's) is never returned under the new filter,
+  // so a caller holding the old list knows which filter it belongs to.
+  const listKey = `${workspaceId}:${agentId}:${filter}`;
+  const [shownKey, setShownKey] = useState(listKey);
+  if (shownKey !== listKey) {
+    setShownKey(listKey);
+    setChats(undefined);
+    setCursor(null);
+    setError(null);
+  }
   // Each read of the first page starts a generation; a "Show more" from an
   // earlier one (another filter) is dropped when it answers.
   const generation = useRef(0);
@@ -210,7 +228,14 @@ export function useAgentChats(
             });
         }
       : null;
-  return { chats, error, loadMore, loadingMore, reload };
+  const shownNow = shownKey === listKey;
+  return {
+    chats: shownNow ? chats : undefined,
+    error: shownNow ? error : null,
+    loadMore: shownNow ? loadMore : null,
+    loadingMore,
+    reload,
+  };
 }
 
 export type AgentSlackInstallsState = {

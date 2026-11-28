@@ -33,6 +33,7 @@ import { ListRow, ListRowSkeleton, RowList } from "../../../ui/list-row";
 import { MetaChip } from "../../../ui/meta-chip";
 import { RelativeTime } from "../../../ui/relative-time";
 import { SegmentedControl } from "../../../ui/segmented-control";
+import { ContentSwap, useHeldWhileLoading } from "../../../ui/content-swap";
 import { SettingDangerRow, SettingRow } from "../../../ui/setting-row";
 import { RowSelect } from "../settings/row-select";
 import { Switch } from "../../../ui/switch";
@@ -204,6 +205,8 @@ function AgentChats({
     title === "Chats" || agent.visibility === "private" ? "yours" : "everyone",
   );
   const chats = useAgentChats(workspaceId, agent.id, filter);
+  // Switching Yours and Everyone's keeps the old list, dimmed, until the new one is in.
+  const listed = useHeldWhileLoading(chats.chats, filter, `${workspaceId}:${agent.id}`);
   // An Only me agent's chats are all its owner's.
   const shared = agent.visibility !== "private";
   return (
@@ -221,58 +224,60 @@ function AgentChats({
         ) : undefined
       }
     >
-      {chats.chats === undefined ? (
-        <RowList label="Chats" flush busy>
-          <ListRowSkeleton count={2} />
-        </RowList>
-      ) : chats.error && chats.chats.length === 0 ? (
-        <ErrorMessage
-          variant="inline"
-          title="Couldn't load chats"
-          {...apiErrorDetails(chats.error)}
-          action={
-            <Button type="button" variant="outline" size="sm" onClick={chats.reload}>
-              Try again
-            </Button>
-          }
-        >
-          {userErrorText(chats.error)}
-        </ErrorMessage>
-      ) : chats.chats.length === 0 ? (
-        <p className="text-sm text-fg-muted">
-          {filter === "yours" ? "You haven't chatted with it yet." : "No chats yet."}
-        </p>
-      ) : (
-        <>
-          <RowList label="Chats" flush>
-            {chats.chats.map((chat) => {
-              const href = `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(chat.sessionId)}`;
-              return (
-                <ListRow
-                  key={chat.sessionId}
-                  leading={<SourceIcon chat={chat} />}
-                  title={chat.title?.trim() || "Untitled chat"}
-                  meta={[<RelativeTime key="time" date={chat.updatedAt} />]}
-                  href={href}
-                  linkProps={{ onClick: inAppClick(() => void navigate({ href })) }}
-                />
-              );
-            })}
+      <ContentSwap swapKey={listed.key} stale={listed.stale}>
+        {listed.value === undefined ? (
+          <RowList label="Chats" flush busy>
+            <ListRowSkeleton count={2} />
           </RowList>
-          {chats.loadMore || chats.loadingMore ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="mt-3"
-              disabled={chats.loadingMore}
-              onClick={() => chats.loadMore?.()}
-            >
-              {chats.loadingMore ? "Loading…" : "Show more"}
-            </Button>
-          ) : null}
-        </>
-      )}
+        ) : chats.error && listed.value.length === 0 ? (
+          <ErrorMessage
+            variant="inline"
+            title="Couldn't load chats"
+            {...apiErrorDetails(chats.error)}
+            action={
+              <Button type="button" variant="outline" size="sm" onClick={chats.reload}>
+                Try again
+              </Button>
+            }
+          >
+            {userErrorText(chats.error)}
+          </ErrorMessage>
+        ) : listed.value.length === 0 ? (
+          <p className="text-sm text-fg-muted">
+            {listed.key === "yours" ? "You haven't chatted with it yet." : "No chats yet."}
+          </p>
+        ) : (
+          <>
+            <RowList label="Chats" flush>
+              {listed.value.map((chat) => {
+                const href = `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(chat.sessionId)}`;
+                return (
+                  <ListRow
+                    key={chat.sessionId}
+                    leading={<SourceIcon chat={chat} />}
+                    title={chat.title?.trim() || "Untitled chat"}
+                    meta={[<RelativeTime key="time" date={chat.updatedAt} />]}
+                    href={href}
+                    linkProps={{ onClick: inAppClick(() => void navigate({ href })) }}
+                  />
+                );
+              })}
+            </RowList>
+            {chats.loadMore || chats.loadingMore ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                disabled={chats.loadingMore}
+                onClick={() => chats.loadMore?.()}
+              >
+                {chats.loadingMore ? "Loading…" : "Show more"}
+              </Button>
+            ) : null}
+          </>
+        )}
+      </ContentSwap>
     </DetailSection>
   );
 }
@@ -287,13 +292,8 @@ function MemoryRow({
   onSaved: (agent: Agent) => void;
 }) {
   const { client } = useAppContext();
-  const navigate = useNavigate();
   const [pending, setPending] = useState<boolean | null>(null);
   const enabled = pending ?? agent.memory.enabled;
-  const collectionId = agent.memory.collectionId;
-  const href = collectionId
-    ? `/workspaces/${encodeURIComponent(workspaceId)}/state?entry=${encodeURIComponent(collectionId)}&agent=${encodeURIComponent(agent.id)}`
-    : null;
   return (
     <SettingRow
       label="Remember across chats"
@@ -303,18 +303,6 @@ function MemoryRow({
             ? "Its chats save what they learn to its Memory. New Memory waits for review first."
             : "Its chats save what they learn to its Memory and read it in later chats."
           : "Each chat starts fresh."
-      }
-      hint={
-        href && enabled ? (
-          <a
-            href={href}
-            onClick={inAppClick(() => void navigate({ href }))}
-            className="w-fit rounded-[4px] text-xs text-fg underline decoration-fg/25 underline-offset-2 hover:decoration-fg"
-            data-agent-memory=""
-          >
-            Open in Knowledge
-          </a>
-        ) : undefined
       }
       control={
         <Switch
@@ -413,6 +401,7 @@ export function AgentReadinessSection({
       title="Ready to work"
       description={`${done} of ${required} required ready. Its triggers stay off until all are.`}
       variant="group"
+      className="py-8"
       data-agent-readiness=""
       action={
         onFinish ? (

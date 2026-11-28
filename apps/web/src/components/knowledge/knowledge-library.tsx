@@ -32,6 +32,7 @@ import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
+import { ContentSwap, useHeldWhileLoading } from "@opengeni/react/ui/content-swap";
 import {
   Toolbar,
   ToolbarFilterChips,
@@ -485,14 +486,23 @@ export function LibraryTab({
   const noun = (count: number) =>
     collections ? (count === 1 ? "collection" : "collections") : count === 1 ? "entry" : "entries";
 
+  // Another scope, layout or filter keeps the old entries, dimmed, until the
+  // new ones are in, instead of a skeleton flash.
+  const swapKey = JSON.stringify([view.layout, view.scope, view.filters, fileId ?? null]);
+  const loaded = useHeldWhileLoading(
+    list.loading && list.entries.length === 0 ? undefined : list.entries,
+    swapKey,
+    workspaceId,
+  );
+  const entries = loaded.value ?? [];
   let body: ReactNode;
-  if (list.loading && list.entries.length === 0) {
+  if (loaded.value === undefined) {
     body = (
       <RowList label="Knowledge" columns={ENTRY_COLUMNS} flush busy>
         <ListRowSkeleton count={5} />
       </RowList>
     );
-  } else if (list.error && list.entries.length === 0) {
+  } else if (list.error && entries.length === 0) {
     body = (
       <ErrorMessage
         title="Couldn't load the Library"
@@ -508,7 +518,7 @@ export function LibraryTab({
     );
   } else if (nothingAtAll) {
     body = <LibraryEmpty canAdd={canAdd} canUpload={canUpload} onAdd={onAdd} onUpload={onUpload} />;
-  } else if (collections && list.entries.length === 0 && !filtered) {
+  } else if (collections && entries.length === 0 && !filtered) {
     body = (
       <EmptyState
         variant="inline"
@@ -520,7 +530,7 @@ export function LibraryTab({
         }
       />
     );
-  } else if (list.entries.length === 0) {
+  } else if (entries.length === 0) {
     body = (
       <EmptyState
         variant="inline"
@@ -554,7 +564,7 @@ export function LibraryTab({
       <div className="flex min-w-0 flex-col gap-4">
         <EntryList
           label={searching ? "Search results" : collections ? "Collections" : "Knowledge"}
-          entries={list.entries}
+          entries={entries}
           actions={actions}
           searching={searching}
           status={status}
@@ -649,7 +659,9 @@ export function LibraryTab({
           <KnowledgeSearchFallback reason={list.fallbackReason} workspaceId={workspaceId} />
         ) : null}
       </div>
-      <div className="min-w-0">{body}</div>
+      <ContentSwap swapKey={loaded.key} stale={loaded.stale}>
+        {body}
+      </ContentSwap>
     </div>
   );
 }

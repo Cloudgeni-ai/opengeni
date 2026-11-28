@@ -35,6 +35,11 @@ import {
 import { agentInitialsAvatar } from "@opengeni/contracts";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
+import {
+  PrimaryNav,
+  SessionShellSlotsProvider,
+} from "@opengeni/react/app/components/rail/rail-sections";
+import { PrimaryNavExtras } from "@/components/rail/primary-nav";
 import { SidebarLayoutSection } from "@/components/sidebar-layout/sidebar-layout-section";
 import { resetSidebarLayoutCache } from "@/components/sidebar-layout/use-sidebar-layout";
 import { SettingsShell, type SettingsRailSection } from "@/components/settings/settings-sidebar";
@@ -248,6 +253,13 @@ function createFixture() {
     }),
     getWorkspaceArtifactHtml: async () =>
       `<nav><a href="/">Home</a><a href="/releases">Releases</a><a href="/roadmap">Roadmap</a><a href="#/changelog">Changelog</a></nav>`,
+    // The rail's Inbox link reads its counts.
+    listInbox: async () => ({
+      items: [],
+      needsYouCount: 0,
+      unreadCount: 0,
+      billingNotifications: [],
+    }),
   };
   return {
     context: {
@@ -255,6 +267,9 @@ function createFixture() {
       accessContext: {
         subjectId: "user:kit",
         accountId: "kit-account",
+        // No grants: the rail's review and attention marks stay off in the kit.
+        workspaceGrants: [],
+        accountGrants: [],
       },
       workspaces: [currentWorkspace],
       resetSessionView: () => undefined,
@@ -371,6 +386,13 @@ export default function SidebarPageSection() {
                 data-kit-rail
                 className="w-64 shrink-0 rounded-md border border-border bg-surface py-2"
               >
+                {/* The rail's top as the web shell composes it, so the spacing
+                    between the shortcuts and the pinned links shows. */}
+                <SessionShellSlotsProvider
+                  slots={{ primaryNav: <PrimaryNavExtras />, primaryNavPlacesNewSession: true }}
+                >
+                  <PrimaryNav />
+                </SessionShellSlotsProvider>
                 <SidebarLayoutSection />
               </div>
               <div className="min-w-0 flex-1">

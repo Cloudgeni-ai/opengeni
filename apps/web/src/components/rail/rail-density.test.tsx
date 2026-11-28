@@ -140,34 +140,36 @@ async function render(node: ReactNode) {
   return { container, root };
 }
 
-function setupDisclosure(container: HTMLElement): HTMLButtonElement {
+function groupDisclosure(container: HTMLElement): HTMLButtonElement {
   const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) => candidate.textContent?.trim() === "Setup",
+    (candidate) => candidate.textContent?.trim() === "More",
   );
-  if (!button) throw new Error("Missing Setup group");
+  if (!button) throw new Error("Missing More group");
   return button;
 }
 
 describe("session-first rail density", () => {
-  test("shows the shortcuts and a closed Setup group, ignoring the old compact choice", async () => {
+  test("shows the shortcuts and a closed More group, ignoring the old compact choice", async () => {
     window.localStorage.setItem("opengeni.rail.nav", "false");
     window.localStorage.removeItem("opengeni.rail.setup");
     const rendered = await render(<PrimaryNav />);
     try {
       expect(rendered.container.textContent).not.toContain("For you");
       expect(rendered.container.textContent).toContain("Apps");
-      // Everything else is one closed Setup group.
+      // Everything else is one closed More group, no longer called Setup.
+      expect(rendered.container.textContent).not.toContain("Setup");
       expect(rendered.container.textContent).not.toContain("Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         2,
       );
-      const setup = setupDisclosure(rendered.container);
-      expect(setup.getAttribute("aria-expanded")).toBe("false");
-      await act(async () => setup.click());
+      const group = groupDisclosure(rendered.container);
+      expect(group.getAttribute("aria-expanded")).toBe("false");
+      await act(async () => group.click());
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         8,
       );
       expect(rendered.container.textContent).toContain("Capabilities");
+      // The open state keeps its old storage key, so a saved choice survives the rename.
       expect(window.localStorage.getItem("opengeni.rail.setup")).toBe("true");
     } finally {
       window.localStorage.removeItem("opengeni.rail.setup");
@@ -194,7 +196,7 @@ describe("session-first rail density", () => {
       expect(workspace.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         2,
       );
-      expect(setupDisclosure(workspace.container).getAttribute("aria-expanded")).toBe("false");
+      expect(groupDisclosure(workspace.container).getAttribute("aria-expanded")).toBe("false");
       expect(railShell).toMatch(
         /id=\{`\$\{mobileNavId\}-panel-workspace`\}[\s\S]*?\{mobileWorkspacePanel\}/,
       );
@@ -208,18 +210,33 @@ describe("session-first rail density", () => {
     }
   });
 
-  test("keeps the shortcuts on short screens and shows the current Setup page while closed", async () => {
+  test("keeps the shortcuts on short screens and shows the current More page while closed", async () => {
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
     pathname = "/workspaces/workspace-1/plugins";
     const rendered = await render(<PrimaryNav />);
     try {
-      expect(rendered.container.textContent).not.toContain("More");
-      expect(setupDisclosure(rendered.container).getAttribute("aria-expanded")).toBe("false");
+      expect(rendered.container.textContent).not.toContain("Less");
+      expect(groupDisclosure(rendered.container).getAttribute("aria-expanded")).toBe("false");
       expect(rendered.container.textContent).toContain("Capabilities");
       expect(rendered.container.textContent).not.toContain("Meetings");
     } finally {
       await act(async () => rendered.root.unmount());
       rendered.container.remove();
+    }
+  });
+
+  test("runs the pinned links straight on from the shortcuts, with the rail's own row gap", async () => {
+    const layoutSection = await Bun.file(
+      new URL("../sidebar-layout/sidebar-layout-section.tsx", import.meta.url),
+    ).text();
+    const navs = [...layoutSection.matchAll(/<nav[\s\S]*?data-sidebar-layout/g)].map(
+      (match) => match[0],
+    );
+    expect(navs).toHaveLength(2);
+    // The shortcuts are a gap-0.5 list; the pinned list starts the same 2px below them.
+    for (const nav of navs) {
+      expect(nav).toContain("mt-0.5 grid gap-0.5");
+      expect(nav).not.toMatch(/\bmt-(?!0\.5\b)/);
     }
   });
 });

@@ -39,7 +39,7 @@ const STATES: { value: State; label: string }[] = [
   { value: "enable-ask-admin", label: "Enable: ask an admin" },
   { value: "enable-app", label: "Enable: ready-made app" },
   { value: "enable-app-added", label: "Enable: app already added" },
-  { value: "apps-available", label: "Apps: available" },
+  { value: "apps-available", label: "Apps: ready-made" },
   { value: "onboarding", label: "First run" },
 ];
 

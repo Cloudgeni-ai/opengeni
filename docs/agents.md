@@ -751,7 +751,7 @@ name no internal Skills. Each names the `team` it is for ("Engineering"); Capabi
 ### Guided setups
 
 The workspace's **Get started** page (`/workspaces/<id>/get-started`, under
-the rail's Setup group) is the front door into [Enable](#enable): an example
+the rail's More group) is the front door into [Enable](#enable): an example
 of what the selected setup produces (labelled **Example**), the three setups
 beside it, and one button that opens the selected setup on Enable, with what
 it needs underneath ("Needs GitHub"). Hovering or selecting a setup swaps the
@@ -958,9 +958,11 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   are offered only when the workspace's GitHub isn't disconnected and the
   agent's Can use doesn't block GitHub. They cover every repository the GitHub
   connection reaches; the full automation form narrows them. On the agent page
-  **Starts when** lists the agent's own ready-made suggestions first, then the
-  common triggers they don't already cover and no automation of the agent
-  already listens to (by name or by event types), at most three, as off switches
+  **Starts when** lists a ready-made agent's own suggestions only (each fits
+  its job, so Bug fixer isn't offered PR triggers); an agent made from scratch
+  gets the common triggers (so does a ready-made one whose template can't be
+  read). Each is offered until an automation of the agent listens to it (by
+  name or by event types), at most three, as off switches
   (`agentTriggerOffers`); turning one on adds the automation at once, or opens
   the trigger dialog when its source needs setup. That dialog's Open full form
   passes `?agentCommonTrigger=<key>`, so the automation form starts from the

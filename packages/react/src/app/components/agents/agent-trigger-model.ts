@@ -165,6 +165,11 @@ function taskSignature(task: Pick<ScheduledTask, "schedule" | "events">): string
 
 export function agentTriggerOffers(input: {
   templateSuggestions: readonly AgentTemplateTrigger[];
+  /**
+   * Made from a ready-made agent: its template's suggestions fit its job, so
+   * common triggers (a PR opening, a PR mention) aren't added to them.
+   */
+  fromTemplate?: boolean | undefined;
   usesGitHub: boolean;
   agentName?: string | undefined;
   /** The agent's automations; null while they load. */
@@ -190,10 +195,11 @@ export function agentTriggerOffers(input: {
   );
   // A schedule isn't offered to every agent: Add trigger's "On a schedule"
   // sets one up, with its time and repository.
-  const common: AgentTriggerOffer[] = availableCommonTriggers({
-    usesGitHub: input.usesGitHub,
-    agentName: input.agentName,
-  })
+  const common: AgentTriggerOffer[] = (
+    input.fromTemplate
+      ? []
+      : availableCommonTriggers({ usesGitHub: input.usesGitHub, agentName: input.agentName })
+  )
     .filter((entry) => entry.trigger.schedule === null)
     .filter((entry) => !covered.has(eventTypes(entry.trigger)))
     .map((entry) => ({ key: `common-${entry.key}`, suggestion: entry.trigger, common: entry.key }));

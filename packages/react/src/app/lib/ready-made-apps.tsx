@@ -17,7 +17,7 @@ type Installer = {
  * the same version again gets the app they added, unless they archived it,
  * then it's added fresh (each archived copy keys the next one). Someone else,
  * or a newer version of the template, adds a new copy. Used by the Apps
- * page's Available list.
+ * page's Ready-made list.
  */
 export async function installReadyMadeApp(
   client: Installer,

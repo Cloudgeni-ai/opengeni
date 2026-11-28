@@ -98,7 +98,7 @@ export const APPS_WORKSPACE_ITEM: WorkspaceConfigItem = {
   description: "Your team's apps, and ready-made ones to add",
 };
 
-/** The guided setups, first under Setup in the full console. */
+/** The guided setups, first under More in the full console. */
 export const GET_STARTED_WORKSPACE_ITEM: WorkspaceConfigItem = {
   to: "/workspaces/$workspaceId/get-started",
   icon: "rocket",
@@ -113,7 +113,7 @@ export function navItemKey(item: Pick<WorkspaceConfigItem, "to" | "search">): st
 
 /**
  * The full console's rail: Agents and Apps up front (after Inbox), and
- * everything that sets the workspace up under one Setup group. Nothing is
+ * everything else under one More group. Nothing is
  * left out; each page keeps its own address.
  */
 const FULL_FRONT_TARGETS: readonly WorkspaceConfigTarget[] = ["/workspaces/$workspaceId/agents"];
@@ -276,7 +276,7 @@ export function primaryWorkspaceItems(simplified: boolean): WorkspaceConfigItem[
 }
 
 /**
- * The rail's one folded group: "Setup" in the full console (Get started,
+ * The rail's one folded group: "More" in the full console (Get started,
  * Capabilities, Automations, Knowledge, Artifacts, Meetings), "Advanced"
  * in the simplified interface (Knowledge, Automations).
  */
@@ -291,7 +291,7 @@ export function groupedWorkspaceItems(simplified: boolean): {
           SIMPLIFIED_ADVANCED_DESTINATIONS.has(item.to),
         ),
       }
-    : { label: "Setup", items: [GET_STARTED_WORKSPACE_ITEM, ...itemsFor(FULL_SETUP_TARGETS)] };
+    : { label: "More", items: [GET_STARTED_WORKSPACE_ITEM, ...itemsFor(FULL_SETUP_TARGETS)] };
 }
 
 export function filterWorkspaceConfigGroups(

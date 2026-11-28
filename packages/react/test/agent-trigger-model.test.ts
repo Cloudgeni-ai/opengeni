@@ -618,3 +618,31 @@ test("a schedule isn't offered to every agent; Add trigger's On a schedule sets 
     ),
   ).toEqual(["Every Monday"]);
 });
+
+test("a ready-made agent is offered only its own suggestions, minus ones it already has", () => {
+  const offered = (tasks: never[]) =>
+    agentTriggerOffers({
+      templateSuggestions: [SUGGESTION],
+      fromTemplate: true,
+      usesGitHub: true,
+      agentName: AGENT.name,
+      tasks,
+    }).map((offer) => offer.suggestion.name);
+  // Bug fixer: no PR opening or PR mention on top of its issue trigger.
+  expect(offered([])).toEqual(["When an issue is labelled bug"]);
+  expect(
+    offered([
+      {
+        name: "Bug fixer: When an issue is labelled bug",
+        schedule: { type: "manual" },
+        events: null,
+      } as never,
+    ]),
+  ).toEqual([]);
+  // An agent of its own still gets the common ones.
+  expect(
+    agentTriggerOffers({ templateSuggestions: [], usesGitHub: true, tasks: [] }).map(
+      (offer) => offer.common,
+    ),
+  ).toEqual(["pull_request_opened", "mentioned_on_pull_request"]);
+});

@@ -1,17 +1,19 @@
 /**
- * The Apps page's Available list: ready-made apps not added here yet
+ * The Apps page's Ready-made list: ready-made apps not added here yet
  * (packages/core/src/app-templates). Choosing one never installs it. In the
  * Opengeni app it opens the app's Enable page (`onChoose`), the one place a
  * ready-made app is added; a host without Enable gets the install dialog,
  * with what the app is, a preview of it on sample records, the Skills it
  * turns on and the automations it adds.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { compareAppPackageVersions } from "@opengeni/contracts";
 import type { AppPackageStatus, AppTemplate } from "@opengeni/sdk";
 
 import { CapabilityCatalogRow } from "../../../capability-catalog-row";
+import { Button } from "../../../ui/button";
 import { DetailSection } from "../../../ui/detail-sheet";
+import { Skeleton } from "../../../ui/skeleton";
 import { useAppContext } from "../../app-context";
 import { installReadyMadeApp } from "../../lib/ready-made-apps";
 import { toast } from "../../lib/toast";
@@ -65,7 +67,7 @@ function templatePackageId(template: AppTemplate): string | null {
 
 /**
  * A ready-made app's tile seed: its package, so its hue stays the same in
- * Available, on its Enable page and once added (the installed row seeds
+ * Ready-made, on its Enable page and once added (the installed row seeds
  * from the same package).
  */
 export function readyMadeAppTileSeed(template: AppTemplate): string {
@@ -74,7 +76,7 @@ export function readyMadeAppTileSeed(template: AppTemplate): string {
 
 /**
  * The app here that makes this ready-made app count as added, by the same
- * rule as Available: an active copy of its package that isn't a customized
+ * rule as Ready-made: an active copy of its package that isn't a customized
  * older version. Without one (only such copies) Enable adds it again.
  */
 export function addedReadyMadeApp(
@@ -89,15 +91,26 @@ export function addedReadyMadeApp(
   return null;
 }
 
+/** Whether a ready-made app matches the Apps page's search, by name or description. */
+export function readyMadeAppMatches(template: AppTemplate, query: string): boolean {
+  const words = query.trim().toLocaleLowerCase();
+  if (!words) return true;
+  return `${template.name} ${template.description}`.toLocaleLowerCase().includes(words);
+}
+
 export function AvailableApps({
   workspaceId,
   installed,
   onChoose,
+  query = "",
 }: {
   workspaceId: string;
-  installed: readonly AppPackageStatus[];
+  /** The apps here; null while they load (the section keeps its place meanwhile). */
+  installed: readonly AppPackageStatus[] | null;
   /** Opens a ready-made app's own setup page (Enable) instead of the install dialog. */
   onChoose?: ((templateKey: string) => void) | undefined;
+  /** The page's search: only matching ready-made apps show. */
+  query?: string | undefined;
 }) {
   const { client } = useAppContext();
   const [templates, setTemplates] = useState<AppTemplate[] | null>(null);
@@ -105,6 +118,24 @@ export function AvailableApps({
     null,
   );
   const onInstalled = useOpenInstalledApp(workspaceId);
+  // One row that scrolls sideways, so Your apps stays in view below it; See
+  // all shows every ready-made app when the row can't hold them.
+  const [expanded, setExpanded] = useState(false);
+  const [row, setRow] = useState<HTMLDivElement | null>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const listId = useId();
+  useEffect(() => {
+    if (!row) {
+      setOverflowing(false);
+      return;
+    }
+    const measure = () => setOverflowing(row.scrollWidth > row.clientWidth + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(row);
+    return () => observer.disconnect();
+  }, [row, templates, installed?.length, query]);
   useEffect(() => {
     let live = true;
     // Suggestions only: when they can't load, the page goes on without them.
@@ -116,7 +147,19 @@ export function AvailableApps({
       live = false;
     };
   }, [client, workspaceId]);
-  const shown = templates ? availableTemplates(templates, installed) : [];
+  // Keeps its place while loading, so the list under it doesn't drop later.
+  if (templates === null || installed === null) {
+    return (
+      <DetailSection title="Ready-made" className="py-0">
+        <div role="status" aria-label="Loading ready-made apps">
+          <Skeleton className="h-[94px] w-full rounded-[14px]" />
+        </div>
+      </DetailSection>
+    );
+  }
+  const shown = availableTemplates(templates, installed).filter((template) =>
+    readyMadeAppMatches(template, query),
+  );
   if (shown.length === 0) return null;
   const choose = (template: AppTemplate) => {
     if (onChoose) {
@@ -130,8 +173,33 @@ export function AvailableApps({
     }
   };
   return (
-    <DetailSection title="Available" className="pb-0">
-      <div className="og-connection-catalog" data-columns="2">
+    <DetailSection
+      title="Ready-made"
+      className="py-0"
+      action={
+        overflowing || expanded ? (
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="h-auto px-0"
+            aria-expanded={expanded}
+            aria-controls={listId}
+            onClick={() => setExpanded((open) => !open)}
+          >
+            {expanded ? "Show less" : "See all"}
+          </Button>
+        ) : undefined
+      }
+    >
+      <div
+        ref={expanded ? undefined : setRow}
+        className="og-connection-catalog"
+        data-columns="2"
+        data-layout={expanded ? undefined : "row"}
+        data-ready-made-apps=""
+        id={listId}
+      >
         {shown.map((template) => (
           <CapabilityCatalogRow
             key={template.key}

@@ -120,6 +120,14 @@ async function render(node: ReactNode) {
   return container;
 }
 
+async function unmountCurrent() {
+  const current = mounted;
+  if (!current) return;
+  await act(async () => current.unmount());
+  current.container.remove();
+  mounted = null;
+}
+
 function button(container: HTMLElement, name: string): HTMLButtonElement {
   const found = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
     (element) =>
@@ -1412,9 +1420,8 @@ test("the agent page's triggers and suggestions; Settings' Can use, Memory entri
   expect(container.querySelectorAll("[data-agent-trigger]").length).toBe(1);
   const suggested = [...container.querySelectorAll("[data-agent-suggested-trigger]")];
   expect(suggested.map((row) => row.textContent)).toEqual([
+    // A ready-made agent (Triage) is offered only its own suggestions, not PR triggers.
     expect.stringContaining("When a Linear issue is created"),
-    expect.stringContaining("When a pull request opens"),
-    expect.stringContaining("When mentioned on a PR"),
   ]);
   // Set up opens the light dialog at the suggestion; the full form stays one link away.
   await act(async () => button(container, "Set up").click());
@@ -1591,9 +1598,8 @@ test("a suggested trigger is set up in place: its source is filled in and no mes
       (row) => row.textContent,
     ),
   ).toEqual([
+    // A ready-made agent (Triage) is offered only its own suggestions, not PR triggers.
     expect.stringContaining("When a Linear issue is created"),
-    expect.stringContaining("When a pull request opens"),
-    expect.stringContaining("When mentioned on a PR"),
   ]);
 });
 
@@ -2484,6 +2490,65 @@ test("in the Opengeni app, choosing a ready-made app opens its Enable page, the 
   expect(chosen).toEqual(["issue-tracker"]);
   expect(document.querySelector("[role='dialog']")).toBeNull();
   expect(installer.requests).toEqual([]);
+});
+
+test("Ready-made keeps its place while loading, follows the page's search, and hides when nothing matches", async () => {
+  const client = Object.assign(fakeAgentsClient([]), {
+    async listAppTemplates() {
+      return [APP_TEMPLATE];
+    },
+  });
+  const host = (installed: never[] | null, query: string) => (
+    <AgentsTestHost context={canCreate(client)}>
+      <AvailableApps workspaceId={WORKSPACE_ID} installed={installed} query={query} />
+    </AgentsTestHost>
+  );
+  // The apps here are still loading: a placeholder holds the section's place.
+  let container = await render(host(null, ""));
+  expect(container.textContent).toContain("Ready-made");
+  expect(container.textContent).not.toContain("Available");
+  expect(container.querySelector("[aria-label='Loading ready-made apps']")).not.toBeNull();
+  await unmountCurrent();
+  container = await render(host([], "issue"));
+  expect(container.querySelector("[data-ready-made-app='issue-tracker']")).not.toBeNull();
+  await unmountCurrent();
+  container = await render(host([], "payroll"));
+  expect(container.textContent).toBe("");
+});
+
+test("Ready-made is one sideways row; See all shows every one when the row can't hold them", async () => {
+  const client = Object.assign(fakeAgentsClient([]), {
+    async listAppTemplates() {
+      return [APP_TEMPLATE];
+    },
+  });
+  // happy-dom has no layout: the row reports more content than it shows.
+  const proto = HTMLElement.prototype;
+  const scroll = Object.getOwnPropertyDescriptor(proto, "scrollWidth");
+  const client_ = Object.getOwnPropertyDescriptor(proto, "clientWidth");
+  Object.defineProperty(proto, "scrollWidth", { configurable: true, get: () => 1200 });
+  Object.defineProperty(proto, "clientWidth", { configurable: true, get: () => 360 });
+  try {
+    const container = await render(
+      <AgentsTestHost context={canCreate(client)}>
+        <AvailableApps workspaceId={WORKSPACE_ID} installed={[]} />
+      </AgentsTestHost>,
+    );
+    const list = () => container.querySelector<HTMLElement>("[data-ready-made-apps]")!;
+    expect(list().dataset.layout).toBe("row");
+    await act(async () => button(container, "See all").click());
+    await flush();
+    expect(list().dataset.layout).toBeUndefined();
+    expect(button(container, "Show less").getAttribute("aria-expanded")).toBe("true");
+    await act(async () => button(container, "Show less").click());
+    await flush();
+    expect(list().dataset.layout).toBe("row");
+  } finally {
+    if (scroll) Object.defineProperty(proto, "scrollWidth", scroll);
+    else delete (proto as { scrollWidth?: number }).scrollWidth;
+    if (client_) Object.defineProperty(proto, "clientWidth", client_);
+    else delete (proto as { clientWidth?: number }).clientWidth;
+  }
 });
 
 async function chooseOutcome(dialog: HTMLElement, title: string) {

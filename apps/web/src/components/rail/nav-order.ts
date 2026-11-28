@@ -2,7 +2,7 @@
 // `navOrder` and `navSetup`): a person drags them, or moves them with
 // Alt+Arrow, and their own order is kept in their personal layout.
 
-/** The folded group ("Setup", or "Advanced" in the simplified interface) as an entry of the top. */
+/** The folded group ("More", or "Advanced" in the simplified interface) as an entry of the top. */
 export const NAV_GROUP_KEY = "setup";
 
 /**

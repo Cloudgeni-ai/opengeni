@@ -293,7 +293,7 @@ with its `packageVersion`, `archived`, `customized`, its Skills (each with
   back with 409 (`details.reason: "customized"`), for the console, the API
   and `app_upgrade` alike. Undoing the changes doesn't bring updates back:
   any change publishes a new version. A newer ready-made version shows under
-  Available again, to add as a separate app. A Skill shared by copies of one
+  Ready-made again, to add as a separate app. A Skill shared by copies of one
   package is workspace state: editing it customizes every copy.
 - **Update**: the Apps page shows **Update available**; it opens the
   ordinary upgrade with the ready-made app's package, dry run first.
@@ -324,7 +324,7 @@ and **Turn on**, which installs it with `installAppPackage` under the
 ready-made key. When an active app from the same package is already here,
 the page shows it as on with **Open app** instead of adding another. A
 ready-made app keeps one tile hue, seeded from its package id, in
-Available, on Enable and once added. A host that embeds the Apps page without Enable (no
+Ready-made, on Enable and once added. A host that embeds the Apps page without Enable (no
 `onChooseReadyMade`) gets the install dialog instead. A file opens the install
 dialog: installing adds the app and its Skills for agents, names each Skill,
 lists automations (added off), offers demo data, and has one **Install**
@@ -363,7 +363,7 @@ in the file offers the update to every app installed from it. Each keeps its
 records in Site Data, so it works right after it is added (Feedback board's
 votes are a `per_viewer` collection). **Work summary** comes with a
 `work-summary` Skill (what agents add and how) and a weekday "Update the work
-summary" automation, added off. The Apps page offers them; it installs one
+summary" automation, added off. The Apps page lists them under **Ready-made**, above **Your apps** and under the search bar (which filters both); it installs one
 through the ordinary install above, keyed `ready-made:<key>`. Install keys belong to the person and the package, so the
 same person adding the same template version again gets the app they added
 (an archived one is added fresh); a teammate, or a newer template version,
