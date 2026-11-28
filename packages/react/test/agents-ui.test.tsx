@@ -2516,6 +2516,41 @@ test("Ready-made keeps its place while loading, follows the page's search, and h
   expect(container.textContent).toBe("");
 });
 
+test("Ready-made is one sideways row; See all shows every one when the row can't hold them", async () => {
+  const client = Object.assign(fakeAgentsClient([]), {
+    async listAppTemplates() {
+      return [APP_TEMPLATE];
+    },
+  });
+  // happy-dom has no layout: the row reports more content than it shows.
+  const proto = HTMLElement.prototype;
+  const scroll = Object.getOwnPropertyDescriptor(proto, "scrollWidth");
+  const client_ = Object.getOwnPropertyDescriptor(proto, "clientWidth");
+  Object.defineProperty(proto, "scrollWidth", { configurable: true, get: () => 1200 });
+  Object.defineProperty(proto, "clientWidth", { configurable: true, get: () => 360 });
+  try {
+    const container = await render(
+      <AgentsTestHost context={canCreate(client)}>
+        <AvailableApps workspaceId={WORKSPACE_ID} installed={[]} />
+      </AgentsTestHost>,
+    );
+    const list = () => container.querySelector<HTMLElement>("[data-ready-made-apps]")!;
+    expect(list().dataset.layout).toBe("row");
+    await act(async () => button(container, "See all").click());
+    await flush();
+    expect(list().dataset.layout).toBeUndefined();
+    expect(button(container, "Show less").getAttribute("aria-expanded")).toBe("true");
+    await act(async () => button(container, "Show less").click());
+    await flush();
+    expect(list().dataset.layout).toBe("row");
+  } finally {
+    if (scroll) Object.defineProperty(proto, "scrollWidth", scroll);
+    else delete (proto as { scrollWidth?: number }).scrollWidth;
+    if (client_) Object.defineProperty(proto, "clientWidth", client_);
+    else delete (proto as { clientWidth?: number }).clientWidth;
+  }
+});
+
 async function chooseOutcome(dialog: HTMLElement, title: string) {
   const card = [...dialog.querySelectorAll<HTMLElement>("[data-slot='choice-card']")].find(
     (entry) => entry.textContent?.includes(title),

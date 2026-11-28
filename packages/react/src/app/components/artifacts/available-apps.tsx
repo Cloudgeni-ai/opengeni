@@ -11,6 +11,7 @@ import { compareAppPackageVersions } from "@opengeni/contracts";
 import type { AppPackageStatus, AppTemplate } from "@opengeni/sdk";
 
 import { CapabilityCatalogRow } from "../../../capability-catalog-row";
+import { Button } from "../../../ui/button";
 import { DetailSection } from "../../../ui/detail-sheet";
 import { Skeleton } from "../../../ui/skeleton";
 import { useAppContext } from "../../app-context";
@@ -117,6 +118,23 @@ export function AvailableApps({
     null,
   );
   const onInstalled = useOpenInstalledApp(workspaceId);
+  // One row that scrolls sideways, so Your apps stays in view below it; See
+  // all shows every ready-made app when the row can't hold them.
+  const [expanded, setExpanded] = useState(false);
+  const [row, setRow] = useState<HTMLDivElement | null>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  useEffect(() => {
+    if (!row) {
+      setOverflowing(false);
+      return;
+    }
+    const measure = () => setOverflowing(row.scrollWidth > row.clientWidth + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(row);
+    return () => observer.disconnect();
+  }, [row, templates, installed, query]);
   useEffect(() => {
     let live = true;
     // Suggestions only: when they can't load, the page goes on without them.
@@ -133,7 +151,7 @@ export function AvailableApps({
     return (
       <DetailSection title="Ready-made" className="py-0">
         <div role="status" aria-label="Loading ready-made apps">
-          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-[94px] w-full rounded-[14px]" />
         </div>
       </DetailSection>
     );
@@ -154,8 +172,31 @@ export function AvailableApps({
     }
   };
   return (
-    <DetailSection title="Ready-made" className="py-0">
-      <div className="og-connection-catalog" data-columns="2">
+    <DetailSection
+      title="Ready-made"
+      className="py-0"
+      action={
+        overflowing || expanded ? (
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="h-auto px-0"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((open) => !open)}
+          >
+            {expanded ? "Show less" : "See all"}
+          </Button>
+        ) : undefined
+      }
+    >
+      <div
+        ref={expanded ? undefined : setRow}
+        className="og-connection-catalog"
+        data-columns="2"
+        data-layout={expanded ? undefined : "row"}
+        data-ready-made-apps=""
+      >
         {shown.map((template) => (
           <CapabilityCatalogRow
             key={template.key}

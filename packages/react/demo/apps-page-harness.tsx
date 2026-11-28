@@ -1,7 +1,7 @@
 // The real Apps page (AppsRoute): installed apps with their version,
 // Modified and Update available, ready-made apps to add, and the install and
 // update dialogs. A synthetic client answers, so nothing reaches an API.
-//   ?theme=light|dark   ?apps=none   ?view=list
+//   ?theme=light|dark   ?apps=none   ?view=list   ?readyMade=many (eight to add)
 import type { AppPackageStatus, AppPackageUpgradePlan } from "@opengeni/sdk";
 import { useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
@@ -22,6 +22,7 @@ const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 const params = new URLSearchParams(window.location.search);
 const dark = params.get("theme") === "dark";
 const noApps = params.get("apps") === "none";
+const manyReadyMade = params.get("readyMade") === "many";
 if (params.get("view") === "list")
   localStorage.setItem("opengeni:artifact-library:view:v1", "list");
 
@@ -95,6 +96,24 @@ const PLAN: AppPackageUpgradePlan = {
   problems: [],
 };
 
+// More ready-made apps than a row holds, for the Ready-made row's See all.
+const EXTRA_TEMPLATES = [
+  ["roadmap", "Roadmap", "Plan what ships next quarter and who owns it."],
+  ["release-notes", "Release notes", "Write and share notes for every release."],
+  ["onboarding", "Onboarding checklist", "Walk new teammates through their first weeks."],
+  ["okr-tracker", "OKR tracker", "Track objectives, key results and progress."],
+  ["on-call", "On-call rota", "See who is on call and hand over shifts."],
+].map(([key, name, description], index) => ({
+  ...feedbackBoard,
+  key,
+  name,
+  description,
+  package: {
+    ...feedbackBoard.package,
+    packageId: `00000000-0000-4000-8000-00000000000${index}`,
+  },
+}));
+
 class PreviewClient extends MockOpenGeniClient {
   async listArtifactCatalog() {
     return { items: APPS, nextCursor: null } as never;
@@ -103,7 +122,14 @@ class PreviewClient extends MockOpenGeniClient {
     return STATUS;
   }
   async listAppTemplates() {
-    return [workSummary, issueTracker, incidentLog, feedbackBoard, decisionLog] as never;
+    return [
+      workSummary,
+      issueTracker,
+      incidentLog,
+      feedbackBoard,
+      decisionLog,
+      ...(manyReadyMade ? EXTRA_TEMPLATES : []),
+    ] as never;
   }
   async upgradeAppPackage(_workspaceId: string, appId: string, request: { previous?: boolean }) {
     const plan = request.previous
