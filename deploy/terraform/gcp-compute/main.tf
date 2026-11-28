@@ -21,10 +21,10 @@ locals {
   # The memory a new host offers sandboxes, which the control service grows
   # the group by, worked out as the agent does from the kernel's MemTotal,
   # here estimated as 95 % of the machine type's memory so the estimate
-  # errs low: on the nested profile its huge pages, a share of MemTotal
-  # (host-startup.sh); on the bare-metal profile MemTotal less a sixteenth,
-  # at least 1 GiB.
-  mem_total_mib   = one(data.google_compute_machine_types.host.machine_types).memory_mb * 95 / 100
+  # errs low, or from the sandboxes' declared share (memory_total_mib): on
+  # the nested profile its huge pages, a share of that (host-startup.sh);
+  # on the bare-metal profile that less a sixteenth, at least 1 GiB.
+  mem_total_mib   = var.memory_total_mib > 0 ? var.memory_total_mib : one(data.google_compute_machine_types.host.machine_types).memory_mb * 95 / 100
   host_memory_mib = local.memory_profile == "nested" ? floor(local.mem_total_mib * var.huge_pages_percent / 100 / 2) * 2 : floor(local.mem_total_mib - max(local.mem_total_mib / 16, 1024))
 }
 
@@ -218,18 +218,24 @@ resource "google_compute_firewall" "ssh_to_hosts" {
 resource "google_compute_instance_template" "host" {
   name_prefix      = "${var.name_prefix}-host-"
   machine_type     = var.machine_type
-  min_cpu_platform = var.min_cpu_platform
+  min_cpu_platform = var.min_cpu_platform == "" ? null : var.min_cpu_platform
   tags             = [local.hosts_tag]
   labels           = local.labels
 
-  advanced_machine_features {
-    enable_nested_virtualization = var.nested
+  # Only where hosts nest: bare-metal machine types take no advanced
+  # machine features, and leaving the block out is the same as turning
+  # nested virtualization off.
+  dynamic "advanced_machine_features" {
+    for_each = var.nested ? [1] : []
+    content {
+      enable_nested_virtualization = true
+    }
   }
 
   disk {
     source_image = var.boot_image
     disk_size_gb = var.boot_disk_gb
-    disk_type    = "pd-balanced"
+    disk_type    = var.boot_disk_type
     boot         = true
     auto_delete  = true
   }
@@ -250,6 +256,19 @@ resource "google_compute_instance_template" "host" {
       device_name  = "state"
       disk_type    = var.state_disk.pd_type
       disk_size_gb = var.state_disk.pd_size_gb
+      auto_delete  = true
+      boot         = false
+    }
+  }
+
+  # The machine's other work's disks (extra_disks), which compute leaves
+  # alone: the startup script takes only the local SSDs or the "state" disk.
+  dynamic "disk" {
+    for_each = var.extra_disks
+    content {
+      device_name  = disk.value.device_name
+      disk_type    = disk.value.type
+      disk_size_gb = disk.value.size_gb
       auto_delete  = true
       boot         = false
     }
@@ -278,10 +297,13 @@ resource "google_compute_instance_template" "host" {
     automatic_restart   = true
   }
 
-  shielded_instance_config {
-    enable_secure_boot          = true
-    enable_vtpm                 = true
-    enable_integrity_monitoring = true
+  dynamic "shielded_instance_config" {
+    for_each = var.shielded_vm ? [1] : []
+    content {
+      enable_secure_boot          = true
+      enable_vtpm                 = true
+      enable_integrity_monitoring = true
+    }
   }
 
   metadata = merge({
@@ -296,6 +318,8 @@ resource "google_compute_instance_template" "host" {
     compute-host-authority   = "${tls_self_signed_cert.authority.cert_pem}${var.previous_host_authority_pem}"
     compute-memory-profile   = local.memory_profile
     compute-huge-pages-pct   = tostring(var.huge_pages_percent)
+    compute-machine          = var.machine
+    compute-memory-total-mib = var.memory_total_mib > 0 ? tostring(var.memory_total_mib) : ""
     compute-host-args        = var.host_args
     compute-prelude          = var.host_startup_prelude
     compute-advertise        = var.advertise_interface
@@ -314,6 +338,11 @@ resource "google_compute_instance_template" "host" {
     precondition {
       condition     = !var.advertise_public_address || (var.assign_external_ip && var.advertise_interface == "")
       error_message = "advertise_public_address needs assign_external_ip, and an empty advertise_interface."
+    }
+
+    precondition {
+      condition     = var.machine != "shared" || var.memory_total_mib > 0
+      error_message = "A shared machine needs memory_total_mib, the sandboxes' share of its memory (compute ADR 26)."
     }
   }
 }

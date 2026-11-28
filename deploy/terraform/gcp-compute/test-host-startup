@@ -341,6 +341,52 @@ else
 fi
 cp "$work/good.tar.gz" "$work/net/compute-host-test.tar.gz"
 
+# --- A dedicated machine, as templates before compute-machine name none:
+# host.env says so, with no memory share, and the guard has no drop-in.
+dropin=$units_dir/compute-guard.service.d/shared-machine.conf
+if boot && grep -qx 'COMPUTE_MACHINE=dedicated' "$COMPUTE_ETC/host.env" &&
+  grep -qx 'COMPUTE_MEMORY_TOTAL_MIB=' "$COMPUTE_ETC/host.env" && [ ! -e "$dropin" ]; then
+  ok "a template naming no machine installs a dedicated one"
+else
+  bad "a template naming no machine"
+  sed 's/^/  /' "$work/out" >&2
+fi
+
+# --- A shared machine (ADR 26): host.env names it and the sandboxes'
+# share of memory, and the guard gets the shared machine's drop-in.
+md instance/attributes/compute-machine shared
+md instance/attributes/compute-memory-total-mib 2400000
+if boot && grep -qx 'COMPUTE_MACHINE=shared' "$COMPUTE_ETC/host.env" &&
+  grep -qx 'COMPUTE_MEMORY_TOTAL_MIB=2400000' "$COMPUTE_ETC/host.env" &&
+  cmp -s "$hostdir/compute-guard-shared.conf" "$dropin"; then
+  ok "a shared machine is installed as one, with its memory share"
+else
+  bad "a shared machine"
+  sed 's/^/  /' "$work/out" >&2
+fi
+
+# --- A shared machine whose template names no memory share is refused
+# before anything is installed for it.
+rm "$work/metadata/instance/attributes/compute-memory-total-mib"
+cp "$COMPUTE_ETC/host.env" "$work/host.env.before"
+if boot; then
+  bad "a shared machine with no memory share was installed"
+elif grep -q 'needs compute-memory-total-mib' "$work/out" && cmp -s "$work/host.env.before" "$COMPUTE_ETC/host.env"; then
+  ok "a shared machine with no memory share is refused"
+else
+  bad "a shared machine with no memory share failed otherwise"
+  sed 's/^/  /' "$work/out" >&2
+fi
+
+# --- And back to dedicated: the drop-in goes.
+md instance/attributes/compute-machine dedicated
+if boot && grep -qx 'COMPUTE_MACHINE=dedicated' "$COMPUTE_ETC/host.env" && [ ! -e "$dropin" ]; then
+  ok "a machine back to dedicated loses the shared drop-in"
+else
+  bad "a machine back to dedicated"
+  sed 's/^/  /' "$work/out" >&2
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures failed" >&2
   exit 1

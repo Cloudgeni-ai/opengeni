@@ -33,6 +33,18 @@ memory_profile = ""
 state_disk = {
   local_ssd_count = 2
 }
+# A bare-metal host instead, here sharing its machine with other work, such
+# as a VM the operator runs beside compute (compute ADR 26), which keeps
+# what lies outside the sandboxes' memory share and its own disk:
+# machine_type     = "c4d-highmem-384-metal"
+# nested           = false
+# min_cpu_platform = ""
+# shielded_vm      = false
+# boot_disk_type   = "hyperdisk-balanced"
+# state_disk       = { pd_type = "hyperdisk-balanced", pd_size_gb = 6000 }
+# machine          = "shared"
+# memory_total_mib = 2400000
+# extra_disks      = [{ device_name = "other-vm", size_gb = 2000 }]
 
 labels = {
   environment = "example"

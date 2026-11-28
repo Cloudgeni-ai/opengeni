@@ -203,9 +203,21 @@ attr compute-host-authority >"$etc/authority.pem.new"
 huge_pages=0
 profile=$(attr compute-memory-profile)
 args=$(optional_attr compute-host-args)
+# A machine compute shares with other work (ADR 26), and the sandboxes'
+# share of its memory: templates before these attributes name neither, a
+# dedicated machine with all of its memory.
+machine=$(optional_attr compute-machine)
+machine=${machine:-dedicated}
+memory_total_mib=$(optional_attr compute-memory-total-mib)
+if [ "$machine" = shared ] && [ -z "$memory_total_mib" ]; then
+  log "a shared machine needs compute-memory-total-mib"
+  exit 1
+fi
 if [ "$profile" = nested ]; then
   percent=$(attr compute-huge-pages-pct)
-  huge_pages=$(($(awk '/MemTotal/ {print $2}' /proc/meminfo) * percent / 100 / 2048))
+  memory_kib=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+  [ -z "$memory_total_mib" ] || memory_kib=$((memory_total_mib * 1024))
+  huge_pages=$((memory_kib * percent / 100 / 2048))
 fi
 args="--memory-profile $profile $args"
 if [ -n "$PUBLIC" ]; then
@@ -220,6 +232,8 @@ COMPUTE_ZONE=$ZONE
 COMPUTE_STORE=$(attr compute-store)
 COMPUTE_BASE_IMAGE_REF=$(attr compute-base-image)
 COMPUTE_HUGE_PAGES=$huge_pages
+COMPUTE_MACHINE=$machine
+COMPUTE_MEMORY_TOTAL_MIB=$memory_total_mib
 COMPUTE_HOST_ARGS="$args"
 ENV
 
