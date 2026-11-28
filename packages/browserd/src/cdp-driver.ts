@@ -48,6 +48,7 @@ import {
   type InteractionSemanticNodeValue,
   type InteractionDestinationFailureReason,
   INTERACTION_MAX_RESOLVED_TARGET_TEXT,
+  INTERACTION_REQUEST_TIMEOUT_MS,
   redactInteractionDriverMessage,
 } from "@opengeni/contracts";
 import {
@@ -652,12 +653,28 @@ function dialogScopedConnection(
  */
 const ACTION_REPLY_MARGIN_MS = 10_000;
 
+/**
+ * A page read the API asks for (an observation, a tab's state, a DOM read)
+ * has no declared waits, and the API stops waiting for it after
+ * INTERACTION_REQUEST_TIMEOUT_MS. Like an action, such a read makes many page
+ * commands that each wait for the page's main thread. On a page that keeps it
+ * busy for seconds at a time (heavy rendering, software-rendered WebGL), each
+ * command answers just within its own timeout, and together they run past the
+ * API's, which then reports a lost transport instead of the slow tab. So a
+ * read keeps to that time too, with the action's reply margin, and runs out
+ * as its page command timing out: the tab did not answer in time.
+ */
+const READ_BUDGET_MS = INTERACTION_REQUEST_TIMEOUT_MS - ACTION_REPLY_MARGIN_MS;
+
 type ActionBudget = {
   readonly deadlineAt: number;
   readonly seconds: number;
   /** False once the action returned: work it started that outlives it (a
    * timer, a listener) is no longer bound by its deadline. */
   active: boolean;
+  /** A page read's budget (READ_BUDGET_MS): it ends as a page command
+   * timeout, which a read reports as a tab that did not answer. */
+  readonly read?: true;
 };
 const actionBudget = new AsyncLocalStorage<ActionBudget>();
 
@@ -678,6 +695,23 @@ function actionBudgetSpent(): boolean {
   return budget !== undefined && budget.active && Date.now() >= budget.deadlineAt;
 }
 
+/** Run a page read within READ_BUDGET_MS, unless it is part of an action,
+ * which keeps the action's own budget. */
+async function withinReadBudget<T>(read: () => Promise<T>): Promise<T> {
+  if (actionBudget.getStore()?.active) return await read();
+  const budget: ActionBudget = {
+    deadlineAt: Date.now() + READ_BUDGET_MS,
+    seconds: Math.round(READ_BUDGET_MS / 1_000),
+    active: true,
+    read: true,
+  };
+  try {
+    return await actionBudget.run(budget, read);
+  } finally {
+    budget.active = false;
+  }
+}
+
 /** A connection whose page commands end at the action's deadline. Commands to
  * the browser itself do not wait on a page, and input keeps its own bound: a
  * pressed button must always get its release. */
@@ -694,14 +728,21 @@ function budgetedConnection(
           if (!budget.active || options?.sessionId === undefined || method.startsWith("Input."))
             return await target.send<T>(method, params, options);
           const remaining = budget.deadlineAt - Date.now();
-          if (remaining <= 0) throw new ActionBudgetSpentError(budget.seconds, false);
+          if (remaining <= 0)
+            throw budget.read
+              ? new CdpCommandTimeoutError(method, options.sessionId)
+              : new ActionBudgetSpentError(budget.seconds, false);
           try {
             return await target.send<T>(method, params, {
               ...options,
               timeoutMs: Math.min(options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS, remaining),
             });
           } catch (error) {
-            if (error instanceof CdpCommandTimeoutError && Date.now() >= budget.deadlineAt)
+            if (
+              !budget.read &&
+              error instanceof CdpCommandTimeoutError &&
+              Date.now() >= budget.deadlineAt
+            )
               throw new ActionBudgetSpentError(budget.seconds);
             throw error;
           }
@@ -2285,7 +2326,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async observe(tabId: string): Promise<BrowserObservationValue> {
-    return await this.observeTarget(this.browserTargetIdOf(tabId));
+    return await withinReadBudget(() => this.observeTarget(this.browserTargetIdOf(tabId)));
   }
 
   private async observeTarget(targetId: string): Promise<BrowserObservationValue> {
@@ -2307,6 +2348,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Refresh only the main-frame generation. No accessibility tree is read. */
   async targetState(tabId: string): Promise<BrowserTargetStateValue> {
+    return await withinReadBudget(() => this.targetStateWithin(tabId));
+  }
+
+  private async targetStateWithin(tabId: string): Promise<BrowserTargetStateValue> {
     const targetId = this.browserTargetIdOf(tabId);
     try {
       // A tab that did not answer before is only checked briefly: a page that
@@ -2354,6 +2399,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async readDom(
+    tabId: string,
+    request: BrowserDomReadRequestValue,
+  ): Promise<BrowserDomReadResponseValue> {
+    return await withinReadBudget(() => this.readDomWithin(tabId, request));
+  }
+
+  private async readDomWithin(
     tabId: string,
     request: BrowserDomReadRequestValue,
   ): Promise<BrowserDomReadResponseValue> {

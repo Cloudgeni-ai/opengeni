@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   browserActionDeadlineMs,
+  INTERACTION_REQUEST_TIMEOUT_MS,
   type BrowserActionCommand,
   type BrowserObservation,
 } from "@opengeni/contracts";
@@ -27,6 +28,7 @@ const busyLoop = (ms: number) =>
 async function withBusyPage(
   busyFrom: "load" | "click",
   run: (fixture: {
+    driver: AgentBrowserDriver;
     controller: BrowserInteractionController;
     initial: BrowserObservation;
     click: (
@@ -36,6 +38,7 @@ async function withBusyPage(
     ) => BrowserActionCommand;
     clicked: () => string[];
   }) => Promise<void>,
+  busyMs = 3_000,
 ): Promise<void> {
   const clicks: string[] = [];
   const server = Bun.serve({
@@ -51,7 +54,7 @@ async function withBusyPage(
       return new Response(
         `<!doctype html><title>Conversations</title>
         <button onclick="fetch('/clicked?button=open')${busyNow ? "" : `; ${busyLoop(6_000)}`}">Open conversation</button>
-        ${busyNow ? `<script>setTimeout(() => ${busyLoop(3_000)}, 1000)</script>` : ""}`,
+        ${busyNow ? `<script>setTimeout(() => ${busyLoop(busyMs)}, 1000)</script>` : ""}`,
         { headers: { "content-type": "text/html" } },
       );
     },
@@ -74,6 +77,7 @@ async function withBusyPage(
   });
   try {
     await run({
+      driver,
       controller,
       initial: await driver.start(`http://127.0.0.1:${server.port}/`),
       click: (observation, name, observationMode) => ({
@@ -136,4 +140,33 @@ e2e(
     });
   },
   180_000,
+);
+
+/**
+ * A page read has no declared waits, and the API stops waiting for it after
+ * INTERACTION_REQUEST_TIMEOUT_MS. On a page whose main thread is busy for
+ * seconds at a time (software-rendered WebGL does this), an observation's page
+ * commands each answered within their own timeout but together ran past the
+ * API's, which then reported a lost transport. The read now says in time that
+ * the tab did not answer.
+ */
+e2e(
+  "an observation of a page too busy to read answers before the API stops waiting",
+  async () => {
+    await withBusyPage(
+      "load",
+      async ({ driver, initial }) => {
+        await Bun.sleep(1_500);
+        const started = Date.now();
+        const failure = await driver.observe(initial.target.id).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        expect(Date.now() - started).toBeLessThan(INTERACTION_REQUEST_TIMEOUT_MS - 5_000);
+        expect(failure).toMatchObject({ code: "tab_not_responding", retryable: false });
+      },
+      8_000,
+    );
+  },
+  240_000,
 );
