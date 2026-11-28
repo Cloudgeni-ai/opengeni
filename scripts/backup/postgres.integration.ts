@@ -165,7 +165,7 @@ integration(
           "-v",
           "ON_ERROR_STOP=1",
           "-c",
-          "CREATE TABLE events (session integer, seq integer, body text, body_length integer GENERATED ALWAYS AS (length(body)) STORED, PRIMARY KEY (session, seq)); CREATE TABLE events_physical (LIKE events INCLUDING ALL); INSERT INTO events (session, seq, body) SELECT s, q, repeat(md5(s || '/' || q), 12) FROM generate_series(1, 100) q, generate_series(1, 2000) s ORDER BY q, s; INSERT INTO events_physical (session, seq, body) SELECT session, seq, body FROM events; ALTER TABLE events OWNER TO backup_owner; ALTER TABLE events ENABLE ROW LEVEL SECURITY; ALTER TABLE events FORCE ROW LEVEL SECURITY; CREATE POLICY events_reader ON events FOR SELECT TO backup_reader USING (true); GRANT SELECT ON events TO backup_reader; CREATE INDEX events_body_length ON events (body_length);",
+          "CREATE TABLE events (session integer, seq integer, body text, body_length integer GENERATED ALWAYS AS (length(body)) STORED, PRIMARY KEY (session, seq)); CREATE TABLE events_physical (LIKE events INCLUDING ALL); INSERT INTO events (session, seq, body) SELECT s, q, repeat(md5(s || '/' || q), 12) FROM generate_series(1, 100) q, generate_series(1, 2000) s ORDER BY q, s; INSERT INTO events_physical (session, seq, body) SELECT session, seq, body FROM events; ALTER TABLE events OWNER TO backup_owner; ALTER TABLE events ENABLE ROW LEVEL SECURITY; ALTER TABLE events FORCE ROW LEVEL SECURITY; CREATE POLICY events_reader ON events FOR SELECT TO backup_reader USING (true); GRANT SELECT ON events TO backup_reader; CREATE INDEX events_body_length ON events (body_length); CREATE TABLE events_extra () INHERITS (events); INSERT INTO events_extra (session, seq, body) VALUES (5000, 1, 'child'), (5000, 2, 'child'); CREATE TABLE lines (\"order\" integer, id integer, PRIMARY KEY (\"order\", id)); INSERT INTO lines SELECT i % 7, i FROM generate_series(1, 100) i;",
         ],
         pgEnv,
       );
@@ -177,7 +177,11 @@ integration(
             {
               name: "source",
               service: "source",
-              orderedTables: [{ table: "public.events", key: ["session", "seq"] }],
+              orderedTables: [
+                { table: "public.events", key: ["session", "seq"] },
+                // A key column that is a keyword.
+                { table: "public.lines", key: ["order", "id"] },
+              ],
             },
           ],
         }),
@@ -198,7 +202,7 @@ integration(
           "-c",
           "VACUUM events, events_physical",
           "-c",
-          "INSERT INTO events (session, seq, body) SELECT s, q, repeat(md5(s || '/' || q), 12) FROM generate_series(1, 100) q, generate_series(2001, 2100) s ORDER BY q, s; UPDATE events SET body = body || '!' WHERE seq = 100 AND session % 1000 = 0; INSERT INTO events_physical (session, seq, body) SELECT session, seq, body FROM events WHERE session > 2000 ORDER BY seq, session; UPDATE events_physical SET body = body || '!' WHERE seq = 100 AND session % 1000 = 0;",
+          "INSERT INTO events (session, seq, body) SELECT s, q, repeat(md5(s || '/' || q), 12) FROM generate_series(1, 100) q, generate_series(2001, 2100) s ORDER BY q, s; UPDATE events SET body = body || '!' WHERE seq = 100 AND session % 1000 = 0; INSERT INTO events_physical (session, seq, body) SELECT session, seq, body FROM ONLY events WHERE session > 2000 ORDER BY seq, session; UPDATE events_physical SET body = body || '!' WHERE seq = 100 AND session % 1000 = 0;",
         ],
         pgEnv,
       );
@@ -229,7 +233,10 @@ integration(
         invoke("psql", ["-d", db, "-Atc", sql], pgEnv).trim();
       const fingerprint =
         "SELECT count(*), sum(length(body)), sum(body_length), md5(string_agg(session || '/' || seq || '/' || body, ',' ORDER BY session, seq)) FROM events";
+      // Includes the inheritance child's rows, which must be restored once.
       expect(query("ordered", fingerprint)).toBe(query("source", fingerprint));
+      const lines = 'SELECT count(*), sum("order" * id) FROM lines';
+      expect(query("ordered", lines)).toBe(query("source", lines));
       expect(query("ordered", "SELECT count(*),sum(length(body)) FROM records")).toBe(
         query("source", "SELECT count(*),sum(length(body)) FROM records"),
       );
@@ -238,7 +245,7 @@ integration(
           "ordered",
           "SELECT pg_get_userbyid(relowner),relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='events'::regclass; SELECT count(*) FROM pg_indexes WHERE tablename='events'; SET ROLE backup_reader; SELECT count(*) FROM events;",
         ),
-      ).toBe("backup_owner|t|t\n2\nSET\n200000");
+      ).toBe("backup_owner|t|t\n2\nSET\n200002");
       // A failed ordered restore leaves the target empty.
       expect(cli("restore", orderedArgs).status).not.toBe(0);
       // Flip a byte in every stored pack: restic's authentication must refuse

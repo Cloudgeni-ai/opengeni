@@ -64,8 +64,16 @@ function count(value: unknown, fallback: number, field: string): number {
   return value;
 }
 const identifier = /^[a-zA-Z][a-zA-Z0-9_-]{0,62}$/;
-// Lower-case SQL identifiers only, so they need no quoting anywhere.
+// Lower-case SQL identifiers only; SQL quotes them (a column may be a keyword).
 const sqlName = /^[a-z_][a-z0-9_]{0,62}$/;
+
+/** A configured name as a quoted SQL identifier (`schema.table` becomes `"schema"."table"`). */
+export function quoted(name: string): string {
+  return name
+    .split(".")
+    .map((part) => `"${part}"`)
+    .join(".");
+}
 
 function orderedTables(value: unknown): OrderedTable[] {
   if (value === undefined) return [];

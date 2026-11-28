@@ -133,8 +133,8 @@ test("the ordered tables stream check accepts only whole, well-formed streams", 
     return done;
   };
   const header = "SET client_encoding = 'UTF8';\n";
-  const a = "COPY public.a (id, body) FROM stdin;\n1\tx\\\\.\n2\t\\\\.\n\\.\n";
-  const b = "COPY public.b (id) FROM stdin;\n\\.\n";
+  const a = 'COPY "public"."a" (id, body) FROM stdin;\n1\tx\\\\.\n2\t\\\\.\n\\.\n';
+  const b = 'COPY "public"."b" (id) FROM stdin;\n\\.\n';
   const whole = header + a + b;
   await check([whole], ["public.a", "public.b"]);
   // Every split point, including inside the end-of-data line.
@@ -143,7 +143,7 @@ test("the ordered tables stream check accepts only whole, well-formed streams", 
   // A long row is not mistaken for the end, and is not kept in memory.
   await check([
     header,
-    "COPY public.a (id) FROM stdin;\n",
+    'COPY "public"."a" (id) FROM stdin;\n',
     "x".repeat(5_000_000),
     "\\.\n",
     "\n\\.\n",
@@ -153,14 +153,16 @@ test("the ordered tables stream check accepts only whole, well-formed streams", 
     [[header + b + a], ["public.a", "public.b"]],
     [[header + a + b + "SELECT 1;\n"], undefined],
     [[a + b], undefined],
-    [[header + "COPY public.a (id) FROM stdin;\n1\n"], undefined],
+    [[header + 'COPY "public"."a" (id) FROM stdin;\n1\n'], undefined],
+    [[header + "COPY public.a (id) FROM stdin;\n\\.\n"], undefined],
     [[whole.slice(0, -1)], undefined],
   ] as [string[], string[] | undefined][])
     await expect(check(parts, expected)).rejects.toThrow();
   expect(() => tablesScript("not-a-snapshot", [])).toThrow();
-  expect(tablesScript("00000003-0000001B-1", [{ table: "public.a", key: ["k", "id"] }])).toContain(
-    "COPY (SELECT :columns FROM public.a ORDER BY k, id) TO STDOUT;",
-  );
+  // Only the table's own rows, and every name quoted (a column may be a keyword).
+  expect(
+    tablesScript("00000003-0000001B-1", [{ table: "public.a", key: ["order", "id"] }]),
+  ).toContain('COPY (SELECT :columns FROM ONLY "public"."a" ORDER BY "order", "id") TO STDOUT;');
 });
 test("storage environment file is literal and keeps restic settings out", () => {
   expect(parseEnvironment("# comment\nAWS_ACCESS_KEY_ID=id\nAWS_SECRET_ACCESS_KEY=a=b\n")).toEqual({
