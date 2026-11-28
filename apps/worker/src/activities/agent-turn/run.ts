@@ -12,6 +12,8 @@ import {
   readSessionAgentPrompt,
   readSessionOrgAgentVersion,
   markOrganizationAnthropicApiKeyCreditRefused,
+  readCodexCapacityRecovery,
+  restoreOrganizationAnthropicApiKeyAfterCreditRecheck,
 } from "@opengeni/db";
 import { orgAgentEndUserSubject, resolveOrgAgentToolLogins } from "./org-agent-tool-logins";
 import { lazyProvisionEnabled, routingEnabled } from "../../sandbox-routing";
@@ -1351,12 +1353,34 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // The organization's pooled Anthropic API keys: one Anthropic
           // refuses for lack of credits is recorded, so later turns skip it.
           // Recording never holds up or fails the turn.
+          const creditRecheckStartedAt = readCodexCapacityRecovery(turn.metadata).apiKeyRecheck
+            ? new Date()
+            : null;
+          const restoredAnthropicKeys = new Set<string>();
+          const recordAnthropicCreditRecheck = creditRecheckStartedAt
+            ? (providerId: string, keyId: string) => {
+                if (providerId !== "organization-anthropic" || restoredAnthropicKeys.has(keyId))
+                  return;
+                restoredAnthropicKeys.add(keyId);
+                void restoreOrganizationAnthropicApiKeyAfterCreditRecheck(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  keyId,
+                  checkedAfter: creditRecheckStartedAt,
+                }).catch(() =>
+                  observability.warn(
+                    "Could not restore an Anthropic API key after a successful credit recheck",
+                  ),
+                );
+              }
+            : undefined;
           const recordAnthropicApiKeyRefusal = (providerId: string, keyId: string) => {
             if (providerId !== "organization-anthropic") return;
             void markOrganizationAnthropicApiKeyCreditRefused(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               keyId,
+              ...(creditRecheckStartedAt ? { recheck: true } : {}),
             }).catch((error: unknown) =>
               observability.warn("Could not record an Anthropic API key out of credits", {
                 error: error instanceof Error ? error.message : String(error),
@@ -1367,8 +1391,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // deployment configured per-user attribution (docs/amazon-bedrock.md).
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
             withBedrockCaller(turn.initiatingHumanSubjectId, () =>
-              withAnthropicApiKeyRefusals(recordAnthropicApiKeyRefusal, () =>
-                claudeCore ? withClaudeCoreLane("requests")(fn) : fn(),
+              withAnthropicApiKeyRefusals(
+                recordAnthropicApiKeyRefusal,
+                () => (claudeCore ? withClaudeCoreLane("requests")(fn) : fn()),
+                recordAnthropicCreditRecheck,
               ),
             );
           const withClaudeTitleUsage = <T>(fn: () => Promise<T>): Promise<T> =>

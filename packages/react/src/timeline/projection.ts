@@ -5062,6 +5062,7 @@ function capacityWaitPresentation(
     ACTION_CAPACITY_WAIT_REASONS.has(stringValue(payload.waitReason)) ||
     payload.waitReason === "pinned_account_unavailable" ||
     payload.waitReason === "codex_rate_limited" ||
+    payload.waitReason === "api_key_credits_exhausted" ||
     ACTION_CAPACITY_WAIT_CODE.test(stringValue(payload.code))
   ) {
     // Claude/SuperGrok waits record the readable sentence as `error` and an

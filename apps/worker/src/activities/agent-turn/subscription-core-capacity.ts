@@ -34,7 +34,11 @@ import {
 } from "./codex-core-errors";
 import type { CoreSubscriptionTurnLease } from "./credential-leases";
 import type { SubscriptionCoreTurn } from "./turn-context";
-import { reconcileCoreCapacityWait, type CoreWaitBinding } from "../subscription-core-codex-waits";
+import {
+  reconcileCoreCapacityWait,
+  type CapacityWaitBinding,
+  type CoreWaitBinding,
+} from "../subscription-core-codex-waits";
 import {
   subscriptionCapacityArmingDiagnostic,
   subscriptionCapacityArmingFailure,
@@ -392,6 +396,47 @@ export async function parkCoreSubscriptionTurn(
   waits: CoreWaitBinding,
   displayName: string,
 ): Promise<CapacityPhaseOutcome> {
+  return await parkProviderCapacityTurn(
+    deps,
+    wait,
+    waits,
+    subscriptionCoreCapacityWaitPayload(
+      wait.reason,
+      wait.earliestResetAt,
+      displayName,
+      wait.waitAccount,
+    ),
+  );
+}
+
+type ParkCapacityDeps = Pick<
+  CapacityPhaseDeps,
+  | "input"
+  | "db"
+  | "bus"
+  | "settings"
+  | "control"
+  | "attempt"
+  | "claimedResult"
+  | "acknowledgeLostAttemptOwnership"
+  | "observability"
+  | "wakeSessionWorkflow"
+  | "signalCodexCapacityWorkflow"
+> & {
+  eventing: { settle: CapacityPhaseDeps["eventing"]["settle"] };
+  session: Pick<CapacityPhaseDeps["session"], "parentSessionId">;
+};
+
+/** Both placement and a definitive billing refusal park the same logical turn. */
+export async function parkProviderCapacityTurn(
+  deps: ParkCapacityDeps,
+  wait: Pick<
+    WaitPlacement,
+    "reason" | "earliestResetAt" | "healthRetryAt" | "waitAccount" | "candidateProviders"
+  >,
+  waits: CapacityWaitBinding,
+  failurePayload: Record<string, unknown>,
+): Promise<{ exit: RunAgentTurnResult }> {
   const {
     input,
     db,
@@ -422,12 +467,7 @@ export async function parkCoreSubscriptionTurn(
       ...(wait.candidateProviders !== undefined
         ? { candidateProviders: wait.candidateProviders }
         : {}),
-      failurePayload: subscriptionCoreCapacityWaitPayload(
-        wait.reason,
-        wait.earliestResetAt,
-        displayName,
-        wait.waitAccount,
-      ),
+      failurePayload,
     });
   } catch (error) {
     // Connectivity failures may hide a committed waiter: recover this exact
@@ -463,7 +503,7 @@ export async function parkCoreSubscriptionTurn(
     // A replayed arm that finds its own wait already in place writes no
     // events and is not a new wait.
     if (armed.events.length > 0) {
-      deps.observability.info("Turn started waiting for subscription capacity", {
+      deps.observability.info("Turn started waiting for provider capacity", {
         provider: armed.waiter.provider,
         waitReason: armed.waiter.waitReason,
         earliestResetAt: armed.waiter.earliestResetAt?.toISOString() ?? null,
@@ -488,7 +528,7 @@ export async function parkCoreSubscriptionTurn(
       })
     ) {
       if (armed.events.length > 0) {
-        deps.observability.info("Turn stopped waiting for subscription capacity", {
+        deps.observability.info("Turn stopped waiting for provider capacity", {
           provider: armed.waiter.provider,
           outcome: "superseded",
           reason: "steer",

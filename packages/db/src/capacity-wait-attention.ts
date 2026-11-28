@@ -94,6 +94,7 @@ export function capacityWaitAttention(input: {
 }
 
 export function capacityWaitProviderName(provider: string): string {
+  if (provider === "api_key") return "model provider";
   if (provider === "codex") return "Codex";
   if (provider === "xai") return "xAI";
   if (provider === "claude") return "Claude";
@@ -152,9 +153,12 @@ export function capacityWaitNotificationPayload(input: {
       : " To continue sooner, switch the chat to another model; its waiting turn continues on that model.";
   return {
     key: capacityWaitNotificationKey(input.turnId),
-    title: pinned
-      ? `Chat waiting for its pinned ${name} account`
-      : `Chat waiting for ${name} capacity`,
+    title:
+      reason === "api_key_credits_exhausted"
+        ? "Chat waiting for API credits"
+        : pinned
+          ? `Chat waiting for its pinned ${name} account`
+          : `Chat waiting for ${name} capacity`,
     body: `${status}${sooner}`,
     urgency: "normal" as const,
     replaced: false,

@@ -3,7 +3,10 @@ import {
   subscriptionCoreCapacityWaitRef,
 } from "@opengeni/db";
 
-import { reconcileCoreCapacityWait } from "./subscription-core-codex-waits";
+import {
+  API_KEY_CAPACITY_WAIT_BINDING,
+  reconcileCoreCapacityWait,
+} from "./subscription-core-codex-waits";
 import { subscriptionCoreWaitBindings } from "./subscription-core-wait-bindings";
 
 import type {
@@ -36,9 +39,12 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     const resolved = await services();
     // Histories without a provider keep the original Codex binding. Migrated
     // waiters retain their ids/generations; lookup never infers new authority.
-    const binding = subscriptionCoreWaitBindings().find(
-      (candidate) => candidate.provider === (input.provider ?? "codex"),
-    );
+    const binding =
+      input.provider === "api_key"
+        ? API_KEY_CAPACITY_WAIT_BINDING
+        : subscriptionCoreWaitBindings().find(
+            (candidate) => candidate.provider === (input.provider ?? "codex"),
+          );
     if (!binding) return { action: "stale" };
     const core = await reconcileCoreCapacityWait(resolved, binding, {
       accountId: input.accountId,

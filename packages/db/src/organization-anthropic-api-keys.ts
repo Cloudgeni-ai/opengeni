@@ -85,11 +85,12 @@ export function organizationAnthropicApiKeyPool(
     ConnectionRow,
     "version" | "credentialEncrypted" | "apiKeyMembers" | "apiKeyCreditRefusals"
   >,
+  recheckExhausted = false,
 ): { id: string; credentialEncrypted: string }[] | null {
   const members = row.apiKeyMembers ?? [];
   if (members.length === 0) return null;
   const refused = row.apiKeyCreditRefusals ?? {};
-  return [
+  const keys = [
     {
       id: organizationAnthropicConnectionKeyMemberId(row.version),
       credentialEncrypted: row.credentialEncrypted,
@@ -98,7 +99,11 @@ export function organizationAnthropicApiKeyPool(
       id: member.id,
       credentialEncrypted: member.credentialEncrypted,
     })),
-  ].filter((key) => refused[key.id] === undefined);
+  ];
+  const serving = keys.filter((key) => refused[key.id] === undefined);
+  // Only the parked turn's real timed retry may try keys previously refused
+  // for credits, and only if the pool still has no ordinary serving key.
+  return recheckExhausted && serving.length === 0 ? keys : serving;
 }
 
 function normalizedLabel(label: string): string {
@@ -300,7 +305,7 @@ export async function clearOrganizationAnthropicApiKeyCreditRefusal(
  */
 export async function markOrganizationAnthropicApiKeyCreditRefused(
   db: Database,
-  input: { accountId: string; workspaceId: string; keyId: string; at?: Date },
+  input: { accountId: string; workspaceId: string; keyId: string; at?: Date; recheck?: true },
 ): Promise<boolean> {
   const at = (input.at ?? new Date()).toISOString();
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -314,13 +319,36 @@ export async function markOrganizationAnthropicApiKeyCreditRefused(
           eq(schema.organizationModelProviderConnections.accountId, input.accountId),
           eq(schema.organizationModelProviderConnections.providerKind, "anthropic"),
           eq(schema.organizationModelProviderConnections.status, "active"),
-          sql`not coalesce(${schema.organizationModelProviderConnections.apiKeyCreditRefusals}, '{}'::jsonb) ? ${input.keyId}::text`,
+          input.recheck
+            ? sql`coalesce(${schema.organizationModelProviderConnections.apiKeyCreditRefusals} ->> ${input.keyId}::text, '') < ${at}`
+            : sql`not coalesce(${schema.organizationModelProviderConnections.apiKeyCreditRefusals}, '{}'::jsonb) ? ${input.keyId}::text`,
           sql`(${input.keyId}::text = 'primary-v' || ${schema.organizationModelProviderConnections.version}::text
             or coalesce(${schema.organizationModelProviderConnections.apiKeyMembers}, '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('id', ${input.keyId}::text)))`,
         ),
       )
       .returning({ id: schema.organizationModelProviderConnections.id });
     return rows.length > 0;
+  });
+}
+
+/** A completed recheck clears only a refusal that predates the retry. */
+export async function restoreOrganizationAnthropicApiKeyAfterCreditRecheck(
+  db: Database,
+  input: { accountId: string; workspaceId: string; keyId: string; checkedAfter: Date },
+): Promise<void> {
+  await withRlsContext(db, input, async (scopedDb) => {
+    const connection = schema.organizationModelProviderConnections;
+    await scopedDb
+      .update(connection)
+      .set({ apiKeyCreditRefusals: sql`${connection.apiKeyCreditRefusals} - ${input.keyId}::text` })
+      .where(
+        and(
+          eq(connection.accountId, input.accountId),
+          eq(connection.providerKind, "anthropic"),
+          eq(connection.status, "active"),
+          sql`${connection.apiKeyCreditRefusals} ->> ${input.keyId}::text < ${input.checkedAfter.toISOString()}`,
+        ),
+      );
   });
 }
 

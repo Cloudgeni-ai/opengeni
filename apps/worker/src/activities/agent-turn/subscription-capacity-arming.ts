@@ -9,7 +9,12 @@ export type SubscriptionCapacityArmingFailurePayload = {
   recovery: "user_message";
 };
 
-const PROVIDER_NAMES = { codex: "Codex", claude: "Claude", xai: "SuperGrok" } as const;
+const PROVIDER_NAMES = {
+  codex: "Codex",
+  claude: "Claude",
+  xai: "SuperGrok",
+  api_key: "API key",
+} as const;
 
 /**
  * Translate a failure to arm a durable capacity wait into an explicit,
@@ -35,9 +40,11 @@ export function subscriptionCapacityArmingFailure(
   const name = PROVIDER_NAMES[provider];
   return {
     error:
-      "No " +
-      name +
-      " subscription account is available, and this session could not be queued to wait for one. Send a message to try again.",
+      provider === "api_key"
+        ? "The model provider is out of API credits, and this chat could not be queued to wait for them. Send a message to try again."
+        : "No " +
+          name +
+          " subscription account is available, and this session could not be queued to wait for one. Send a message to try again.",
     code: provider + "_capacity_wait_unavailable",
     retryable: true,
     recovery: "user_message",

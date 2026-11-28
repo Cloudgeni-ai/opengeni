@@ -1528,7 +1528,7 @@ flowchart LR
 Send and Steer create durable turn intent. A normal human Send is promoted to
 Steer-equivalent replacement only when the active, unpaused, admissible branch
 is waiting with no live attempt: in `requires_action`, or in
-`waiting_capacity` on a parked subscription turn (`sendTakesOverActiveWait`);
+`waiting_capacity` on a parked provider turn (`sendTakesOverActiveWait`);
 checked-out queue edits, paused sessions, and other active lifecycle states
 keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
@@ -1539,6 +1539,11 @@ input whose durable pending-event sequence was inside the resume attempt's
 frozen start boundary. Pause blocks
 admission without pretending that physical execution has already stopped.
 Cancel fences a session subtree and is terminal for the affected sessions.
+
+A definitive API-key credit refusal parks the accepted turn on the same durable
+capacity waiter as an unusable subscription account. Ordinary machine inputs
+remain pending and do not advance the provider recheck timer. See
+[Run lifecycle](run-lifecycle.md) for the exact-turn resume and notification rules.
 
 Steer inserts ahead of every queued Send and replaces the current direction.
 An ownerless current turn (approval, human input, recovery or capacity wait) is

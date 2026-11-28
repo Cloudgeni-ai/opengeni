@@ -12,17 +12,20 @@
  */
 import {
   abandonSubscriptionCapacityWakeDelivery,
+  armSubscriptionCoreCapacityWait,
   armSubscriptionCoreCodexCapacityWait,
   claimSubscriptionCapacityWakeDeliveries,
   evaluateSubscriptionCoreCodexPlacement,
   evaluateSubscriptionCorePlacementWithFailover,
   getSession,
   getSessionTurn,
+  getSubscriptionCoreCapacityWaitById,
   getSubscriptionCoreCodexCapacityWaitById,
   markSubscriptionCapacityWakeDelivered,
   readSubscriptionCoreCodexTurnModel,
   readSubscriptionCoreTurnIdentity,
   reconcileSubscriptionCoreCodexCapacityWait,
+  reconcileSubscriptionCoreCapacityWait,
   recoverSubscriptionCoreCodexConnectionHealth,
   retrySubscriptionCapacityWakeDelivery,
   subscriptionCoreCodexCapacityWaitRef,
@@ -67,13 +70,17 @@ export type CoreCodexWakeServices = {
 };
 
 /** One provider's database entry points for its core waiters. */
-export type CoreWaitBinding = {
-  provider: SubscriptionCoreWaiterProvider;
+type CapacityWaitStore = {
   arm: typeof armSubscriptionCoreCodexCapacityWait;
   getWaiterById: (
     db: Database,
     input: { workspaceId: string; sessionId: string; waiterId: string },
   ) => Promise<SubscriptionCoreCodexCapacityWait | null>;
+  reconcileWaiter: typeof reconcileSubscriptionCoreCodexCapacityWait;
+};
+
+export type CoreWaitBinding = CapacityWaitStore & {
+  provider: SubscriptionCoreWaiterProvider;
   readTurnModel: typeof readSubscriptionCoreCodexTurnModel;
   recoverHealth: (db: Database, identity: SubscriptionCoreTurnIdentity) => Promise<number>;
   evaluatePlacement: (
@@ -88,7 +95,6 @@ export type CoreWaitBinding = {
     db: Database,
     input: { accountId: string; reason: string; workspaceIds?: readonly string[] },
   ) => Promise<SubscriptionCoreCodexWakeScope[]>;
-  reconcileWaiter: typeof reconcileSubscriptionCoreCodexCapacityWait;
   /**
    * Re-read the provider's usage before a timed or woken reconcile evaluates
    * placement, for a provider whose usage read can end an exhaustion before
@@ -103,6 +109,20 @@ export type CoreWaitBinding = {
     services: { db: Database; settings: Settings },
     turn: SubscriptionCoreTurnIdentity,
   ) => Promise<void>;
+};
+
+export type CapacityWaitBinding = CoreWaitBinding | (CapacityWaitStore & { provider: "api_key" });
+
+/** API-key billing refusals use the same waiter, workflow timer and release path. */
+export const API_KEY_CAPACITY_WAIT_BINDING: CapacityWaitBinding = {
+  provider: "api_key",
+  arm: (db, input) => armSubscriptionCoreCapacityWait(db, "api_key", input),
+  getWaiterById: async (db, input) => {
+    const waiter = await getSubscriptionCoreCapacityWaitById(db, input);
+    return waiter?.provider === "api_key" ? waiter : null;
+  },
+  reconcileWaiter: (db, input) =>
+    reconcileSubscriptionCoreCapacityWait(db, { ...input, provider: "api_key" }),
 };
 
 /** Codex's binding (each call resolves the Codex-named entry point at call time). */
@@ -438,13 +458,14 @@ export async function reconcileCoreCapacityWait(
     /** Logs the end of a wait this reconcile settles. */
     observability?: Observability;
   },
-  binding: CoreWaitBinding,
+  binding: CapacityWaitBinding,
   input: {
     accountId: string;
     workspaceId: string;
     sessionId: string;
     waiterId: string;
     generation: number;
+    now?: Date;
   },
 ): Promise<CoreCodexReconcileResult | null> {
   let waiter = await binding.getWaiterById(services.db, input);
@@ -457,7 +478,26 @@ export async function reconcileCoreCapacityWait(
   if (waiter.accountId !== input.accountId || waiter.generation !== input.generation) {
     return { action: "stale" };
   }
-  if (binding.refreshBeforeReconcile && services.settings && waiter.blockedTurnLive !== false) {
+  if (
+    binding.provider === "api_key" &&
+    waiter.blockedTurnLive !== false &&
+    waiter.nextCheckAt.getTime() > (input.now?.getTime() ?? Date.now())
+  ) {
+    // Generic API keys have no common balance endpoint. Only the due timer
+    // releases the exact blocked turn to try its request again. An ordinary
+    // input wake neither sends a request nor pushes that timer farther out.
+    return {
+      action: "waiting",
+      ...subscriptionCoreCodexCapacityWaitRef(waiter),
+      nextCheckAt: waiter.nextCheckAt.toISOString(),
+    };
+  }
+  if (
+    binding.provider !== "api_key" &&
+    binding.refreshBeforeReconcile &&
+    services.settings &&
+    waiter.blockedTurnLive !== false
+  ) {
     const turn = await readSubscriptionCoreTurnIdentity(services.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -480,12 +520,14 @@ export async function reconcileCoreCapacityWait(
   const evaluation: SubscriptionCoreCodexWaitEvaluation =
     waiter.blockedTurnLive === false
       ? { kind: "paused" }
-      : await evaluateCoreBlockedTurn(services, binding, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: waiter.blockedTurnId,
-        });
+      : binding.provider === "api_key"
+        ? { kind: "run" }
+        : await evaluateCoreBlockedTurn(services, binding, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: waiter.blockedTurnId,
+          });
   const result = await binding.reconcileWaiter(services.db, {
     ...input,
     evaluatedWakeRevision: waiter.wakeRevision,

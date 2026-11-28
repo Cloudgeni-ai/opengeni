@@ -2,7 +2,8 @@
 export type ProviderCapacityWaitReason =
   | "codex_relogin_required"
   | "codex_plan_no_capacity"
-  | "codex_rate_limited";
+  | "codex_rate_limited"
+  | "api_key_credits_exhausted";
 
 /**
  * The one account a capacity wait is about, named for people and agents: the
@@ -17,7 +18,8 @@ export function isProviderCapacityWaitReason(reason: string): reason is Provider
   return (
     reason === "codex_relogin_required" ||
     reason === "codex_plan_no_capacity" ||
-    reason === "codex_rate_limited"
+    reason === "codex_rate_limited" ||
+    reason === "api_key_credits_exhausted"
   );
 }
 
@@ -33,10 +35,16 @@ export function providerCapacityWaitReasonText(
       "The ChatGPT plans available to this chat don’t provide Codex capacity for this model. Connect an account with access or switch to another model.",
     codex_rate_limited:
       "Codex is rate-limited. This turn continues automatically when an account has capacity again.",
+    api_key_credits_exhausted:
+      "The model provider is out of API credits. This chat will continue automatically when credits are available again or when you change its model.",
   };
   return messages[reason];
 }
 
 export function providerCapacityWaitNeedsAction(reason: ProviderCapacityWaitReason): boolean {
-  return reason === "codex_relogin_required" || reason === "codex_plan_no_capacity";
+  return (
+    reason === "codex_relogin_required" ||
+    reason === "codex_plan_no_capacity" ||
+    reason === "api_key_credits_exhausted"
+  );
 }

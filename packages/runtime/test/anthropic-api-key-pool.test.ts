@@ -130,15 +130,18 @@ test("MP-KEYS-03: a key out of credits is reported and the same request goes to 
   const order = anthropicApiKeyOrder(keys, session);
   const { sent, fetch } = anthropic(new Set([order[0]!.apiKey]));
   const reported: [string, string][] = [];
+  const accepted: [string, string][] = [];
   const model = new AnthropicMessagesModel(provider(keys), "claude-test", fetch);
   const result = await withAnthropicApiKeyRefusals(
     (providerId, keyId) => reported.push([providerId, keyId]),
     () => model.getResponse(modelRequest(session)),
+    (providerId, keyId) => accepted.push([providerId, keyId]),
   );
   expect(result.output.length).toBeGreaterThan(0);
   expect(sent.map((request) => request.key)).toEqual([order[0]!.apiKey, order[1]!.apiKey]);
   expect(sent[1]!.body).toBe(sent[0]!.body);
   expect(reported).toEqual([["organization-anthropic", order[0]!.id]]);
+  expect(accepted).toEqual([["organization-anthropic", order[1]!.id]]);
   // The model keeps the refused key out for the rest of its requests.
   await model.getResponse(modelRequest(session));
   expect(sent.at(-1)!.key).toBe(order[1]!.apiKey);

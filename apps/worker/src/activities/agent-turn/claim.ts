@@ -20,6 +20,7 @@ import {
   installOrReadTurnExecutionPolicyForAttempt,
   requestSessionTurnRecovery,
   requireSession,
+  readCodexCapacityRecovery,
   type ApiIntegrationRuntime,
   type CanonicalTurnStartupMilestoneReceipt,
   type ClaimSessionWorkForAttemptInput,
@@ -441,6 +442,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         productModelId:
           claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
         codexSubscriptionActive,
+        ...(readCodexCapacityRecovery(turn.metadata).apiKeyRecheck
+          ? { recheckExhaustedAnthropicKeys: true }
+          : {}),
       }),
   );
   // Reuse the exact core designation already resolved above.
