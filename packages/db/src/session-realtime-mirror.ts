@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 
-import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
+import {
+  approvalIdentifier,
+  McpElicitationApprovalRequest,
+  type HumanInputQuestion,
+  type HumanInputResponse,
+} from "@opengeni/contracts";
 import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "./database";
-import { LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
+import { fromPostgresLosslessJson, LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
 import * as schema from "./schema";
 
 const SESSION_REALTIME_MIRROR_MAX_TEXT_BYTES = 131_072;
@@ -23,6 +28,8 @@ export type MirrorSessionRealtimeContextInput = {
     | "human_input"
     | "human_input_request"
     | "human_input_response"
+    | "tool_approval_request"
+    | "tool_approval_response"
     | "assistant_progress"
     | "assistant_terminal"
     | "agent_call";
@@ -318,6 +325,230 @@ export function renderRealtimeHumanInputResponseContext(input: {
 function renderExpiry(value: Date | string | null | undefined): string {
   if (value === null || value === undefined) return "none";
   return value instanceof Date ? value.toISOString() : value;
+}
+
+const REALTIME_TOOL_APPROVAL_TEXT_MAX_BYTES = 512;
+
+/** One tool call waiting for the person's approval, as its approval card names it. */
+export type RealtimeToolApprovalContext = {
+  /** The approval id `user.approvalDecision` answers (the tool call id). */
+  id: string;
+  /** The MCP server's question round, when the server asks one; null otherwise. */
+  round: number | null;
+  /** The card's sentence ("Send an email to …"), else the tool's name in words. */
+  action: string;
+  /** Where it runs: the integration, and the account when there are several. */
+  where: string | null;
+  /** The MCP server's own question in the middle of the call, if any. */
+  serverQuestion: string | null;
+};
+
+function nonEmptyText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function boundedApprovalText(value: string): string {
+  return takeUtf8Head(value, REALTIME_TOOL_APPROVAL_TEXT_MAX_BYTES);
+}
+
+/** The tool's name in words, the way the approval inbox titles an untitled call. */
+function toolNameInWords(name: string | null): string {
+  if (!name || name === "tool" || /^[a-f0-9]{64}$/.test(name)) return "A tool call";
+  const words = name
+    .replace(/^.*__/, "")
+    .replace(/^batch[_-]+(?=[A-Za-z])/i, "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_.\-\s]+/g, " ")
+    .trim()
+    .toLowerCase();
+  return words ? `${words.charAt(0).toUpperCase()}${words.slice(1)}` : "A tool call";
+}
+
+/**
+ * The approvals one `session.requiresAction` payload asks the person for, with
+ * the same title and source its approval card and inbox item show.
+ */
+export function realtimeToolApprovalsFromRequiresAction(
+  payload: Record<string, unknown>,
+): RealtimeToolApprovalContext[] {
+  const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+  const seen = new Set<string>();
+  const result: RealtimeToolApprovalContext[] = [];
+  for (const approval of approvals) {
+    const id = approvalIdentifier(approval);
+    if (!id || seen.has(id) || !approval || typeof approval !== "object") continue;
+    seen.add(id);
+    const item = approval as Record<string, unknown>;
+    const display =
+      item.display && typeof item.display === "object" && !Array.isArray(item.display)
+        ? (item.display as Record<string, unknown>)
+        : {};
+    const nested = [item.rawItem, item.raw].find(
+      (candidate): candidate is Record<string, unknown> =>
+        Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate),
+    );
+    const name =
+      nonEmptyText(display.toolName) ??
+      nonEmptyText(item.name) ??
+      nonEmptyText(item.toolName) ??
+      nonEmptyText(nested?.name);
+    const where = [nonEmptyText(display.connector), nonEmptyText(display.accountLabel)]
+      .filter((part): part is string => part !== null)
+      .join(" · ");
+    const elicitation = McpElicitationApprovalRequest.safeParse(item.elicitation);
+    const serverQuestion = elicitation.success
+      ? nonEmptyText(elicitation.data.requests[0]?.message)
+      : null;
+    result.push({
+      id,
+      round: elicitation.success ? elicitation.data.round : null,
+      action: boundedApprovalText(nonEmptyText(display.title) ?? toolNameInWords(name)),
+      where: where ? boundedApprovalText(where) : null,
+      serverQuestion: serverQuestion ? boundedApprovalText(serverQuestion) : null,
+    });
+  }
+  return result;
+}
+
+export function renderRealtimeToolApprovalRequestContext(
+  approval: RealtimeToolApprovalContext,
+): string {
+  const lines = [
+    "<session_tool_approval_request>",
+    "  <status>waiting_for_user_approval</status>",
+    `  <id>${escapeXmlText(approval.id)}</id>`,
+    `  <action>${escapeXmlText(approval.action)}</action>`,
+  ];
+  if (approval.where) lines.push(`  <where>${escapeXmlText(approval.where)}</where>`);
+  if (approval.serverQuestion) {
+    lines.push(`  <server_question>${escapeXmlText(approval.serverQuestion)}</server_question>`);
+  }
+  lines.push(
+    "  <instruction>This is prepared but has not run: it waits for the user to approve it in the chat. Tell the user now, briefly and in their language, what it is and that they need to open the chat and approve it. It cannot be approved by voice.</instruction>",
+    "</session_tool_approval_request>",
+  );
+  return lines.join("\n");
+}
+
+export function renderRealtimeToolApprovalResponseContext(input: {
+  approvalId: string;
+  outcome: "approved" | "declined";
+}): string {
+  return [
+    "<session_tool_approval_response>",
+    `  <id>${escapeXmlText(input.approvalId)}</id>`,
+    `  <outcome>${input.outcome}</outcome>`,
+    input.outcome === "approved"
+      ? "  <instruction>It was approved in the chat and the work continues. Do not say it is done until a later update confirms it; acknowledge briefly only if useful.</instruction>"
+      : "  <instruction>It was declined in the chat and will not run as prepared. Do not ask the user to approve it again unless they raise it.</instruction>",
+    "</session_tool_approval_response>",
+  ].join("\n");
+}
+
+/**
+ * Tell the voice about tool calls waiting for the person's approval: one
+ * speakable update per approval and question round, so the same wait reaches
+ * a call once whether it was raised during the call or already pending when
+ * the call started, and a later pause naming it again adds nothing.
+ */
+export async function mirrorRealtimeToolApprovalRequestsInTransaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    realtimeId?: string | undefined;
+    turnId: string;
+    approvals: readonly RealtimeToolApprovalContext[];
+    sourceEventId: string;
+    trigger?: "realtime_start" | undefined;
+    now?: Date | undefined;
+  },
+): Promise<void> {
+  for (const approval of input.approvals) {
+    await mirrorSessionRealtimeContextInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      realtimeId: input.realtimeId,
+      sourceKind: "tool_approval_request",
+      sourceId: `${input.turnId}:${approval.id}:${approval.round ?? 0}`,
+      turnId: input.turnId,
+      channel: "speakable",
+      text: renderRealtimeToolApprovalRequestContext(approval),
+      payload: {
+        status: "waiting_for_user_approval",
+        approvalId: approval.id,
+        sourceEventId: input.sourceEventId,
+        ...(input.trigger ? { trigger: input.trigger } : {}),
+      },
+      now: input.now,
+    });
+  }
+}
+
+/**
+ * The approvals of this live turn's latest pause that no decision has answered
+ * yet: what its approval cards still ask, for a call that starts meanwhile.
+ */
+export async function loadPendingRealtimeToolApprovalsInTransaction(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<{ sourceEventId: string; approvals: RealtimeToolApprovalContext[] } | null> {
+  const [pause] = await db
+    .select({
+      id: schema.sessionEvents.id,
+      sequence: schema.sessionEvents.sequence,
+      payload: schema.sessionEvents.payload,
+      payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "session.requiresAction"),
+        eq(schema.sessionEvents.turnId, input.turnId),
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(1);
+  if (!pause) return null;
+  const decisions = await db
+    .select({
+      payload: schema.sessionEvents.payload,
+      payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.approvalDecision"),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        gt(schema.sessionEvents.sequence, pause.sequence),
+      ),
+    );
+  const decided = new Set(
+    decisions.flatMap((decision) => {
+      const payload = eventPayloadRecord(decision.payload, decision.payloadCodecVersion);
+      return typeof payload.approvalId === "string" ? [payload.approvalId] : [];
+    }),
+  );
+  const approvals = realtimeToolApprovalsFromRequiresAction(
+    eventPayloadRecord(pause.payload, pause.payloadCodecVersion),
+  ).filter((approval) => !decided.has(approval.id));
+  return approvals.length > 0 ? { sourceEventId: pause.id, approvals } : null;
+}
+
+function eventPayloadRecord(
+  payload: unknown,
+  payloadCodecVersion: number | null,
+): Record<string, unknown> {
+  const value = fromPostgresLosslessJson(payload, payloadCodecVersion);
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function escapeXmlText(value: string): string {
