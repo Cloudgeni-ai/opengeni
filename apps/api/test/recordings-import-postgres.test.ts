@@ -228,9 +228,11 @@ describe("importing a meeting transcript", () => {
        order by occurred_at, type desc`;
     expect(events.map((event) => event.type)).toEqual([
       "recording.started",
+      "recording.finished",
       "recording.transcript.ready",
     ]);
-    expect(events[1]!.data).toMatchObject({
+    expect(events[1]!.data).toMatchObject({ versionId: meeting.transcript.id });
+    expect(events[2]!.data).toMatchObject({
       recordingId,
       state: "ready",
       versionId: meeting.transcript.id,
@@ -258,7 +260,7 @@ describe("importing a meeting transcript", () => {
       select (select count(*)::int from recording_events where recording_id = ${recordingId}) as events,
              (select count(*)::int from recording_transcript_versions where recording_id = ${recordingId}) as versions,
              (select count(*)::int from recording_transcript_segments where recording_id = ${recordingId}) as segments`;
-    expect({ ...after[0] }).toEqual({ events: 2, versions: 1, segments: 4 });
+    expect({ ...after[0] }).toEqual({ events: 3, versions: 1, segments: 4 });
   });
 
   test("can't be transcribed again, but its speakers and text can be edited and searched", async () => {
