@@ -2,6 +2,7 @@ import { beginAnalyticsRequest as observeRequest } from "@opengeni/react/app/lib
 import { noteSuccessfulLogin } from "@opengeni/react/app/lib/analytics-login";
 import { observeSessionTurnEvents } from "@opengeni/react/app/lib/analytics-observer";
 import { resetSignupAttributionForTests, retainSignupAttribution } from "./signup-attribution";
+import { reportCaughtExceptionToAnalytics } from "./caught-exception-analytics";
 import { describe, expect, mock, test } from "bun:test";
 
 import {
@@ -294,6 +295,7 @@ describe("analytics providers", () => {
     const calls: Array<[string, ...unknown[]]> = [];
     const posthog = {
       capture: (...args: unknown[]) => calls.push(["capture", ...args]),
+      captureException: (...args: unknown[]) => calls.push(["captureException", ...args]),
       group: (...args: unknown[]) => calls.push(["group", ...args]),
       identify: (...args: unknown[]) => calls.push(["identify", ...args]),
       init: (...args: unknown[]) => calls.push(["init", ...args]),
@@ -304,6 +306,7 @@ describe("analytics providers", () => {
       resetGroups: () => calls.push(["resetGroups"]),
     };
     mock.module("posthog-js", () => ({ default: posthog }));
+    mock.module("posthog-js/dist/exception-autocapture", () => ({}));
     const fakeWindow = {
       localStorage: {
         getItem: () => "granted",
@@ -437,6 +440,103 @@ describe("analytics providers", () => {
       });
       expect(JSON.stringify(sharePage)).not.toContain("Zq3secretShareKey");
       expect(sharePage?.properties.page).toBe("other");
+      // The SDK sends person properties beside `properties` for identified
+      // users; their initial landing URLs are projected too.
+      const withPersonProperties = (
+        beforeSend as unknown as (event: Record<string, unknown>) => Record<string, unknown> | null
+      )({
+        uuid: "3b",
+        event: "$exception",
+        properties: { $exception_list: [{ type: "TypeError", value: "x" }] },
+        $set: { $current_url: "https://app.opengeni.ai/?draft=sensitive", plan: "team" },
+        $set_once: {
+          $initial_current_url: "https://app.opengeni.ai/?code=sensitive",
+          $initial_pathname: "/share/sensitive",
+          $initial_referrer: "https://private.example/?q=sensitive",
+          $initial_referring_domain: "www.producthunt.com",
+        },
+      });
+      expect(JSON.stringify(withPersonProperties)).not.toMatch(/sensitive|private/);
+      expect(withPersonProperties).toMatchObject({
+        $set: { plan: "team" },
+        $set_once: { $initial_referring_domain: "www.producthunt.com" },
+      });
+      expect(withPersonProperties?.$set_once).not.toHaveProperty("$geoip_disable");
+      // Exceptions are autocaptured and leave the browser without message
+      // text, source lines or page addresses.
+      expect(initCall?.[2]).toMatchObject({
+        capture_exceptions: {
+          capture_unhandled_errors: true,
+          capture_unhandled_rejections: true,
+          capture_console_errors: false,
+        },
+        error_tracking: { exception_steps: { enabled: false } },
+      });
+      const exception = beforeSend?.({
+        uuid: "4",
+        event: "$exception",
+        properties: {
+          $current_url: "https://app.opengeni.ai/workspaces?draft=sensitive",
+          $exception_message: "sensitive draft text",
+          $exception_list: [
+            {
+              type: "TypeError",
+              value: "sensitive draft text",
+              mechanism: { handled: false, type: "onerror" },
+              stacktrace: {
+                type: "raw",
+                frames: [
+                  {
+                    platform: "web:javascript",
+                    filename: "https://app.opengeni.ai/assets/index-1.js?sensitive=1",
+                    function: "render",
+                    lineno: 1,
+                    colno: 2,
+                    context_line: "sensitive source line",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      });
+      expect(JSON.stringify(exception)).not.toContain("sensitive");
+      expect(exception?.properties).toMatchObject({
+        $exception_types: ["TypeError"],
+        page: "other",
+        $exception_list: [
+          {
+            type: "TypeError",
+            value: "[redacted]",
+            stacktrace: {
+              frames: [{ filename: "https://app.opengeni.ai/assets/index-1.js", lineno: 1 }],
+            },
+          },
+        ],
+      });
+      // A failed lazy-module load is counted by the first-party beacon only.
+      expect(
+        beforeSend?.({
+          uuid: "5",
+          event: "$exception",
+          properties: {
+            $exception_list: [
+              { type: "TypeError", value: "Failed to fetch dynamically imported module: x" },
+            ],
+          },
+        }),
+      ).toBeNull();
+      // Errors React boundaries catch are reported through the SDK, bounded.
+      const caught = new TypeError("render failed");
+      for (let index = 0; index < 12; index += 1)
+        reportCaughtExceptionToAnalytics(caught, "react_boundary");
+      const caughtReports = calls.filter(([method]) => method === "captureException");
+      expect(caughtReports).toHaveLength(10);
+      expect(caughtReports[0]).toEqual([
+        "captureException",
+        caught,
+        { exception_source: "react_boundary" },
+      ]);
       expect(projected?.properties.token).toBe("project-key");
       // Consented campaign tokens and referring domains survive the projection.
       expect(projected?.properties).toMatchObject({

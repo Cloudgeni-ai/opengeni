@@ -393,3 +393,45 @@ document has observed a chunk-load failure, any route failure it shows is
 presented as an update with Reload first, including the brief follow-on failure
 while the recovery reload is in flight. The raw error text is shown only in
 development builds; every build reports it, scrubbed, through the beacon above.
+
+## PostHog exceptions
+
+Where PostHog is configured and collection is allowed (the same consent as the
+events above), browser exceptions also reach PostHog Error Tracking as
+`$exception` events. `posthog-js` autocaptures uncaught errors and unhandled
+promise rejections (`capture_exceptions` in `src/lib/analytics.ts`, which
+overrides the project's autocapture setting; console errors are not captured).
+Errors React error boundaries catch never reach `window`, so the root's
+`onCaughtError` (`src/main.tsx`) hands them to
+`src/lib/caught-exception-analytics.ts`, which reports them with
+`exception_source: "react_boundary"`, at most ten per ten minutes. The SDK's
+exception autocapture code is bundled with the lazy analytics chunk
+(`posthog-js/dist/exception-autocapture`), because the page's script policy
+refuses PostHog's asset host.
+
+Every `$exception` event passes through `before_send`, which applies the
+general URL projection above (to `properties` and to the person properties
+`$set`/`$set_once` the SDK sends beside them, which carry the initial landing
+URLs) and then
+`src/lib/posthog-exception-scrubbing.ts`. What is kept: the exception type (a
+constructor-like name, otherwise `Error`), the mechanism (handled, synthetic,
+the SDK's mechanism name), stack frames as file, function, line and column, the
+severity, the bundle revision as `opengeni_revision`, and the content-free
+`page`/`section`/ID projection of the current route. What is removed: the
+message (`value` becomes `[redacted]`; `$exception_message` and
+`$exception_values` are dropped), source context lines, frame variables,
+exception steps, client fingerprints and any other exception property the SDK
+adds. Chrome puts the whole message into the stack and the SDK parses its
+second and later lines as frames, so a frame is kept only when it looks
+engine-rendered: an identifier-like function name, the SDK's `?` for an
+anonymous function, or none (a name with other spaces drops the frame), a line
+number, and a recognized location. Locations on
+the page's own origin keep the path of a script file, never a query or
+fragment; any other path, such as the page an inline script ran on, becomes
+`<origin>/<page>`. Another web origin becomes `<external>`, `data:` and `blob:`
+URLs keep only their scheme, browser-extension schemes keep their extension ID
+and script path, any other scheme drops the frame, and the only non-URL
+locations kept are `<anonymous>`, `native` and `[native code]`. PostHog groups issues from the
+kept type and frames. A
+projection that fails drops the event. Stale lazy-chunk failures, and every
+exception after one in the same document, are left to the first-party beacon.
