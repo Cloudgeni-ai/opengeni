@@ -23,6 +23,9 @@ export type HeldValue<T> = {
  * returns `undefined`, so the first load still shows its skeleton. A new
  * `scope` (another workspace, agent or app) drops the held value: only a
  * toggle within one scope keeps the old list.
+ *
+ * Pass a stable `value` (state or a memoized result): it is compared by
+ * identity, so a value rebuilt on every render never settles.
  */
 export function useHeldWhileLoading<T>(
   value: T | undefined,

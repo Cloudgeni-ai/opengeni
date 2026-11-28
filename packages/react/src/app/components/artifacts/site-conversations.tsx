@@ -116,11 +116,8 @@ export function SiteConversationsPanel({
     setPageKey(viewKey);
     setPage(null);
   }
-  const listed = useHeldWhileLoading(
-    page ?? (error ? null : undefined),
-    viewKey,
-    `${workspaceId}:${siteId}`,
-  );
+  // A failed load holds nothing: its notice shows, and a retry starts from the skeleton.
+  const listed = useHeldWhileLoading(page ?? undefined, viewKey, `${workspaceId}:${siteId}`);
   const shownPage = listed.value ?? null;
   const visibleSessions = shownPage
     ? [...new Map([...shownPage.pinned, ...shownPage.sessions].map((s) => [s.id, s])).values()]
@@ -204,7 +201,7 @@ export function SiteConversationsPanel({
           </Button>
         </ToolbarGroup>
       </Toolbar>
-      <ContentSwap swapKey={listed.key} stale={listed.stale}>
+      <ContentSwap swapKey={listed.key} stale={listed.stale && !error}>
         {error ? (
           <Notice tone="failed" live="assertive">
             Couldn’t load conversations. Try refreshing.
