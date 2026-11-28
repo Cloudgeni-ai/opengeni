@@ -5710,7 +5710,7 @@ describe("CUA desktop boundary", () => {
         }
       });
 
-      test("a batch whose actions all ran reports only its last as unknown when a field is wrong", async () => {
+      test("a field that reads wrong stops the batch before the key after it", async () => {
         const fixture = new DateFixture();
         fixture.afterRun = "0012-03-07T14:05";
         const { backend, observation } = await open(fixture);
@@ -5728,9 +5728,16 @@ describe("CUA desktop boundary", () => {
           expect(failure).toMatchObject({
             code: "driver_failed",
             dispatched: true,
-            message: `All 2 actions of the batch ran, but the date field ${field(observation).ref} reads "0012-03-07T14:05" instead of the value it was given; observe it and set its value again`,
-            details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+            message: `Action 1 of the batch ran, but the date field ${field(observation).ref} reads "0012-03-07T14:05" instead of the value it was given; observe it and set its value again. The batch stopped there`,
+            details: { batchActionsCompleted: 0, batchStoppedActionState: "outcome_unknown" },
           });
+          // The key was never sent.
+          const sent = fixture.calls.filter((call) => call.name === "run_steps") as unknown as {
+            args: { steps: { tool: string }[] };
+          }[];
+          expect(sent.flatMap((call) => call.args.steps.map((step) => step.tool))).not.toContain(
+            "press_key",
+          );
         } finally {
           await backend.close();
         }
@@ -5799,6 +5806,8 @@ describe("CUA desktop boundary", () => {
         /** Readings that still show the value from before the last write. */
         lateReads = 0;
         previous = "";
+        /** Whether the window also shows a Pay button after the field. */
+        button = false;
         async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
           const args = JSON.parse(argumentsJson) as Record<string, unknown>;
           const steps =
@@ -5827,6 +5836,17 @@ describe("CUA desktop boundary", () => {
               value: shown,
               actions: ["AXConfirm"],
             },
+            ...(this.button
+              ? [
+                  {
+                    element_index: 1,
+                    element_token: `${s}:1`,
+                    role: "AXButton",
+                    label: "Pay",
+                    actions: ["AXPress"],
+                  },
+                ]
+              : []),
           ];
           response.structuredJson = JSON.stringify(data);
           return response;
@@ -5894,7 +5914,67 @@ describe("CUA desktop boundary", () => {
         }
       });
 
-      test("in a batch, a field a later step may submit or clear is not judged", async () => {
+      test("in a batch, a field is judged before a later press that may submit it", async () => {
+        const fixture = new TextFixture();
+        fixture.button = true;
+        const { backend, observation } = await open(fixture);
+        try {
+          const field = observation.roots.find((node) => node.role === "textbox")!;
+          const pay = observation.roots.find((node) => node.name === "Pay")!;
+          const fillAndPay = (current: ComputerBackendObservation, value: string) => ({
+            ...command(current),
+            action: {
+              type: "batch" as const,
+              actions: [
+                { ...setText(current, value), locator: { kind: "ref" as const, ref: field.ref } },
+                {
+                  type: "semantic" as const,
+                  locator: { kind: "ref" as const, ref: pay.ref },
+                  action: "invoke" as const,
+                },
+              ] as never,
+            },
+          });
+          const runs = () =>
+            fixture.calls.filter((call) => call.name === "run_steps") as unknown as {
+              args: { steps: { tool: string; args: Record<string, unknown> }[] };
+            }[];
+          // The field does not take the value: the window is read before the
+          // press, and the press is never sent.
+          const failure = await backend
+            .dispatch(fillAndPay(observation, "312"))
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({
+            code: "driver_failed",
+            dispatched: true,
+            details: { batchActionsCompleted: 0, batchStoppedActionState: "outcome_unknown" },
+          });
+          expect(String((failure as Error).message)).toBe(
+            `Action 1 of the batch ran, but the text field ${field.ref} still reads empty: the app did not take the value; invoke the field and type the text instead. The batch stopped there`,
+          );
+          expect(String((failure as Error).message)).not.toContain("312");
+          expect(runs()).toHaveLength(1);
+          expect(runs()[0]!.args.steps.map((step) => step.tool)).toEqual(["set_value"]);
+          // It takes the value: the press runs in a call of its own, on the
+          // button's token from the reading taken midway.
+          fixture.takes = true;
+          const fresh = await backend.observe(observation.target.id);
+          const before = runs().length;
+          const after = await backend.dispatch(fillAndPay(fresh, "312"));
+          expect(after!.roots.find((node) => node.ref === field.ref)!.value).toBe("312");
+          const [fill, press] = runs().slice(before);
+          expect(fill!.args.steps.map((step) => step.tool)).toEqual(["set_value"]);
+          expect(press!.args.steps.map((step) => step.tool)).toEqual(["click"]);
+          const pressed = String(press!.args.steps[0]!.args.element_token);
+          const filled = String(fill!.args.steps[0]!.args.element_token);
+          expect(pressed.endsWith(":1")).toBe(true);
+          expect(pressed.split(":")[0]).not.toBe(filled.split(":")[0]);
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("in a batch, a field a later step may submit or clear is not judged after it", async () => {
         const fixture = new TextFixture();
         fixture.takes = true;
         const { backend, observation } = await open(fixture);
