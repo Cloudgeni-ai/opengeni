@@ -23,7 +23,11 @@ import {
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
-import { resolveOpenGeniLinkTarget, type OpenGeniLinkTarget } from "@opengeni/sdk";
+import {
+  openGeniConsolePath,
+  resolveOpenGeniLinkTarget,
+  type OpenGeniLinkTarget,
+} from "@opengeni/sdk";
 import { desktopAppReturnUrl } from "@opengeni/contracts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { InteractiveAnswerStore } from "@opengeni/react/interactive-answer-model";
@@ -270,7 +274,7 @@ function LiveSession(props: {
     () => ({ client: props.client, workspaceId: props.workspaceId, sessionId: props.sessionId }),
     [props.client, props.workspaceId, props.sessionId],
   );
-  const { account } = useAccount();
+  const { account, workspaceId: appWorkspaceId } = useAccount();
   const webBaseUrl = account?.baseUrl ?? null;
   // Agent images and previews resolve through this workspace; artifacts and Sites open in the app.
   const renderMarkdown = useMemo(() => {
@@ -280,6 +284,15 @@ function LiveSession(props: {
         router.push(
           appSessionPath(target.sessionId, target.workspaceId ?? props.workspaceId, null),
         );
+        return;
+      }
+      // A meeting opens on the meeting screen, which shows the app's workspace;
+      // a chat from another workspace opens it on the web, in that workspace.
+      if (target.kind === "meeting") {
+        const workspace = target.workspaceId ?? props.workspaceId;
+        const path = openGeniConsolePath(target, workspace);
+        if (workspace === appWorkspaceId) router.push(`/meeting/${target.recordingId}`);
+        else if (webBaseUrl && path) openOnWeb(webBaseUrl, path);
         return;
       }
       // Artifacts, Sites and files open in the app's viewer.
@@ -324,7 +337,7 @@ function LiveSession(props: {
         onOpenLink: openLink,
       }),
     });
-  }, [props.client, props.workspaceId, props.sessionId, t]);
+  }, [props.client, props.workspaceId, props.sessionId, t, appWorkspaceId, webBaseUrl]);
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);

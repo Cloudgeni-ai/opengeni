@@ -50,8 +50,8 @@ export type OpenGeniHostLink = {
 /**
  * Draw a host-owned link in agent Markdown. Return `undefined` to keep the
  * default rendering (web links open in a new tab; other schemes are shown as
- * unavailable). Opengeni object links (`artifact:`, `sandbox:`, `session:`) never reach
- * it; use {@link OpenGeniLinkResolver} for those.
+ * unavailable). Opengeni object links (`artifact:`, `sandbox:`, `session:`, `meeting:`)
+ * never reach it; use {@link OpenGeniLinkResolver} for those.
  */
 export type OpenGeniLinkRenderer = (link: OpenGeniHostLink) => ReactNode | undefined;
 
@@ -95,7 +95,10 @@ export function chainLinkResolvers(
 
 /**
  * Resolve Opengeni object links (`artifact:`, `sandbox:`, editable artifacts,
- * Sites) for every {@link Markdown} body below. An inner provider is asked
+ * Sites, `session:` chats, `meeting:` meetings) for every {@link Markdown}
+ * body below. A `meeting:` target names no workspace: open it in the
+ * conversation's (`{ kind: "meeting", recordingId, workspaceId: null }`), which
+ * shows every meeting the agent found there. An inner provider is asked
  * before an outer one, so a host can override a single kind and keep defaults.
  * `renderLink` draws the host's own links (its scheme, in-app paths, web
  * URLs) in the same bodies, inner provider first.

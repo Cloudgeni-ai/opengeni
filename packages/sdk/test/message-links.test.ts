@@ -141,4 +141,30 @@ describe("parseOpenGeniLink", () => {
       expect(isReservedOpenGeniLink(href)).toBe(true);
     }
   });
+
+  test("a meeting reference names a recorded meeting, opened in the conversation's workspace", () => {
+    const upper = UUID.toUpperCase();
+    expect(parseOpenGeniLink(`meeting:${upper}`)).toEqual({
+      kind: "meeting",
+      recordingId: UUID,
+      workspaceId: null,
+    });
+    expect(parseOpenGeniLink(`MEETING:${UUID}`)).toEqual(parseOpenGeniLink(`meeting:${UUID}`));
+    expect(openGeniConsolePath(parseOpenGeniLink(`meeting:${UUID}`)!, WS)).toBe(
+      `/workspaces/${WS}/meetings/${UUID}`,
+    );
+    expect(
+      openGeniConsolePath({ kind: "meeting", recordingId: UUID, workspaceId: "other" }, WS),
+    ).toBe(`/workspaces/other/meetings/${UUID}`);
+    for (const href of [
+      "meeting:",
+      "meeting:not-an-id",
+      `meeting:${UUID}/transcript`,
+      `meeting:${UUID}x`,
+    ]) {
+      expect(parseOpenGeniLink(href)).toBeNull();
+      // A malformed reference is still reserved: it never navigates on the host origin.
+      expect(isReservedOpenGeniLink(href)).toBe(true);
+    }
+  });
 });

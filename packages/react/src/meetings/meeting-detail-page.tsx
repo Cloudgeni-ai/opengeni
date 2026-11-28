@@ -39,6 +39,7 @@ import type {
   RecordingTranscriptVersion,
   RecordingTranscriptionModel,
 } from "@opengeni/contracts";
+import { meetingSharingDecision, meetingSharingTargets } from "@opengeni/contracts";
 import {
   activeSegmentIndex,
   defaultSpeakerName,
@@ -538,7 +539,8 @@ export type MeetingShareTarget = { id: string; name: string };
 /**
  * Who can open a meeting: Only me, or one workspace. A meeting recorded in
  * the owner's Personal workspace can be shared with any of their team
- * workspaces; one a team workspace stores, only with that workspace.
+ * workspaces; one a team workspace stores, only with that workspace. Agents
+ * decide it the same way (`meetingSharingTargets`).
  */
 export function meetingShareTargets(
   recording: Pick<
@@ -549,34 +551,21 @@ export function meetingShareTargets(
   fallbackName: string,
 ): { targets: MeetingShareTarget[]; current: string | null } {
   const storing = recording.workspaceId;
-  const stored = workspaces?.find((workspace) => workspace.id === storing);
-  const personal = stored?.personal === true;
-  const targets = personal
-    ? (workspaces ?? [])
-        .filter(
-          (workspace) =>
-            workspace.personal !== true &&
-            // Where it is shared stays listed, so the menu says so.
-            (workspace.shareable !== false || workspace.id === recording.sharedWorkspaceId),
-        )
-        .map(({ id, name }) => ({ id, name }))
-    : [
-        {
-          id: storing,
-          name:
-            workspaces === undefined
-              ? fallbackName
-              : (stored?.name ?? recording.sourceWorkspace?.name ?? fallbackName),
-        },
-      ];
-  // Shared in the Personal workspace that stores it, or with a workspace its
-  // owner has left, nobody else sees it.
-  const sharedWith = recording.sharedWorkspaceId ?? (personal ? null : storing);
-  const current =
-    recording.visibility !== "private" && targets.some((target) => target.id === sharedWith)
-      ? sharedWith
-      : null;
-  return { targets, current };
+  const { targets, current } = meetingSharingTargets(recording, workspaces);
+  return {
+    targets: targets.map((id) => ({
+      id,
+      name:
+        id === storing
+          ? workspaces === undefined
+            ? fallbackName
+            : (workspaces.find((workspace) => workspace.id === id)?.name ??
+              recording.sourceWorkspace?.name ??
+              fallbackName)
+          : (workspaces?.find((workspace) => workspace.id === id)?.name ?? fallbackName),
+    })),
+    current,
+  };
 }
 
 function ShareMenu({
@@ -1466,37 +1455,31 @@ function MeetingDetailPageForRecording({
         (share.targets.length > 0 || recording.visibility !== "private"));
   const changeSharing = async (target: MeetingShareTarget | null) => {
     const failure = msg("meetings.detailPage.couldnTChangeWhoCan");
-    const storing = recording.workspaceId;
     try {
+      // Decided as agents decide it, so both send the same request.
+      const decision = meetingSharingDecision({
+        target: target?.id ?? null,
+        meeting: recording,
+        viewingWorkspaceId: workspaceId,
+        workspaces: reachWorkspaces,
+      });
+      if (!decision.ok) {
+        toast.error(failure);
+        return;
+      }
       if (target === null) {
-        // Only me again: it keeps working where the owner is looking from.
-        const keepHere =
-          workspaceId !== storing &&
-          recording.reachWorkspaceIds !== undefined &&
-          recording.reachWorkspaceIds !== null &&
-          !recording.reachWorkspaceIds.includes(workspaceId) &&
-          reachWorkspaces?.find((workspace) => workspace.id === workspaceId)?.personal !== true;
-        await meeting.update({
-          visibility: "private",
-          ...(keepHere
-            ? { reachWorkspaceIds: [...(recording.reachWorkspaceIds ?? []), workspaceId] }
-            : {}),
-        });
+        await meeting.update(decision.request);
         toast.success(msg("meetings.detailPage.onlyYouCanSeeThis"));
         return;
       }
-      const request =
-        target.id === storing && !recording.sourceWorkspace
-          ? { visibility: "workspace" as const }
-          : { visibility: "workspace" as const, sharedWorkspaceId: target.id };
       // Shared with another workspace, it shows there, and no longer here.
-      if (workspaceId !== storing && target.id !== workspaceId) {
-        await client.updateRecording(workspaceId, recording.id, request);
+      if (decision.leavesHere) {
+        await client.updateRecording(workspaceId, recording.id, decision.request);
         toast.success(msg("meetings.detailPage.sharedWithWorkspace", { workspace: target.name }));
         onBack();
         return;
       }
-      await meeting.update(request);
+      await meeting.update(decision.request);
       toast.success(msg("meetings.detailPage.sharedWithWorkspace", { workspace: target.name }));
     } catch (error) {
       toast.error(failure, { description: errorText(error) });

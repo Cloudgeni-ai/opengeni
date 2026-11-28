@@ -1038,6 +1038,39 @@ directory), the `notepad` and the `notes` with their `revision`. The
 newer save answers `notes_changed`. The meeting page shows notes an agent's
 chat saved as "Written by an agent".
 
+Every meeting `meetings_search` and `meeting_read` return carries
+`link: "meeting:<id>"`, and agents link a meeting for the person as
+`[its title](meeting:<id>)`. The link names no workspace: it opens in the
+conversation's workspace, whose meeting page shows the same meetings the
+tools reach there (the person's own Only me meeting stored in another
+workspace of the organization, where it works here, and one shared here from
+a Personal workspace). The web app opens
+`/workspaces/:workspaceId/meetings/:recordingId` in place, an embed opens that
+page beside the host, and the phone app opens its meeting screen (or the web
+page, for a chat in another workspace than the app's). A host maps it through
+its `resolveLink` as `{ kind: "meeting", recordingId, workspaceId: null }`;
+where nothing resolves it, the link shows as its plain title.
+
+The `meeting_update` tool makes the changes people most often ask for in
+chat, as the person would on the meeting page and through the same data
+paths as `PATCH …/recordings/:recordingId` and `PATCH …/speakers`: a `title`
+(a person's name, which no calendar event or conversation replaces), a
+`visibility` of `workspace` or `only_me`, and `speakers` named by their
+`meeting_read` labels with a plain `name` or a directory `personId`. Naming a
+suggested speaker with its suggested person (by id, or by the same name)
+confirms the suggestion. Anyone who can see the meeting may rename it and
+name its speakers; only its owner shares it or makes it Only me. `workspace`
+shares it with the conversation's workspace, the way the page's share menu
+there does: a meeting stored there is shared there; one stored in the owner's
+Personal workspace is shared with this team workspace; one another team
+workspace stores can be shared only from there (`not_shareable`), and in the
+Personal workspace, where nobody else would see it, a private meeting answers
+`not_shareable` too. `only_me` keeps it working in the conversation's
+workspace. A meeting shared here to read answers `read_only`, and the
+meeting-summary chat answers `not_allowed`. Deleting, re-transcribing,
+switching versions, the notepad, remembering voices and retention stay on the
+page.
+
 ### Mentions in the notes
 
 The `notes` may name the meeting's speakers and people with Markdown links of

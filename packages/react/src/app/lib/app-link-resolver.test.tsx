@@ -37,12 +37,13 @@ async function resolverIn(options: {
   preset: SessionUiPreset;
   host?: OpenGeniLinkResolver;
   workspace?: boolean;
+  openMeeting?: (workspaceId: string, recordingId: string) => void;
 }) {
   const opened: string[] = [];
   const captured: { current: OpenGeniLinkResolver | null } = { current: null };
   function Capture() {
     const app = useAppLinkResolver();
-    const workspace = useWorkspaceAppLinkResolver(WORKSPACE);
+    const workspace = useWorkspaceAppLinkResolver(WORKSPACE, undefined, options.openMeeting);
     captured.current = options.workspace ? workspace : app;
     return (
       <Markdown resolveLink={captured.current}>
@@ -134,5 +135,29 @@ describe("useAppLinkResolver", () => {
     expect(opened).toEqual([
       `/workspaces/${WORKSPACE}/artifacts/editable/0123456789abcdef0123456789abcdef`,
     ]);
+  });
+
+  test("a meeting link opens the meeting page in the chat's workspace, in place on the web", async () => {
+    const meeting = parseOpenGeniLink(`meeting:${SITE}`)!;
+    const path = `/workspaces/${WORKSPACE}/meetings/${SITE}`;
+    const inPlace: string[] = [];
+    const web = await resolverIn({
+      embedded: false,
+      preset: "app",
+      workspace: true,
+      openMeeting: (workspaceId, recordingId) => void inPlace.push(`${workspaceId}/${recordingId}`),
+    });
+    const resolution = web.resolve(meeting);
+    expect(resolution?.href).toBe(path);
+    resolution?.open?.();
+    expect(inPlace).toEqual([`${WORKSPACE}/${SITE}`]);
+    // Without in-place navigation it is still the meeting page.
+    expect(
+      (await resolverIn({ embedded: false, preset: "app", workspace: true })).resolve(meeting),
+    ).toEqual({ href: path });
+    // An embed opens the web app's meeting page beside the host.
+    const embed = await resolverIn({ embedded: true, preset: "embed", workspace: true });
+    await embed.resolve(meeting)?.open?.();
+    expect(embed.opened).toEqual([path]);
   });
 });
