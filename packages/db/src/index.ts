@@ -1348,8 +1348,11 @@ import {
 } from "./session-realtime-ledger";
 import {
   mirrorSessionRealtimeContextInTransaction,
+  mirrorRealtimeToolApprovalRequestsInTransaction,
+  realtimeToolApprovalsFromRequiresAction,
   renderRealtimeHumanInputRequestContext,
   renderRealtimeHumanInputResponseContext,
+  renderRealtimeToolApprovalResponseContext,
 } from "./session-realtime-mirror";
 import {
   listSessionRealtimeContinuityEntriesInTransaction,
@@ -93574,6 +93577,22 @@ export async function applySessionTurnSettlement(
           now,
         });
       }
+      // A tool call waiting for the person's approval reaches the voice the
+      // same way: the card's own title, once per approval.
+      for (const event of inserted) {
+        if (event.type !== "session.requiresAction") continue;
+        await mirrorRealtimeToolApprovalRequestsInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          approvals: realtimeToolApprovalsFromRequiresAction(
+            sessionEventPayloadRecord(event.payload, event.payloadCodecVersion),
+          ),
+          sourceEventId: event.id,
+          now,
+        });
+      }
       const terminalHumanInputById = new Map(
         terminalHumanInputRows.map((request) => [request.id, request]),
       );
@@ -99921,6 +99940,18 @@ export async function acceptSessionApprovalDecision(
         if (!event) throw new Error("Failed to append approval decision");
         const approvalDecision = payload.decision;
         if (approvalDecision === "approve" || approvalDecision === "reject") {
+          const outcome = approvalDecision === "approve" ? "approved" : "declined";
+          await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sourceKind: "tool_approval_response",
+            sourceId: event.id,
+            turnId: liveTurn.id,
+            channel: "speakable",
+            text: renderRealtimeToolApprovalResponseContext({ approvalId, outcome }),
+            payload: { approvalId, outcome, sourceEventId: event.id },
+          });
           await enqueueChildRequiresActionResolvedOutboxTx(
             tx as unknown as Database,
             input.workspaceId,

@@ -25,7 +25,9 @@ import {
   registerSessionWorkflowWakeInTransaction,
 } from "./session-control";
 import {
+  loadPendingRealtimeToolApprovalsInTransaction,
   mirrorSessionRealtimeContextInTransaction,
+  mirrorRealtimeToolApprovalRequestsInTransaction,
   renderRealtimeAgentCallContext,
   renderRealtimeHumanInputRequestContext,
 } from "./session-realtime-mirror";
@@ -675,6 +677,27 @@ async function publishStartedRealtimeMode(
       },
       now,
     });
+  }
+  // Tool calls already waiting for the person's approval, as their cards show.
+  if (session.activeTurnId) {
+    const pendingApprovals = await loadPendingRealtimeToolApprovalsInTransaction(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: session.activeTurnId,
+    });
+    if (pendingApprovals) {
+      await mirrorRealtimeToolApprovalRequestsInTransaction(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        realtimeId: row.id,
+        turnId: session.activeTurnId,
+        approvals: pendingApprovals.approvals,
+        sourceEventId: pendingApprovals.sourceEventId,
+        trigger: "realtime_start",
+        now,
+      });
+    }
   }
   if (!row.incomingCallId) await mirrorAnsweredCall();
   return {

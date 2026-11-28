@@ -4,6 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import {
+  acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
   addSessionSystemUpdate,
   activateSessionRealtimeConnectionInTransaction,
@@ -384,6 +385,52 @@ async function freezeDelegatedHumanInput(
   });
   expect(settlement.action).toBe("settled");
   return { ...delegated, requestId, questions };
+}
+
+const sendEmailApproval = {
+  id: "call-send-email",
+  name: "mail__send_email",
+  arguments: { to: "ola@example.com" },
+  rawItem: { callId: "call-send-email", name: "mail__send_email" },
+  display: {
+    toolName: "send_email",
+    title: "Send an email to ola@example.com",
+    connector: "Mail",
+    accountLabel: "work@example.com",
+  },
+};
+const removeRowsApproval = {
+  id: "call-remove-rows",
+  name: "crm__bulkRemove_rows",
+  arguments: { ids: [1, 2, 3] },
+  rawItem: { callId: "call-remove-rows", name: "crm__bulkRemove_rows" },
+};
+
+/** Pause the claimed turn on tool approvals, as the worker does. */
+async function pauseForApprovals(
+  value: Fixture,
+  turn: { id: string; triggerEventId: string },
+  attemptId: string,
+  approvals: unknown[],
+) {
+  const settlement = await applySessionTurnSettlement(client.db, value.owner.workspaceId, {
+    sessionId: value.owner.sessionId,
+    turnId: turn.id,
+    triggerEventId: turn.triggerEventId,
+    attemptId,
+    turnStatus: "requires_action",
+    sessionStatus: "requires_action",
+    activeTurnId: turn.id,
+    runState: {
+      serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+      pendingApprovals: approvals,
+    },
+    events: [
+      { type: "session.requiresAction", payload: { approvals } },
+      { type: "session.status.changed", payload: { status: "requires_action" } },
+    ],
+  });
+  expect(settlement.action).toBe("settled");
 }
 
 describe("session realtime ledger", () => {
@@ -1810,6 +1857,163 @@ describe("session realtime ledger", () => {
     });
     expect(response?.text).toContain("<value>Staging</value>");
     expect(response?.text).toContain("do not delegate it again");
+  });
+
+  test("tells the voice about a tool call waiting for approval, once, and about the decision", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const delegated = await admitAndClaimDelegation(value, connection.claimed.connection);
+    await pauseForApprovals(value, delegated.turn, delegated.attemptId, [
+      sendEmailApproval,
+      removeRowsApproval,
+    ]);
+
+    const sync = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+      }),
+    );
+    const requests = sync.outbound.filter(
+      (entry) => entry.payload.source === "tool_approval_request",
+    );
+    expect(requests.map((entry) => entry.payload.approvalId)).toEqual([
+      "call-send-email",
+      "call-remove-rows",
+    ]);
+    expect(requests[0]).toMatchObject({
+      kind: "session_update",
+      delegationItemId: null,
+      payload: {
+        channel: "speakable",
+        status: "waiting_for_user_approval",
+        sourceTurnId: delegated.turn.id,
+      },
+    });
+    expect(requests[0]?.text).toBe(
+      [
+        "<session_tool_approval_request>",
+        "  <status>waiting_for_user_approval</status>",
+        "  <id>call-send-email</id>",
+        "  <action>Send an email to ola@example.com</action>",
+        "  <where>Mail · work@example.com</where>",
+        "  <instruction>This is prepared but has not run: it waits for the user to approve it in the chat. Tell the user now, briefly and in their language, what it is and that they need to open the chat and approve it. It cannot be approved by voice.</instruction>",
+        "</session_tool_approval_request>",
+      ].join("\n"),
+    );
+    // Without a card title, the tool's name in words, as the inbox shows it.
+    expect(requests[1]?.text).toContain("<action>Bulk remove rows</action>");
+    expect(requests[1]?.text).not.toContain("<where>");
+    const lastRequestSequence = Math.max(...requests.map((entry) => entry.sequence));
+
+    const decided = await acceptSessionApprovalDecision(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      sessionId: value.owner.sessionId,
+      subjectId: value.owner.ownerSubjectId,
+      payload: { approvalId: "call-send-email", decision: "approve" },
+    });
+    expect(decided.action).toBe("accepted");
+    if (decided.action !== "accepted") throw new Error("Approval was not accepted");
+    // The turn resumes and pauses again on the approval still waiting: the
+    // voice already knows about it, so nothing new is added.
+    const resumeAttemptId = crypto.randomUUID();
+    const resumed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId: value.owner.sessionId,
+      workflowId: `session-${value.owner.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: resumeAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "approval", triggerEventId: decided.event.id },
+    });
+    if (resumed.action !== "claimed") {
+      throw new Error(`Approval resume was not claimable: ${resumed.reason}`);
+    }
+    await pauseForApprovals(value, resumed.turn, resumeAttemptId, [removeRowsApproval]);
+    const declined = await acceptSessionApprovalDecision(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      sessionId: value.owner.sessionId,
+      subjectId: value.owner.ownerSubjectId,
+      payload: { approvalId: "call-remove-rows", decision: "reject" },
+    });
+    expect(declined.action).toBe("accepted");
+
+    const after = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(value),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+        clientAckThroughSequence: lastRequestSequence,
+      }),
+    );
+    expect(
+      after.outbound.some(
+        (entry) =>
+          entry.payload.source === "tool_approval_request" && entry.sequence > lastRequestSequence,
+      ),
+    ).toBe(false);
+    const responses = after.outbound.filter(
+      (entry) => entry.payload.source === "tool_approval_response",
+    );
+    expect(responses.map((entry) => entry.payload)).toMatchObject([
+      { channel: "speakable", approvalId: "call-send-email", outcome: "approved" },
+      { channel: "speakable", approvalId: "call-remove-rows", outcome: "declined" },
+    ]);
+    expect(responses[0]?.text).toContain("<outcome>approved</outcome>");
+    expect(responses[0]?.text).toContain("Do not say it is done until a later update confirms it");
+    expect(responses[1]?.text).toContain("will not run as prepared");
+  });
+
+  test("tells a starting call about tool calls still waiting for approval", async () => {
+    const value = await fixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const delegated = await admitAndClaimDelegation(value, connection.claimed.connection);
+    await endMode(value);
+    await pauseForApprovals(value, delegated.turn, delegated.attemptId, [
+      sendEmailApproval,
+      removeRowsApproval,
+    ]);
+    // Decided before the next call: no longer waiting, so not announced.
+    const decided = await acceptSessionApprovalDecision(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      sessionId: value.owner.sessionId,
+      subjectId: value.owner.ownerSubjectId,
+      payload: { approvalId: "call-send-email", decision: "approve" },
+    });
+    expect(decided.action).toBe("accepted");
+
+    const resumed = await beginReplacementMode(value);
+    const resumedConnection = await claimInitial(resumed);
+    await complete(resumed, resumedConnection.claimed.connection);
+    await proveProviderStarted(resumed, resumedConnection.claimed.connection);
+    const sync = await transaction(resumed.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(resumed),
+        connectionId: resumedConnection.claimed.connection.id,
+        connectionEpoch: resumedConnection.claimed.connection.connectionEpoch,
+      }),
+    );
+    const requests = sync.outbound.filter(
+      (entry) => entry.payload.source === "tool_approval_request",
+    );
+    expect(requests.map((entry) => entry.payload)).toMatchObject([
+      {
+        channel: "speakable",
+        approvalId: "call-remove-rows",
+        trigger: "realtime_start",
+        sourceTurnId: delegated.turn.id,
+      },
+    ]);
+    expect(sync.outbound.some((entry) => entry.payload.source === "tool_approval_response")).toBe(
+      false,
+    );
   });
 
   test("a conversational answer delegates normally and supersedes the waiting question", async () => {
