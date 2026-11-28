@@ -368,7 +368,9 @@ function requestedPreviewTags(header: string | undefined): string[] {
 const EDITABLE_ARTIFACT_PREVIEW_HEADERS = Object.freeze({
   ...USER_CONTENT_SECURITY_HEADERS,
   "Content-Security-Policy": "default-src 'none'; sandbox",
-  "cache-control": "private, max-age=60",
+  // Kept, but revalidated on every use: an edit shows at once, and an
+  // unchanged picture costs a 304.
+  "cache-control": "private, no-cache",
   "content-type": "image/svg+xml; charset=utf-8",
   vary: "Authorization, Cookie",
 });

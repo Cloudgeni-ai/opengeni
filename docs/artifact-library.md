@@ -216,13 +216,15 @@ focus. Images show their own pixels. A Site's card renders its published HTML
 (`getWorkspaceArtifactHtml`) as it looks when opened: laid out 1024 px wide and
 scaled into the card, from the preview document of `@opengeni/sdk/site-preview`.
 The page's own scripts run, so apps drawn by script and styled from a CDN show
-up (public scripts, styles, fonts and images may load), but only in the HTML
-frame host's opaque-origin frame with
-`sandbox="allow-scripts"` (no same-origin, forms, popups or navigation), and the
-document's first element is `HTML_FRAME_PREVIEW_POLICY`: `connect-src 'none'`
-(no fetch, XHR, WebSocket or beacon), `frame-src 'none'`, `form-action 'none'`.
-A `<meta>` refresh is removed, and a page that navigates itself away after
-reporting is dropped for the glyph. There is no Site bridge: the Site client
+up, but only in the HTML frame host's opaque-origin frame with
+`sandbox="allow-scripts"` (no same-origin, forms, popups or navigation of the
+console), and the document's first element is `HTML_FRAME_PREVIEW_POLICY`:
+`connect-src 'none'` (no fetch, XHR, WebSocket or beacon), `frame-src 'none'`,
+`form-action 'none'`. Outbound requests are reduced, not prevented: public
+scripts, styles, fonts and images load as when the Site is opened, so viewing
+the library can reach the hosts a Site uses (never with workspace credentials).
+A `<meta>` refresh is removed, and a page that navigates itself away reports
+leaving (`pagehide`) and is dropped for the glyph. There is no Site bridge: the Site client
 script is removed (however it is tagged) and
 `createOpenGeniSiteClient` is a stand-in whose calls never settle, so a card
 reaches no workspace data, tools, AI or credentials and an app shows its loading
@@ -240,16 +242,17 @@ sheet or slide: `GET /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/
 (`artifacts:read`, authorized like opening it) returns an SVG the API draws from
 bounded kernel queries of the current head (`preview-picture.ts` in core). It
 holds only shapes and escaped text, is shown as an `<img>`, and is served with
-`Content-Security-Policy: default-src 'none'; sandbox`, `nosniff`, a 60 s
-private cache and `Vary: Authorization, Cookie`. Its `ETag` is the head's state
+`Content-Security-Policy: default-src 'none'; sandbox`, `nosniff`,
+`private, no-cache` (kept, but revalidated on every use, so an edit shows at
+once) and `Vary: Authorization, Cookie`. Its `ETag` is the head's state
 hash and the drawing's version; a matching `If-None-Match` (weak or in a list)
 is answered 304 from the artifact's metadata, before anything is reconstructed.
-The URL is stable, so browsers revalidate it, and the web library requests at
-most four pictures at a time. A card that cannot get one, or gets one that
+The URL is stable, so browsers revalidate it, and the web and mobile libraries
+request at most four pictures at a time. A card that cannot get one, or gets one that
 doesn't draw, keeps its glyph. Other types show their type glyph (and a file's extension).
-The iOS app draws Site previews the same way in an incognito web view, captures
+The mobile app draws Site previews the same way in an isolated web view (incognito on iOS, third-party cookies off on Android), captures
 each once per version and theme, and caches the image on the device, replacing
-the Site's earlier versions. Sign-out deletes the images, empties the in-memory
+the Site's earlier versions (a page that never reports is tried again later). Sign-out deletes the images, empties the in-memory
 page and picture caches, and discards captures still in flight.
 Previews load only near the viewport. A Gallery | List toggle in the toolbar
 switches to flat rows and is remembered in the browser

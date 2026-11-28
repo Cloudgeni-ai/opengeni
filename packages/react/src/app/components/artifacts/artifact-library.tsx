@@ -627,8 +627,8 @@ export function ArtifactRow({
  *
  * Without a frame host, the same preview document runs in a srcdoc frame
  * with the same sandbox (scripts only, opaque origin), as a Site's own
- * viewer does. A page that navigates itself away is dropped back to the
- * glyph. Live frames run only while their card is near the viewport.
+ * viewer does. A page that navigates itself away (it reports leaving) is
+ * dropped back to the glyph. Live frames run only while their card is near the viewport.
  */
 
 // Display HTML per published version, shared across remounts (tabs, search).
@@ -856,11 +856,6 @@ function SiteStillFrame({
     html: documentHtml,
     mode: "interactive",
   });
-  // The page reports a while after its own load, so a load after the report
-  // is the page navigating itself away.
-  const onFrameLoad = () => {
-    if (settledRef.current) onLeftRef.current();
-  };
   // The frame is mounted once its box is measured; its time runs from then.
   const mounted = fit !== null && slotGranted && theme !== null;
   useEffect(() => {
@@ -870,7 +865,12 @@ function SiteStillFrame({
       const frameWindow = frameRef.current?.contentWindow;
       if (!frameWindow || event.source !== frameWindow || event.origin !== "null") return;
       const painted = sitePreviewPainted(event.data);
-      if (painted !== null) settle(painted, true);
+      if (painted === null) return;
+      // After its report, a page only says "not painted" when it leaves
+      // (navigates itself away): drop it.
+      if (settledRef.current) {
+        if (!painted) onLeftRef.current();
+      } else settle(painted, true);
     };
     window.addEventListener("message", receive);
     const timer = setTimeout(() => settle(false, false), SITE_PREVIEW_TIMEOUT_MS);
@@ -895,7 +895,6 @@ function SiteStillFrame({
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
           src={frameHostSrc}
-          onLoad={onFrameLoad}
           tabIndex={-1}
           aria-hidden
           className={SITE_STILL_FRAME_CLASS}
@@ -909,7 +908,6 @@ function SiteStillFrame({
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
           srcDoc={documentHtml}
-          onLoad={onFrameLoad}
           tabIndex={-1}
           aria-hidden
           className={SITE_STILL_FRAME_CLASS}

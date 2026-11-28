@@ -53,6 +53,7 @@ function previewScript(theme: "light" | "dark" | undefined): string {
     // Fixed in place: a real client loaded anyway can't replace the stand-in.
     `Object.defineProperty(globalThis,"createOpenGeniSiteClient",{configurable:false,get:()=>()=>p,set:()=>{}});`,
     `let done=false;`,
+    `const post=(m)=>{try{const n=window.ReactNativeWebView;if(n)n.postMessage(JSON.stringify(m));else parent.postMessage(m,"*");}catch{}};`,
     `const blank=/^(transparent|rgba\\(0, 0, 0, 0\\)|rgb\\(255, 255, 255\\))$/;`,
     `const painted=()=>{try{const b=document.body;if(!b)return false;`,
     // Only a loading message (an app waiting on the stand-in) isn't a picture.
@@ -71,7 +72,9 @@ function previewScript(theme: "light" | "dark" | undefined): string {
     `const clear=/^(transparent|rgba\\(0, 0, 0, 0\\))$/;`,
     `const canvas=()=>{try{const r=document.documentElement;if([r,document.body].every((e)=>e&&clear.test(getComputedStyle(e).backgroundColor)))r.style.backgroundColor="Canvas";}catch{}};`,
     `const report=()=>{if(done)return;done=true;const m={type:${JSON.stringify(SITE_PREVIEW_PAINTED_MESSAGE)},painted:painted()};if(m.painted)canvas();`,
-    `try{const n=window.ReactNativeWebView;if(n)n.postMessage(JSON.stringify(m));else parent.postMessage(m,"*");}catch{}};`,
+    `post(m);};`,
+    // A page that leaves (navigates itself away) says so, so its host drops it.
+    `addEventListener("pagehide",()=>post({type:${JSON.stringify(SITE_PREVIEW_PAINTED_MESSAGE)},painted:false,left:true}));`,
     `const settle=()=>{const f=document.fonts&&document.fonts.ready;`,
     `Promise.race([f||Promise.resolve(),new Promise((r)=>setTimeout(r,1500))]).then(()=>setTimeout(report,${SITE_PREVIEW_SETTLE_MS}),()=>setTimeout(report,${SITE_PREVIEW_SETTLE_MS}));};`,
     `if(document.readyState==="complete")settle();else addEventListener("load",settle,{once:true});`,
@@ -99,6 +102,8 @@ export function sitePreviewDocument(
   // The real client would wait for a bridge that never comes; the stand-in
   // defined ahead of the page takes its place. Comments and scripts are
   // consumed whole, so examples inside them stay literal.
+  // A Site that picks its own theme keeps it.
+  const ownTheme = /<html\b[^>]*\sdata-og-theme\s*=/i.test(html);
   const page = resolveSiteUiStylesheet(html)
     .replace(/<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, (tag) =>
       SITE_CLIENT_SCRIPT_TAG.test(tag) ? "" : tag,
@@ -106,7 +111,8 @@ export function sitePreviewDocument(
     .replace(META_REFRESH, "");
   return (
     `<!doctype html><meta http-equiv="Content-Security-Policy" content="${HTML_FRAME_PREVIEW_POLICY}">` +
-    `<script>${previewScript(options.theme)}</script>` +
+    `<script>${previewScript(ownTheme ? undefined : options.theme)}</script>` +
+    `<meta name="viewport" content="width=${SITE_PREVIEW_WIDTH}">` +
     `<style>html,body{overflow:hidden!important;scrollbar-width:none}::-webkit-scrollbar{display:none}</style>` +
     page
   );

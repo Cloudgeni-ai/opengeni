@@ -318,13 +318,14 @@ const safePreviewId = (value: string) => value.replace(/[^A-Za-z0-9_-]/gu, "").s
 
 /** The start every captured preview of one Site shares, whatever its version. */
 export function sitePreviewFilePrefix(workspaceId: string, siteId: string): string {
-  return `v2-${safePreviewId(workspaceId)}-${safePreviewId(siteId)}-`;
+  return `v2~${safePreviewId(workspaceId)}~${safePreviewId(siteId)}~`;
 }
 
 /**
  * The file a Site version's captured preview is kept in on the device: one per
  * workspace, Site, version and theme (a version's page never changes). Ids
- * are reduced to safe characters, so a file name never leaves its folder.
+ * are reduced to safe characters, so a file name never leaves its folder, and
+ * `~` (never in an id) separates them.
  */
 export function sitePreviewFileName(
   workspaceId: string,
@@ -332,5 +333,5 @@ export function sitePreviewFileName(
   versionId: string,
   scheme: "light" | "dark",
 ): string {
-  return `${sitePreviewFilePrefix(workspaceId, siteId)}${safePreviewId(versionId)}-${scheme}.jpg`;
+  return `${sitePreviewFilePrefix(workspaceId, siteId)}${safePreviewId(versionId)}~${scheme}.jpg`;
 }

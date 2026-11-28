@@ -47,9 +47,10 @@ export function onForgetArtifactPreviews(forget: () => void): () => void {
 }
 
 /**
- * Keep a captured preview under `name`, replacing earlier versions of the same
- * Site (files starting with `replaces`). Returns null when the capture belongs
- * to an earlier generation (the account signed out meanwhile).
+ * Keep a captured preview under `name`, replacing the same Site's other
+ * versions (files starting with `replaces`; the version's other theme stays).
+ * Returns null when the capture belongs to an earlier generation (the account
+ * signed out meanwhile).
  */
 export function keepSitePreview(
   name: string,
@@ -69,11 +70,13 @@ export function keepSitePreview(
     const folder = previewFolder();
     if (!folder.exists) folder.create({ intermediates: true, idempotent: true });
     if (options.replaces) {
+      // `<prefix><version>~<theme>.jpg`: this version's files share `<prefix><version>~`.
+      const version = name.slice(0, name.lastIndexOf("~") + 1);
       for (const entry of folder.list()) {
         if (
           entry instanceof File &&
-          entry.name !== name &&
-          entry.name.startsWith(options.replaces)
+          entry.name.startsWith(options.replaces) &&
+          !entry.name.startsWith(version)
         ) {
           for (const [known, knownUri] of sitePreviews)
             if (knownUri === entry.uri) sitePreviews.delete(known);

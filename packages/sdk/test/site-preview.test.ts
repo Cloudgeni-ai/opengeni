@@ -22,6 +22,7 @@ function runPreviewScript(
   const posted: unknown[] = [];
   const timers: Array<() => void> = [];
   const listeners: Array<() => void> = [];
+  const named = new Map<string, Array<() => void>>();
   const fakeGlobal: Record<string, unknown> = {};
   const root = {
     style: {} as Record<string, string>,
@@ -50,7 +51,10 @@ function runPreviewScript(
   )(
     fakeGlobal,
     fakeDocument,
-    (_: string, listener: () => void) => listeners.push(listener),
+    (name: string, listener: () => void) => {
+      if (name === "load") listeners.push(listener);
+      else named.set(name, [...(named.get(name) ?? []), listener]);
+    },
     (callback: () => void) => timers.push(callback),
     (element: unknown) => ({
       backgroundColor:
@@ -71,6 +75,9 @@ function runPreviewScript(
     fakeGlobal,
     posted,
     root,
+    fire(name: string) {
+      for (const listener of named.get(name) ?? []) listener();
+    },
     /** Fire load and let every pending timer and promise run. */
     async settle() {
       for (const listener of listeners) listener();
@@ -140,9 +147,30 @@ describe("Site card preview document", () => {
     expect(document).toContain('<meta name="viewport"');
   });
 
-  test("sets the viewer's theme for the Opengeni look", () => {
+  test("sets the viewer's theme for the Opengeni look, unless the Site picks its own", () => {
     const run = runPreviewScript(sitePreviewDocument("<p>x</p>", { theme: "dark" }), { text: "x" });
     expect(run.fakeGlobal["data-og-theme"]).toBe("dark");
+    const own = runPreviewScript(
+      sitePreviewDocument('<html data-og-theme="light"><p>x</p></html>', { theme: "dark" }),
+      { text: "x" },
+    );
+    expect(own.fakeGlobal["data-og-theme"]).toBeUndefined();
+  });
+
+  test("lays the page out at the preview width, also in a mobile web view", () => {
+    expect(sitePreviewDocument("<p>x</p>")).toContain(
+      '<meta name="viewport" content="width=1024">',
+    );
+  });
+
+  test("a page that leaves says so, even after its report", async () => {
+    const run = runPreviewScript(sitePreviewDocument("<p>x</p>"), { text: "x" });
+    await run.settle();
+    run.fire("pagehide");
+    expect(run.posted).toEqual([
+      { type: SITE_PREVIEW_PAINTED_MESSAGE, painted: true },
+      { type: SITE_PREVIEW_PAINTED_MESSAGE, painted: false, left: true },
+    ]);
   });
 
   test("the stand-in client never settles, so an app keeps its loading state", async () => {

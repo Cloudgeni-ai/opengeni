@@ -298,10 +298,13 @@ test("an app's card runs the page in a scripts-only frame and shows it once it p
       await report("Deployments", false);
       expect(frame("Deployments")).toBeNull();
       expect(card("Deployments").querySelector("svg")).not.toBeNull();
-      // A painted page that later navigates itself away is dropped for the glyph.
+      // A slow page whose load finishes after its report stays painted.
       await act(async () => {
         frame("Issue tracker")!.dispatchEvent(new Event("load"));
       });
+      expect(frame("Issue tracker")!.closest(".opacity-100")).not.toBeNull();
+      // A painted page that then navigates itself away says so and is dropped for the glyph.
+      await report("Issue tracker", false);
       expect(frame("Issue tracker")).toBeNull();
       expect(card("Issue tracker").querySelector("svg")).not.toBeNull();
     } finally {

@@ -53,6 +53,26 @@ onForgetArtifactPreviews(() => {
 /* Pictures that couldn't be drawn keep their card's glyph. */
 const failedPictures = new Set<string>();
 
+/* The API draws pictures a few at a time. */
+const PICTURE_REQUEST_SLOTS = 4;
+let pictureRequestsRunning = 0;
+const pictureRequestQueue: Array<() => void> = [];
+
+function limitPictureRequest<T>(request: () => Promise<T>): Promise<T> {
+  return new Promise<void>((resolve) => {
+    if (pictureRequestsRunning < PICTURE_REQUEST_SLOTS) {
+      pictureRequestsRunning += 1;
+      resolve();
+    } else pictureRequestQueue.push(resolve);
+  })
+    .then(request)
+    .finally(() => {
+      const next = pictureRequestQueue.shift();
+      if (next) next();
+      else pictureRequestsRunning -= 1;
+    });
+}
+
 function cached<T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>) {
   let request = cache.get(key);
   if (!request) {
@@ -153,11 +173,13 @@ function SiteRender({
   const generation = useMemo(() => sitePreviewGeneration(), []);
   const document = useMemo(() => sitePreviewDocument(html, { theme: scheme }), [html, scheme]);
   const settle = useCallback(
-    (painted: boolean) => {
+    (painted: boolean, reported = true) => {
       if (settledRef.current) return;
       settledRef.current = true;
       if (!painted) {
-        blankSitePreviews.add(name);
+        // A page that said it drew nothing isn't tried again this run; one
+        // that never said (slow network) is, next time its card shows.
+        if (reported) blankSitePreviews.add(name);
         releaseSlot();
         onBlank();
         return;
@@ -183,7 +205,7 @@ function SiteRender({
   const mounted = slotGranted && box !== null;
   useEffect(() => {
     if (!mounted) return;
-    const timer = setTimeout(() => settle(false), SITE_PREVIEW_TIMEOUT_MS);
+    const timer = setTimeout(() => settle(false, false), SITE_PREVIEW_TIMEOUT_MS);
     return () => clearTimeout(timer);
   }, [settle, mounted]);
   const scale = box ? box.width / SITE_PREVIEW_WIDTH : 0;
@@ -202,9 +224,12 @@ function SiteRender({
           source={{ html: document }}
           originWhitelist={["about:*"]}
           javaScriptEnabled
-          // A separate cookie and storage jar on iOS (Android keeps its
-          // third-party cookies off for this page already).
+          // A separate cookie and storage jar on iOS. On Android the page has
+          // no origin of its own, so with third-party cookies off none of its
+          // requests carry the app's cookies.
           incognito={Platform.OS === "ios"}
+          thirdPartyCookiesEnabled={false}
+          sharedCookiesEnabled={false}
           scalesPageToFit={false}
           scrollEnabled={false}
           setSupportMultipleWindows={false}
@@ -216,9 +241,9 @@ function SiteRender({
             const painted = sitePreviewPainted(event.nativeEvent.data);
             if (painted !== null) settle(painted);
           }}
-          onError={() => settle(false)}
-          onContentProcessDidTerminate={() => settle(false)}
-          onRenderProcessGone={() => settle(false)}
+          onError={() => settle(false, false)}
+          onContentProcessDidTerminate={() => settle(false, false)}
+          onRenderProcessGone={() => settle(false, false)}
           onShouldStartLoadWithRequest={(request) => request.url.startsWith("about:")}
           style={{
             position: "absolute",
@@ -317,7 +342,7 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
     : null;
   const picture = useLoaded(pictureKey, () =>
     cached(editablePictures, pictureKey!, () =>
-      client.getEditableArtifactPreview(workspaceId, item.id),
+      limitPictureRequest(() => client.getEditableArtifactPreview(workspaceId, item.id)),
     ),
   );
   const [pictureFailed, setPictureFailed] = useState<string | null>(null);
