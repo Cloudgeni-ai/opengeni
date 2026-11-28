@@ -232,7 +232,7 @@ would be, and no player. Each distinct speaker name becomes one speaker,
 labelled `imported:1`, `imported:2`, … in order of first appearance and
 named as given, as a person would name them; a segment without a speaker
 has none. Names, speakers and segment text can be corrected as in any other
-meeting. The import sends `recording.started` and
+meeting. The import sends `recording.started`, `recording.finished` and
 `recording.transcript.ready` (see [Events](#events)), and its notes are
 written as a recorded meeting's are (see [Built-in summary](#built-in-summary)).
 

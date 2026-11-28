@@ -2636,6 +2636,12 @@ export async function importRecordingTranscript(
         startedAt: startedAt.toISOString(),
         trackCount: 0,
       });
+      // Finished as soon as it starts, so whatever waits for a meeting to end
+      // treats an imported one like a recorded one.
+      await insertEvent(tx, recording, "recording.finished", {
+        durationMilliseconds,
+        versionId: version!.id,
+      });
       await insertEvent(tx, recording, "recording.transcript.ready", {
         versionId: version!.id,
         versionNumber: version!.versionNumber,
