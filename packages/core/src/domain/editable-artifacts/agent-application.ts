@@ -215,6 +215,16 @@ export type EditableArtifactAgentApplicationDependencies = Readonly<{
  * Attempt-neutral use cases shared by direct model tools and Codemode. This is
  * not another artifact engine: every mutation terminates at EditableArtifactService.
  */
+/* A query too large for the picture's bounds draws nothing; anything else fails. */
+function previewBeyondBounds(error: unknown): null {
+  if (
+    (error instanceof RangeError || error instanceof TypeError) &&
+    /exceed|limit|too (large|many|big)/i.test(error.message)
+  )
+    return null;
+  throw error;
+}
+
 export class EditableArtifactAgentApplication {
   describeExportFormats(): string {
     return this.dependencies.exports.describeFormats();
@@ -480,7 +490,9 @@ export class EditableArtifactAgentApplication {
       svg = presentationPreviewSvg(metadata.slideSize, slide);
     } else {
       // The catalog is never cut short: a workbook beyond the preview's
-      // bounds draws as an empty grid rather than failing every time.
+      // bounds draws as an empty grid rather than failing every time. Any
+      // other failure (kernel or inspector down) still fails the request, so
+      // an empty grid is never cached under the head's tag by mistake.
       const workbook = (await query({
         modality: "spreadsheet",
         query: {
@@ -490,7 +502,7 @@ export class EditableArtifactAgentApplication {
             maxBytes: limits.spreadsheetMetadataBytes,
           },
         },
-      }).catch(() => null)) as Extract<
+      }).catch(previewBeyondBounds)) as Extract<
         SpreadsheetArtifactKernelProjection,
         { kind: "workbook-metadata" }
       > | null;
@@ -512,7 +524,7 @@ export class EditableArtifactAgentApplication {
                   maxBytes: limits.spreadsheetResponseBytes,
                 },
               },
-            }).catch(() => null)) as Extract<
+            }).catch(previewBeyondBounds)) as Extract<
               SpreadsheetArtifactKernelProjection,
               { kind: "viewport" }
             > | null

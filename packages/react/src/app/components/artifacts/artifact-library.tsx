@@ -621,7 +621,8 @@ export function ArtifactRow({
  * `@opengeni/sdk/site-preview` there: the page's own scripts run in an
  * opaque-origin frame that may run scripts and nothing else (no same-origin,
  * forms, popups or navigation of the console), with no Site bridge, and its
- * policy blocks every call the page could make. The page reports whether it
+ * policy blocks the page's fetch and XHR calls (images, scripts and its own
+ * navigation can still reach the network). The page reports whether it
  * painted anything; until it does the card keeps its type glyph, and a page
  * that stays blank (or never reports) leaves the glyph in place.
  *
@@ -741,6 +742,23 @@ const blankSitePreviews = new Set<string>();
  * version keeps its glyph instead of hanging the library again.
  */
 const PENDING_SITE_PREVIEW = "opengeni:site-preview:pending:";
+/*
+ * Marks set by this tab. A tab that leaves normally (reload, sign-out,
+ * navigation) clears them on pagehide; a hung tab never gets there.
+ */
+const activeSitePreviewMarks = new Set<string>();
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    for (const versionKey of activeSitePreviewMarks) {
+      try {
+        sessionStorage.removeItem(PENDING_SITE_PREVIEW + versionKey);
+      } catch {
+        // Best effort.
+      }
+    }
+    activeSitePreviewMarks.clear();
+  });
+}
 const hungSitePreviews: ReadonlySet<string> = (() => {
   const hung = new Set<string>();
   try {
@@ -755,6 +773,8 @@ const hungSitePreviews: ReadonlySet<string> = (() => {
 })();
 
 function markSitePreviewPending(versionKey: string, pending: boolean) {
+  if (pending) activeSitePreviewMarks.add(versionKey);
+  else activeSitePreviewMarks.delete(versionKey);
   try {
     if (pending) sessionStorage.setItem(PENDING_SITE_PREVIEW + versionKey, "1");
     else sessionStorage.removeItem(PENDING_SITE_PREVIEW + versionKey);

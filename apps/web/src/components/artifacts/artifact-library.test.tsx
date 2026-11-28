@@ -336,6 +336,11 @@ test("a Site's live frame runs only while its card is near the viewport", async 
       expect(container.querySelector('iframe[title="Preview of Dashboard"]')).not.toBeNull();
       // Marked while it runs, so a page that hangs the tab is skipped after a reload.
       expect(sessionStorage.getItem("opengeni:site-preview:pending:dash:d1")).toBe("1");
+      // A tab that leaves normally (reload, sign-out) clears its marks; only a hung one keeps them.
+      await act(async () => {
+        window.dispatchEvent(new Event("pagehide"));
+      });
+      expect(sessionStorage.getItem("opengeni:site-preview:pending:dash:d1")).toBeNull();
       await scrollCardsAway();
       expect(container.querySelector('iframe[title="Preview of Dashboard"]')).toBeNull();
       expect(sessionStorage.getItem("opengeni:site-preview:pending:dash:d1")).toBeNull();
