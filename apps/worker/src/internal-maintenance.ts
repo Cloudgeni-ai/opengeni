@@ -8,6 +8,8 @@ import {
 } from "@opengeni/core";
 import {
   automaticSessionTitleFanoutDue,
+  automationRunCounterCompactionDue,
+  compactAutomationRunCounters,
   evaluateBillingCreditAlerts,
   listBillingCreditAlertAccounts,
   browserDeadlineCheckpointDue,
@@ -74,6 +76,7 @@ export const INTERNAL_MAINTENANCE_JOBS = [
   "subscription-plan-maintenance",
   "subscription-usage-retention",
   "billing-credit-alerts",
+  "automation-run-counter-compaction",
 ] as const;
 export type InternalMaintenanceJob = (typeof INTERNAL_MAINTENANCE_JOBS)[number];
 
@@ -152,6 +155,17 @@ export async function internalMaintenanceCadences(input: {
   const jobs = new Set(input.jobs ?? INTERNAL_MAINTENANCE_JOBS);
   const taskQueue = settings.temporalTaskQueue;
   const cadences: MaintenanceCadence[] = [];
+  if (jobs.has("automation-run-counter-compaction")) {
+    cadences.push({
+      job: "automation-run-counter-compaction",
+      periodMs: 60_000,
+      hasWork: async () => await automationRunCounterCompactionDue(db),
+      start: async () => {
+        await compactAutomationRunCounters(db);
+        return "started";
+      },
+    });
+  }
   if (jobs.has("billing-credit-alerts")) {
     let cursor: string | null = null;
     let accounts: string[] = [];

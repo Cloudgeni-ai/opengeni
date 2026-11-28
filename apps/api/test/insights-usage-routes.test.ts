@@ -112,7 +112,7 @@ function responseFor(input: Parameters<typeof core.getInsightsUsage>[1]): Insigh
 }
 
 describe("unified Insights route discipline", () => {
-  test("additive source contracts cannot silently widen the raw implementation; its ranges are served", () => {
+  test("the inventory cursor is organization-usage only; unsupported source queries remain rejected", () => {
     for (const organization of [false, true])
       for (const calls of [false, true]) {
         for (const query of [
@@ -132,6 +132,9 @@ describe("unified Insights route discipline", () => {
           ...(!calls ? [{ groupBy: "source" }, { groupBy: "session" }, { groupBy: "plan" }] : []),
         ])
           expect(insightsRawQuerySupported(query, organization, calls)).toBe(false);
+        expect(insightsRawQuerySupported({ automationCursor: "opaque" }, organization, calls)).toBe(
+          organization && !calls,
+        );
       }
   });
   test("registers all four endpoints and bounded route labels", () => {

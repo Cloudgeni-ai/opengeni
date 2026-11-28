@@ -47,7 +47,10 @@ export type OrganizationInsightsUsageOptions = FilterOptions<
   Omit<OrganizationInsightsUsageQueryInput, "seriesGroups">
 > & { seriesGroups?: boolean };
 /** workspaceId is intersected with the path workspace by the existing server gate. */
-export type WorkspaceInsightsUsageOptions = OrganizationInsightsUsageOptions;
+export type WorkspaceInsightsUsageOptions = Omit<
+  OrganizationInsightsUsageOptions,
+  "automationCursor"
+>;
 export type OrganizationInsightsCallsOptions = FilterOptions<OrganizationInsightsCallsQueryInput>;
 export type WorkspaceInsightsCallsOptions = OrganizationInsightsCallsOptions;
 export type InsightsCallsScope =

@@ -524,7 +524,7 @@ async function completeTitle(
           processingResidency,
         });
         if (authoritative && billing) {
-          await recordAuthoritativeModelCallFact({
+          const usageSource = await recordAuthoritativeModelCallFact({
             ...identity,
             db: tx,
             observability: service.observability,
@@ -543,6 +543,7 @@ async function completeTitle(
             model: request.modelId,
             externallyBilled: request.externallyBilled,
             billing,
+            usageSource,
             webSearchRequests: generated.usage.webSearchRequests,
           };
         }

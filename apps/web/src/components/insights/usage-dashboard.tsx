@@ -1,5 +1,5 @@
 import { CalendarIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
@@ -76,7 +76,12 @@ import {
   tokenTotal,
   type TokenClassId,
 } from "./usage-format";
-import { loadUsage, loadUsageCalls, type UsageLoad } from "./usage-source";
+import {
+  loadAutomationInventoryPage,
+  loadUsage,
+  loadUsageCalls,
+  type UsageLoad,
+} from "./usage-source";
 import { SitesUsageSection } from "./sites-usage-section";
 import { PartlyUnpricedMark, Quiet, Unpriced } from "./usage-values";
 import { UsageAgentAvatar, useUsageAgentAvatars } from "./usage-agent-avatars";
@@ -252,7 +257,7 @@ export function UsageDashboard(props: UsageDashboardProps) {
       >
         {usage.totals.calls === 0 && activeFilterCount(query.filters) === 0 ? (
           <EmptyState
-            variant="page"
+            variant={usage.automations?.length ? "inline" : "page"}
             icon={<CalendarIcon />}
             title={emptyTitle(usage.range)}
             description="Usage shows here as soon as an agent calls a model."
@@ -321,6 +326,18 @@ export function UsageDashboard(props: UsageDashboardProps) {
           estimates.
         </p>
       </div>
+      {props.scope.kind === "organization" && usage.automations !== undefined ? (
+        <AutomationInventory
+          key={`${scopeKey}:${current?.key}`}
+          automations={usage.automations}
+          next={usage.automationNextCursor ?? null}
+          stale={stale}
+          loadPage={(cursor, signal) => {
+            if (props.scope.kind !== "organization") throw new Error("Expected organization scope");
+            return loadAutomationInventoryPage(client, props.scope, query, cursor, signal);
+          }}
+        />
+      ) : null}
       {props.scope.kind === "workspace" ? (
         <SitesUsageSection
           client={client}
@@ -1052,6 +1069,105 @@ function ShareBar(props: {
    -------------------------------------------------------------------------- */
 
 type SortColumn = "name" | "calls" | TokenClassId | "cost";
+
+const AUTOMATION_COLUMNS: RowListColumn[] = [
+  { id: "runs", label: "Runs", width: 88, align: "end", leadsWhenFolded: true },
+];
+
+function AutomationInventory({
+  automations,
+  next,
+  stale,
+  loadPage,
+}: {
+  automations: NonNullable<UsageResponse["automations"]>;
+  next: string | null;
+  stale: boolean;
+  loadPage: (cursor: string, signal: AbortSignal) => ReturnType<typeof loadAutomationInventoryPage>;
+}) {
+  const [history, setHistory] = useState<Awaited<ReturnType<typeof loadPage>>[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const request = useRef<AbortController | null>(null);
+  useEffect(() => () => request.current?.abort(), []);
+  const page = history.at(-1) ?? { automations, next };
+
+  async function more(cursor: string) {
+    const controller = new AbortController();
+    request.current = controller;
+    setBusy(true);
+    setFailed(false);
+    try {
+      const response = await loadPage(cursor, controller.signal);
+      if (!controller.signal.aborted) setHistory((prior) => [...prior, response]);
+    } catch {
+      if (!controller.signal.aborted) setFailed(true);
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
+    }
+  }
+
+  return (
+    <section aria-label="Automations" className="flex min-w-0 flex-col gap-3">
+      <div>
+        <h2 className={SECTION_TITLE_CLASS}>Automations</h2>
+        <p className="text-sm text-fg-muted">
+          Runs in the selected time range, including runs without model usage.
+        </p>
+      </div>
+      {page.automations.length === 0 ? (
+        <p className="text-sm text-fg-muted">No automations visible in these workspaces.</p>
+      ) : (
+        <RowList
+          variant="table"
+          label="Automation runs"
+          nameLabel="Automation"
+          columns={AUTOMATION_COLUMNS}
+        >
+          {page.automations
+            .toSorted((a, b) => b.fires - a.fires)
+            .map((task) => (
+              <ListRow
+                key={task.id}
+                title={task.name}
+                meta={[task.workspaceName]}
+                cells={{ runs: <Quiet>{formatCount(task.fires)}</Quiet> }}
+              />
+            ))}
+        </RowList>
+      )}
+      {history.length > 0 || page.next ? (
+        <nav className="flex flex-wrap items-center gap-2" aria-label="Automation pages">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || stale || history.length === 0}
+            onClick={() => {
+              setFailed(false);
+              setHistory((prior) => prior.slice(0, -1));
+            }}
+          >
+            Previous
+          </Button>
+          <span className="text-sm text-fg-muted" role="status">
+            {busy ? "Loading…" : `Page ${history.length + 1}`}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || stale || !page.next}
+            onClick={() => {
+              if (page.next) void more(page.next);
+            }}
+          >
+            Next
+          </Button>
+        </nav>
+      ) : null}
+      {failed ? <p role="alert">Could not load the next page. Try again.</p> : null}
+    </section>
+  );
+}
 
 const BREAKDOWN_COLUMNS: RowListColumn[] = [
   { id: "calls", label: "Calls", width: 76, align: "end", sortable: true },

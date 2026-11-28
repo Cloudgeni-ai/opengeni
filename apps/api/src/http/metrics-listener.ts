@@ -1,18 +1,70 @@
 import type { Settings } from "@opengeni/config";
+import { readAutomationRunCounts, type Database } from "@opengeni/db";
 import { Hono } from "hono";
 
 import { requireAccessKey } from "./auth";
 import type { HttpServerDrain } from "./server-drain";
 
 type PrometheusSource = { prometheusMetrics(): Promise<string> };
+type MetricsSettings = Pick<
+  Settings,
+  "serviceName" | "environment" | "deploymentRevision" | "observabilityMetricsEnabled"
+>;
+
+const AUTOMATION_TRIGGERS = [
+  "clock",
+  "event",
+  "once",
+  "initial",
+  "manual",
+  "retry",
+  "repair",
+] as const;
+const AUTOMATION_OUTCOMES = ["ok", "failed", "skipped"] as const;
+
+/** Each API replica reads the same durable deployment-wide counter. */
+export async function automationRunMetrics(
+  db: Database,
+  settings: MetricsSettings,
+): Promise<string> {
+  if (!settings.observabilityMetricsEnabled) return "";
+  const rows = await readAutomationRunCounts(db);
+  const values = new Map(rows.map((row) => [`${row.trigger_kind}:${row.outcome}`, row.runs]));
+  const name = "opengeni_automation_runs_total";
+  const quote = (label: string) =>
+    `"${label.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll('"', '\\"')}"`;
+  const base = `service=${quote(settings.serviceName)},environment=${quote(settings.environment)},component="api",deployment_revision=${quote(settings.deploymentRevision ?? "dev")}`;
+  const lines = [
+    `# HELP ${name} Persisted automation runs reaching a terminal outcome, shared by all API replicas.`,
+    `# TYPE ${name} counter`,
+  ];
+  for (const kind of AUTOMATION_TRIGGERS) {
+    for (const outcome of AUTOMATION_OUTCOMES) {
+      lines.push(
+        `${name}{trigger_kind="${kind}",outcome="${outcome}",${base}} ${values.get(`${kind}:${outcome}`) ?? "0"}`,
+      );
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
 
 /** Register the Prometheus exposition route on one Hono app. */
-export function registerPrometheusMetricsRoute(app: Hono, observability: PrometheusSource): void {
-  app.get("/metrics", async (c) =>
-    c.text(await observability.prometheusMetrics(), 200, {
+export function registerPrometheusMetricsRoute(
+  app: Hono,
+  observability: PrometheusSource,
+  automation?: () => Promise<string>,
+): void {
+  app.get("/metrics", async (c) => {
+    // If PostgreSQL is unreachable, omit this family rather than exporting a
+    // false reset or preventing collection of process-local telemetry.
+    const [metrics, runs] = await Promise.all([
+      observability.prometheusMetrics(),
+      automation?.().catch(() => "") ?? "",
+    ]);
+    return c.text(metrics + runs, 200, {
       "content-type": "text/plain; version=0.0.4; charset=utf-8",
-    }),
-  );
+    });
+  });
 }
 
 /**
@@ -32,6 +84,7 @@ export function publicListenerServesMetrics(settings: Pick<Settings, "apiMetrics
 export function createMetricsListenerApp(
   settings: Settings,
   observability: PrometheusSource,
+  db?: Database,
 ): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -39,7 +92,11 @@ export function createMetricsListenerApp(
     if (!c.res.headers.has("x-content-type-options")) c.header("x-content-type-options", "nosniff");
   });
   app.use("*", requireAccessKey(settings));
-  registerPrometheusMetricsRoute(app, observability);
+  registerPrometheusMetricsRoute(
+    app,
+    observability,
+    db ? () => automationRunMetrics(db, settings) : undefined,
+  );
   return app;
 }
 
@@ -48,13 +105,14 @@ export function startApiMetricsListener(
   settings: Settings,
   observability: PrometheusSource,
   drain?: Pick<HttpServerDrain, "fetch">,
+  db?: Database,
 ): ReturnType<typeof Bun.serve> | undefined {
   const port = settings.apiMetricsPort;
   if (port === undefined) return undefined;
   if (port === settings.apiPort) {
     throw new Error("OPENGENI_API_METRICS_PORT must differ from OPENGENI_API_PORT");
   }
-  const app = createMetricsListenerApp(settings, observability);
+  const app = createMetricsListenerApp(settings, observability, db);
   const fetch = (request: Request) => app.fetch(request);
   return Bun.serve({
     hostname: settings.apiHost,

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { configuredModels } from "@opengeni/config";
+import { classifyInsightsUsageSource } from "@opengeni/contracts/insights-usage";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
@@ -54,6 +55,7 @@ describe("recordModelResponseUsage", () => {
       provider: "azure-sol",
       model: "gpt-5.6-sol",
       payer: "deployment",
+      source: classifyInsightsUsageSource("agent", true),
       tokens: {
         inputTokens: 1_000,
         cachedTokens: 600,
@@ -77,14 +79,44 @@ describe("recordModelResponseUsage", () => {
     ] as const) {
       expect(metrics).toMatch(
         new RegExp(
-          `opengeni_model_tokens_total\\{(?=[^}]*model="gpt-5\\.6-sol")(?=[^}]*type="${type}")[^}]*\\} ${value}\\n`,
+          `opengeni_model_tokens_total\\{(?=[^}]*model="gpt-5\\.6-sol")(?=[^}]*type="${type}")(?=[^}]*source="schedule")[^}]*\\} ${value}\\n`,
         ),
       );
     }
     expect(metrics).toMatch(
-      /opengeni_model_provider_cost_micros_total\{(?=[^}]*payer="deployment")(?=[^}]*pricing_source="configured_list_price")[^}]*\} 4321\n/,
+      /opengeni_model_provider_cost_micros_total\{(?=[^}]*payer="deployment")(?=[^}]*pricing_source="configured_list_price")(?=[^}]*source="schedule")[^}]*\} 4321\n/,
     );
     await observability.flush();
+  });
+
+  test("source is the closed Insights vocabulary, not arbitrary provenance", () => {
+    expect(
+      [
+        "web",
+        "api_key",
+        "embedded",
+        "mcp",
+        "slack",
+        "scheduled",
+        "automation",
+        "agent",
+        "system",
+        "unexpected",
+        null,
+      ].map((surface) => classifyInsightsUsageSource(surface, false)),
+    ).toEqual([
+      "web",
+      "api",
+      "api",
+      "api",
+      "slack",
+      "schedule",
+      "schedule",
+      "agent",
+      "other",
+      "other",
+      "other",
+    ]);
   });
 
   test("an unpriced response is counted without a cost series; absent tokens add nothing", async () => {

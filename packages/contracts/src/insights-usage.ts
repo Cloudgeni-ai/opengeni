@@ -101,6 +101,29 @@ export const InsightsUsageSource = /* @__PURE__ */ defineSchema(() =>
 );
 export type InsightsUsageSource = z.infer<typeof InsightsUsageSource>;
 
+/** Map stored turn provenance into the Insights vocabulary. */
+const INSIGHTS_USAGE_SOURCE_SURFACES = {
+  web: "web",
+  api_key: "api",
+  embedded: "api",
+  mcp: "api",
+  slack: "slack",
+  scheduled: "schedule",
+  automation: "schedule",
+  agent: "agent",
+} as const satisfies Record<string, InsightsUsageSource>;
+
+export function classifyInsightsUsageSource(
+  surface: string | null | undefined,
+  isScheduled: boolean,
+): InsightsUsageSource {
+  if (isScheduled) return "schedule";
+  if (surface && Object.hasOwn(INSIGHTS_USAGE_SOURCE_SURFACES, surface)) {
+    return INSIGHTS_USAGE_SOURCE_SURFACES[surface as keyof typeof INSIGHTS_USAGE_SOURCE_SURFACES];
+  }
+  return "other";
+}
+
 const UtcDay = /* @__PURE__ */ defineSchema(() =>
   primitives.string.regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
     const instant = Date.parse(`${value}T00:00:00Z`);
@@ -378,6 +401,12 @@ export const WorkspaceInsightsUsageQuery = /* @__PURE__ */ defineSchema(() =>
 export type WorkspaceInsightsUsageQuery = z.infer<typeof WorkspaceInsightsUsageQuery>;
 export type WorkspaceInsightsUsageQueryInput = z.input<typeof WorkspaceInsightsUsageQuery>;
 
+const AutomationInventoryCursor = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.regex(
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/,
+  ),
+);
+
 export const OrganizationInsightsUsageQuery = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -387,6 +416,8 @@ export const OrganizationInsightsUsageQuery = /* @__PURE__ */ defineSchema(() =>
       groupBy: InsightsUsageGroupBy.default("model"),
       seriesGroups: QueryBoolean.optional(),
       limit: queryLimit(200),
+      /** Continue only the automation inventory; totals and groups are unchanged. */
+      automationCursor: AutomationInventoryCursor.optional(),
     })
     .strict()
     .superRefine(validateWindowQuery),
@@ -693,6 +724,21 @@ export const InsightsUsageResponse = /* @__PURE__ */ defineSchema(() =>
       groupsTruncated: primitives.boolean,
       series: z.array(InsightsUsageSeriesPoint),
       facets: InsightsUsageFacets,
+      /** Organization inventory, independent of model usage. Absent on older servers. */
+      automations: z
+        .array(
+          z
+            .object({
+              id: Identifier,
+              name: z.string(),
+              workspaceId: Identifier,
+              workspaceName: z.string(),
+              fires: SafeCount,
+            })
+            .strict(),
+        )
+        .optional(),
+      automationNextCursor: AutomationInventoryCursor.nullable().optional(),
       /**
        * The ranges this server answers. Servers older than the rolling hour
        * ranges omit it; they answer only the six calendar presets.

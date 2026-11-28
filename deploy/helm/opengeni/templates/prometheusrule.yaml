@@ -67,6 +67,21 @@ spec:
         environment: {{ $environment | quote }}
         release: {{ .Release.Name | quote }}
       rules:
+        # Alert on deployment-specific thresholds against these recordings.
+        # The run counter is DB-backed and identical across API replicas.
+        - record: opengeni:automation_runs:deployment_total
+          expr: |
+            max by (trigger_kind, outcome) (
+              opengeni_automation_runs_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+            )
+        - record: opengeni:automation_runs:increase1h
+          expr: |
+            increase(opengeni:automation_runs:deployment_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[1h])
+        - record: opengeni:automation_provider_cost_usd:increase1h
+          expr: |
+            sum by (payer) (
+              increase(opengeni_model_provider_cost_micros_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},source="schedule"}[1h])
+            ) / 1e6
         # These recording rules admit only a complete inventory projection whose
         # matching domain refreshed on the same scrape target within the configured
         # window. A global reaper activity can hop between control replicas, so

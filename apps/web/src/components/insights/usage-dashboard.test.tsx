@@ -8,6 +8,7 @@ import { fixtureUsage } from "./usage-fixtures";
 import type { UsageSearch } from "./usage-search";
 
 let nextUsage: UsageResponse;
+let nextAutomationPage: Pick<UsageResponse, "automations" | "automationNextCursor"> | null = null;
 let nextError: unknown = null;
 let nextCalls: unknown[] = [];
 const requests: Array<{ path: string; query: Record<string, string> }> = [];
@@ -17,6 +18,7 @@ const requestJson = mock(
     requests.push({ path, query });
     if (nextError) throw nextError;
     if (path.endsWith("/calls")) return { calls: nextCalls, nextCursor: null };
+    if (query.automationCursor && nextAutomationPage) return nextAutomationPage;
     return nextUsage;
   },
 );
@@ -62,6 +64,7 @@ afterAll(() => {
 
 beforeEach(() => {
   nextUsage = fixtureUsage();
+  nextAutomationPage = null;
   nextError = null;
   nextCalls = [];
   resetUsageSourceMemo();
@@ -485,6 +488,67 @@ describe("Insights usage dashboard", () => {
     } finally {
       await view.unmount();
     }
+  });
+
+  test("Organization Insights shows zero-use automations even with no model calls", async () => {
+    const scope = {
+      kind: "organization",
+      accountId: WORKSPACE.accountId,
+      workspaceId: null,
+    } as const;
+    const usage = fixtureUsage({ scope, groupBy: "workspace" });
+    nextUsage = {
+      ...usage,
+      totals: { ...usage.totals, calls: 0 },
+      automationNextCursor: "fixture-cursor",
+      automations: [
+        {
+          id: "first",
+          name: "Waiting for an event",
+          workspaceId: WORKSPACE.workspaceId,
+          workspaceName: "Support",
+          fires: 0,
+        },
+        {
+          id: "second",
+          name: "Daily summary",
+          workspaceId: WORKSPACE.workspaceId,
+          workspaceName: "Support",
+          fires: 3,
+        },
+      ],
+    };
+    const view = await render({ group: "workspace" }, scope);
+    const inventory = view.container.querySelector('section[aria-label="Automations"]');
+    expect(inventory?.textContent).toContain("Daily summary");
+    expect(inventory?.textContent).toContain("Waiting for an event");
+    expect(inventory?.textContent).toContain("Support");
+    expect(inventory?.textContent).toContain("0");
+    expect(inventory?.textContent?.indexOf("Daily summary")).toBeLessThan(
+      inventory?.textContent?.indexOf("Waiting for an event") ?? -1,
+    );
+    nextAutomationPage = {
+      automations: [
+        {
+          id: "third",
+          name: "Export reports",
+          workspaceId: WORKSPACE.workspaceId,
+          workspaceName: "Support",
+          fires: 1,
+        },
+      ],
+      automationNextCursor: null,
+    };
+    const button = (label: string) =>
+      Array.from(inventory!.querySelectorAll("button")).find((b) => b.textContent === label)!;
+    await act(async () => button("Next").click());
+    expect(requests.at(-1)?.query.automationCursor).toBe("fixture-cursor");
+    expect(inventory?.textContent).toContain("Export reports");
+    expect(inventory?.textContent).not.toContain("Waiting for an event");
+    expect(button("Next").disabled).toBe(true);
+    await act(async () => button("Previous").click());
+    expect(inventory?.textContent).toContain("Waiting for an event");
+    await view.unmount();
   });
 
   test("organization scope groups by workspace with Personal workspaces as amounts", async () => {

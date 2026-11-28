@@ -10,7 +10,13 @@ import {
   type InsightsUsageResponse,
 } from "@opengeni/contracts/insights-usage";
 import { sql, type SQL } from "drizzle-orm";
-import { withDatabaseStatementTimeout, withRlsContext, type Database } from "./database";
+import {
+  currentSessionRlsActorContext,
+  withDatabaseStatementTimeout,
+  withRlsContext,
+  type Database,
+} from "./database";
+import { listSelfOrganizationMemberships } from "./organization-membership-lifecycle";
 
 type Scope = {
   accountId: string;
@@ -20,7 +26,23 @@ type Scope = {
   detailsWorkspaceIds?: readonly string[];
   /** Only the existing account-scoped API-key authority proof may establish this. */
   detailsSharedWorkspaces?: boolean;
+  automationWorkspaceIds?: readonly string[];
+  automationSharedWorkspaces?: boolean;
 };
+
+async function personalAutomationWorkspaceId(
+  db: Database,
+  scope: Pick<Scope, "accountId" | "automationWorkspaceIds">,
+) {
+  const subject = currentSessionRlsActorContext()?.subjectId;
+  if (!subject?.startsWith("user:") || !scope.automationWorkspaceIds?.length) return null;
+  const memberships = await listSelfOrganizationMemberships(db, subject);
+  const membership = memberships.find(
+    (item) => item.organizationId === scope.accountId && item.status === "active",
+  );
+  const id = membership?.personalWorkspaceId;
+  return id && scope.automationWorkspaceIds.includes(id) ? id : null;
+}
 
 /** Read-only cache invalidation through committed session activity.
  * Every session write stamps sessions.activity_xid with its writer's xid, so the
@@ -33,9 +55,11 @@ type Scope = {
  */
 export async function readInsightsResponseCacheFence(
   db: Database,
-  scope: Pick<Scope, "accountId" | "workspaceId">,
+  scope: Pick<Scope, "accountId" | "workspaceId" | "automationWorkspaceIds">,
 ): Promise<string | null> {
   try {
+    const personal =
+      scope.workspaceId === null ? await personalAutomationWorkspaceId(db, scope) : null;
     const inventory = await withRlsContext(db, scope, async (scoped) => {
       return await cacheMetadataRead(scoped, async (bounded) =>
         rows<{ id: string; name: string }>(
@@ -43,7 +67,7 @@ export async function readInsightsResponseCacheFence(
         select w.id::text,w.name from workspaces w where w.account_id=${scope.accountId}::uuid
         and ${
           scope.workspaceId === null
-            ? sql`w.id in(select workspace_id from list_organization_workspace_ids(${scope.accountId}::uuid))`
+            ? sql`(w.id in(select workspace_id from list_organization_workspace_ids(${scope.accountId}::uuid)) or w.id=${personal}::uuid)`
             : sql`w.id=${scope.workspaceId}::uuid`
         } order by w.id`),
         ),
@@ -67,7 +91,7 @@ export async function readInsightsResponseCacheFence(
             ) as revision,
             (select coalesce(jsonb_agg(jsonb_build_array(c.id,c.name) order by c.id),'[]')
               from channels c where c.account_id=${scope.accountId}::uuid and c.workspace_id=${workspace.id}::uuid) projects,
-            (select coalesce(jsonb_agg(jsonb_build_array(t.id,t.name,t.deleted_at) order by t.id),'[]')
+            (select coalesce(jsonb_agg(jsonb_build_array(t.id,t.name,t.deleted_at,t.visibility,t.owner_subject_id) order by t.id),'[]')
               from scheduled_tasks t where t.account_id=${scope.accountId}::uuid and t.workspace_id=${workspace.id}::uuid) schedules,
             (select coalesce(jsonb_agg(jsonb_build_array(g.id,g.name,g.visibility,g.owner_subject_id) order by g.id),'[]')
               from agents g where g.account_id=${scope.accountId}::uuid and g.workspace_id=${workspace.id}::uuid) agents
@@ -279,6 +303,8 @@ export async function readInsightsUsage(
     throw new Error("Workspace Insights does not accept organization grouping or filters");
   }
   const window = insightsUsageWindow(query, input.now);
+  const personal =
+    input.workspaceId === null ? await personalAutomationWorkspaceId(db, input) : null;
   const group = grouping(query.groupBy);
   const queryJson = JSON.stringify(query);
   // The capability already masks hidden identities. Do not call a SQL function
@@ -403,6 +429,9 @@ export async function readInsightsUsage(
       return {
         ...rows<{ payload: Record<string, unknown> }>(result)[0]!.payload,
         prior: prior!.prior,
+        ...(input.workspaceId === null
+          ? await readOrganizationAutomationInventory(scoped, input, window, personal)
+          : {}),
       };
     },
   );
@@ -427,6 +456,66 @@ export async function readInsightsUsage(
     dataThrough:
       payload.dataThrough === null ? null : new Date(payload.dataThrough as string).toISOString(),
   } as InsightsUsageResponse;
+}
+
+async function readOrganizationAutomationInventory(
+  db: Database,
+  input: Scope & { query: InsightsUsageQuery },
+  window: { since: Date; until: Date },
+  personal: string | null,
+): Promise<Pick<InsightsUsageResponse, "automations" | "automationNextCursor">> {
+  const subject = currentSessionRlsActorContext()?.subjectId;
+  const inventory: NonNullable<InsightsUsageResponse["automations"]> = [];
+  const allowed = new Set(input.automationWorkspaceIds ?? []);
+  if (!subject || (allowed.size === 0 && !input.automationSharedWorkspaces))
+    return { automations: inventory, automationNextCursor: null };
+  const [afterWorkspace, afterTask] = input.query.automationCursor?.split(".") ?? [];
+  const pageSize = Math.min(50, input.query.limit);
+  const selected = input.query.workspaceId && new Set(input.query.workspaceId);
+  const workspaces = rows<{ id: string; name: string }>(
+    await db.execute(sql`
+    select w.id::text,w.name from workspaces w where w.account_id=${input.accountId}::uuid
+      ${afterWorkspace ? sql`and w.id>=${afterWorkspace}::uuid` : sql``}
+      and (w.id in(select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid))
+        or w.id=${personal}::uuid) order by w.id`),
+  );
+  for (const workspace of workspaces) {
+    if (
+      (!input.automationSharedWorkspaces && !allowed.has(workspace.id)) ||
+      (selected && !selected.has(workspace.id))
+    )
+      continue;
+    const tasks = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: workspace.id },
+      async (scoped) =>
+        rows<{ id: string; name: string; fires: number }>(
+          await scoped.execute(sql`
+        with page as materialized (
+          select id,name,workspace_id from scheduled_tasks t where t.account_id=${input.accountId}::uuid
+            and t.workspace_id=${workspace.id}::uuid and t.deleted_at is null
+            and (t.visibility='workspace_shared' or t.owner_subject_id=${subject})
+            ${afterTask && workspace.id === afterWorkspace ? sql`and t.id>${afterTask}::uuid` : sql``}
+          order by t.id limit ${pageSize + 1 - inventory.length}
+        )
+        select t.id::text,t.name,(select count(*)::int from scheduled_task_runs r
+          where r.workspace_id=t.workspace_id and r.task_id=t.id
+            and r.created_at>=${window.since.toISOString()}::timestamptz
+            and r.created_at<${window.until.toISOString()}::timestamptz) as fires
+        from page t order by t.id`),
+        ),
+    );
+    for (const task of tasks)
+      inventory.push({ ...task, workspaceId: workspace.id, workspaceName: workspace.name });
+    if (inventory.length > pageSize) break;
+  }
+  const hasMore = inventory.length > pageSize;
+  if (hasMore) inventory.pop();
+  const last = inventory.at(-1);
+  return {
+    automations: inventory,
+    automationNextCursor: hasMore && last ? `${last.workspaceId}.${last.id}` : null,
+  };
 }
 
 function cursorScope(input: Scope & { query: InsightsCallsQuery }): string {

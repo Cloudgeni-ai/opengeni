@@ -1543,6 +1543,7 @@ export * from "./insights";
 export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
 export * from "./insights-unified";
+export * from "./automation-run-metrics";
 export * from "./sandbox-viewer-only-drain";
 export * from "./sandbox-fleet-limits";
 import {
@@ -6931,6 +6932,8 @@ export type ModelCallFact = {
   model: string;
   billingPath: ModelCallBillingPath;
   turnSource: string | null;
+  /** Accepted turn surface when returned by the fact writer; telemetry only. */
+  turnSurface?: string | null;
   initiatorKind: string | null;
   initiatorSubjectId: string | null;
   scheduledTaskId: string | null;
@@ -7148,6 +7151,7 @@ export async function recordModelCallFact(
       const [turn] = await scopedDb
         .select({
           source: schema.sessionTurns.source,
+          surface: schema.sessionTurns.surface,
           initiatorKind: schema.sessionTurns.initiatorKind,
           initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
           initiatorContext: schema.sessionTurns.initiatorContext,
@@ -7259,7 +7263,7 @@ export async function recordModelCallFact(
       if (!row) {
         throw new Error("Failed to record model call fact");
       }
-      return mapModelCallFact(row);
+      return { ...mapModelCallFact(row), turnSurface: turn?.surface ?? null };
     },
   );
 }

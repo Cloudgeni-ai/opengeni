@@ -5,15 +5,19 @@ import { InsightsCallsResponse, InsightsUsageResponse } from "@opengeni/contract
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   applyCreditLedgerEntry,
+  compactAutomationRunCounters,
   createApiKey,
   createDb,
   createOrganizationApiKey,
+  createScheduledTask,
   createSession,
   createChannel,
   setSessionChannel,
   deleteSessionTreeIfQuiescent,
+  enqueueSessionTurn,
   ensureManagedAccessForUser,
   recordModelCallFact,
+  recordScheduledTaskAdmissionRefusal,
   updateSessionTitle,
   updateOrganizationApiKey,
   transitionSessionVisibility,
@@ -24,7 +28,10 @@ import {
   withDatabaseStatementTimeout,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
@@ -33,15 +40,16 @@ import { sql } from "drizzle-orm";
 import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
 import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
 import { createApp } from "../src/app";
+import { automationRunMetrics, registerPrometheusMetricsRoute } from "../src/http/metrics-listener";
 
 const secret = "insights-unified-http-postgres-fixture";
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let client: DbClient;
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("insights-unified-http");
+  const acquired = await acquireRestrictedRuntimeTestDatabase("insights-unified-http");
   if (!acquired) throw new Error("Unified Insights HTTP verification requires PostgreSQL");
   shared = acquired;
-  client = createDb(shared.appUrl);
+  client = createDb(shared.appUrl, { searchPath: shared.schema });
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -494,7 +502,21 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
   await shared.admin`insert into workspace_memberships(account_id,workspace_id,subject_id,role,permissions)
     values (${scope.accountId},${other.workspaceId},${scope.subjectId},'owner','[]'::jsonb)`;
   const sessions = [];
+  const tasks: string[] = [];
   for (const selected of [scope, other]) {
+    const task = await createScheduledTask(client.db, {
+      ...selected,
+      name: `Inventory in ${selected.workspaceId}`,
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Test", tools: [], resources: [], metadata: {} },
+      createdBy: { kind: "service", subjectId: "scheduler" },
+      metadata: {},
+    });
+    tasks.push(task.id);
     const session = await withSessionRlsActorContext({ subjectId: scope.subjectId }, () =>
       createSession(client.db, {
         accountId: scope.accountId,
@@ -530,7 +552,12 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
   }
   async function key(
     workspaceIds: string[] | null,
-    permissions: Permission[] = ["billing:read", "workspace:read", "sessions:read"],
+    permissions: Permission[] = [
+      "billing:read",
+      "workspace:read",
+      "sessions:read",
+      "scheduled_tasks:run",
+    ],
   ) {
     const raw = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
     const input = {
@@ -581,6 +608,16 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
     );
     expect(response.status, await response.clone().text()).toBe(200);
     const body = InsightsUsageResponse.parse(await response.json());
+    expect(body.automations?.map((task) => task.id).sort()).toEqual(
+      tasks
+        .filter((_, index) =>
+          (expectedIds as readonly string[]).includes(
+            index === 0 ? scope.workspaceId : other.workspaceId,
+          ),
+        )
+        .sort(),
+    );
+    expect(body.automations?.every((task) => task.fires === 0)).toBe(true);
     // Account billing authority still includes unattributed amounts; detail ceiling is independent.
     expect(body.totals).toMatchObject({ calls: 2, listMicros: 26 });
     expect(body.facets.workspaces.map((item) => item.id).sort()).toEqual([...expectedIds].sort());
@@ -636,6 +673,218 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
       nextCursor: null,
     });
   }
+}, 120_000);
+
+test("recorded model facts report the accepted turn surface to metrics writers", async () => {
+  const scope = await fixture();
+  const actors = { subjectId: scope.subjectId };
+  const session = await withSessionRlsActorContext(actors, () =>
+    createSession(client.db, {
+      ...scope,
+      initialMessage: "Source test",
+      resources: [],
+      metadata: {},
+      model: "fixture-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+      createdByContext: {},
+    }),
+  );
+  for (const surface of ["web", "slack", "scheduled", null] as const) {
+    const turn = await withSessionRlsActorContext(actors, () =>
+      enqueueSessionTurn(client.db, {
+        ...scope,
+        sessionId: session.id,
+        triggerEventId: crypto.randomUUID(),
+        temporalWorkflowId: crypto.randomUUID(),
+        source: "user",
+        surface,
+        prompt: "Source fixture",
+        resources: [],
+        tools: [],
+        model: "fixture-model",
+        reasoningEffort: "medium",
+        sandboxBackend: "none",
+        metadata: {},
+        initiator: { kind: "subject", subjectId: scope.subjectId },
+      }),
+    );
+    const fact = await withSessionRlsActorContext(actors, () =>
+      recordModelCallFact(client.db, {
+        ...scope,
+        sessionId: session.id,
+        turnId: turn.id,
+        sourceKey: crypto.randomUUID(),
+        provider: "openai",
+        providerApi: "responses",
+        model: "fixture-model",
+        billingPath: "opengeni_credits",
+        pricedCostMicros: 5,
+        estimatedProviderCostMicros: 10,
+        pricingSource: "configured_list_price",
+      }),
+    );
+    expect(fact.turnSurface).toBe(surface);
+  }
+}, 120_000);
+
+test("inventory includes zero-use and terminal runs; the shared metric increments once and excludes private and tenant labels", async () => {
+  const scope = await fixture();
+  const create = (name: string, visibility: "workspace_shared" | "user_private") =>
+    createScheduledTask(client.db, {
+      ...scope,
+      name,
+      status: "active",
+      schedule: {
+        type: "once",
+        runAt: new Date(Date.now() + 3_600_000).toISOString(),
+        timeZone: "UTC",
+      },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Test", tools: [], resources: [], metadata: {} },
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+      visibility,
+      metadata: {},
+    });
+  const [ran, unused, privateTask] = await Promise.all([
+    create("Ran once", "workspace_shared"),
+    create("Unused", "workspace_shared"),
+    create("Only me", "user_private"),
+  ]);
+  const settings = testSettings();
+  const metricApp = new Hono();
+  registerPrometheusMetricsRoute(metricApp, { prometheusMetrics: async () => "" }, () =>
+    automationRunMetrics(client.db, settings),
+  );
+  const metrics = async () => (await metricApp.request("/metrics")).text();
+  const count = (text: string, kind: string, outcome: string) =>
+    Number(
+      text.match(
+        new RegExp(
+          `opengeni_automation_runs_total\\{trigger_kind="${kind}",outcome="${outcome}",[^}]+\\} (\\d+)`,
+        ),
+      )?.[1],
+    );
+  const before = await metrics();
+  expect(before).toContain("# TYPE opengeni_automation_runs_total counter");
+  for (const [triggerType, retryable] of [
+    ["scheduled", false],
+    ["provider_event", true],
+  ] as const) {
+    const input = {
+      workspaceId: scope.workspaceId,
+      taskId: ran.id,
+      taskAuthorityRevision: ran.authorityRevision,
+      taskExecutionDigest: ran.executionDigest,
+      triggerType,
+      producerKey: crypto.randomUUID(),
+      reason: "scheduled_authority_unavailable" as const,
+      retryable,
+    };
+    const receipt = await recordScheduledTaskAdmissionRefusal(client.db, input);
+    expect((await recordScheduledTaskAdmissionRefusal(client.db, input)).id).toBe(receipt.id);
+  }
+  const after = await metrics();
+  expect(count(after, "once", "failed")).toBe(count(before, "once", "failed") + 1);
+  expect(count(after, "event", "skipped")).toBe(count(before, "event", "skipped") + 1);
+  expect(after).not.toContain(scope.workspaceId);
+  expect(after).not.toContain(ran.id);
+  const app = api();
+  const authorization = await bearer(scope, ["billing:read", "scheduled_tasks:run"]);
+  const response = await app.request(path(scope, true, "usage", "range=24h"), {
+    headers: { authorization },
+  });
+  expect(response.status, await response.clone().text()).toBe(200);
+  const snapshot = InsightsUsageResponse.parse(await response.json());
+  expect(snapshot.totals.calls).toBe(0);
+  expect(new Map(snapshot.automations?.map((row) => [row.id, row.fires]))).toEqual(
+    new Map([
+      [privateTask.id, 0],
+      [ran.id, 2],
+      [unused.id, 0],
+    ]),
+  );
+  const page = async (cursor?: string) => {
+    const params = new URLSearchParams({ range: "24h", limit: "2" });
+    if (cursor) params.set("automationCursor", cursor);
+    const result = await app.request(path(scope, true, "usage", params.toString()), {
+      headers: { authorization },
+    });
+    expect(result.status, await result.clone().text()).toBe(200);
+    return InsightsUsageResponse.parse(await result.json());
+  };
+  const first = await page();
+  expect(first.automations).toHaveLength(2);
+  expect(first.automationNextCursor).toBeString();
+  const second = await page(first.automationNextCursor!);
+  expect(second.automations).toHaveLength(1);
+  expect(second.automationNextCursor).toBeNull();
+  expect([...first.automations!, ...second.automations!]).toEqual(snapshot.automations!);
+  expect(second.totals).toEqual(snapshot.totals);
+
+  const refusal = (task: typeof ran) => ({
+    workspaceId: scope.workspaceId,
+    taskId: task.id,
+    taskAuthorityRevision: task.authorityRevision,
+    taskExecutionDigest: task.executionDigest,
+    triggerType: "scheduled" as const,
+    producerKey: crypto.randomUUID(),
+    reason: "scheduled_authority_unavailable" as const,
+    retryable: false,
+  });
+  const inserted = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const firstWriter = client.db.transaction(async (db) => {
+    try {
+      await recordScheduledTaskAdmissionRefusal(db, refusal(ran));
+      inserted.resolve();
+      await finish.promise;
+    } catch (error) {
+      inserted.reject(error);
+      throw error;
+    }
+  });
+  try {
+    await inserted.promise;
+    await withDatabaseStatementTimeout(client.db, 1_000, (db) =>
+      recordScheduledTaskAdmissionRefusal(db, refusal(unused)),
+    );
+  } finally {
+    finish.resolve();
+    await firstWriter;
+  }
+  const rolledBack = new Error("roll back terminal settlement");
+  await expect(
+    client.db.transaction(async (db) => {
+      await recordScheduledTaskAdmissionRefusal(db, { ...refusal(ran), triggerType: "manual" });
+      throw rolledBack;
+    }),
+  ).rejects.toThrow(rolledBack.message);
+  const beforeCompaction = await metrics();
+  expect(count(beforeCompaction, "manual", "failed")).toBe(count(before, "manual", "failed"));
+  expect(count(beforeCompaction, "once", "failed")).toBe(count(after, "once", "failed") + 2);
+  await Promise.all([
+    compactAutomationRunCounters(client.db),
+    compactAutomationRunCounters(client.db),
+  ]);
+  const [folded] = await client.db.execute<{ pending: boolean; runs: string }>(sql`
+    select exists(select 1 from automation_run_outcome_events) as pending,
+      (select runs::text from automation_run_counters
+        where trigger_kind = 'once' and outcome = 'failed') as runs`);
+  expect(folded).toEqual({
+    pending: false,
+    runs: String(count(beforeCompaction, "once", "failed")),
+  });
+  expect(await metrics()).toBe(beforeCompaction);
+  const withoutScheduleRead = await bearer(scope, ["billing:read", "sessions:read"]);
+  const noAccess = await app.request(path(scope, true, "usage", "range=24h"), {
+    headers: { authorization: withoutScheduleRead },
+  });
+  expect(InsightsUsageResponse.parse(await noAccess.json()).automations).toEqual([]);
 }, 120_000);
 
 test("HTTP readers preserve actual debit totals while enforcing the delegated detail ceiling", async () => {

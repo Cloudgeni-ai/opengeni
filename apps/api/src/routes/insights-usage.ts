@@ -47,7 +47,7 @@ export function insightsQueryParameters(
   );
 }
 
-/** Frozen interim capabilities: a newer additive contract must not silently widen a raw query. */
+/** Explicit server capabilities: an additive contract must not silently widen a raw query. */
 export function insightsRawQuerySupported(
   query: Record<string, unknown>,
   organization: boolean,
@@ -65,7 +65,7 @@ export function insightsRawQuerySupported(
     "rootSessionId",
     "scheduleId",
     "limit",
-    ...(organization ? ["workspaceId"] : []),
+    ...(organization ? (calls ? ["workspaceId"] : ["workspaceId", "automationCursor"]) : []),
     ...(calls ? ["cursor"] : ["groupBy", "seriesGroups", "agentId"]),
   ]);
   if (Object.keys(query).some((key) => !keys.has(key))) return false;
@@ -111,8 +111,8 @@ function organizationCacheAuthority(context: AccessContext, accountId: string) {
 
 function rawUsageResponse(response: Awaited<ReturnType<typeof getInsightsUsage>>) {
   const parsed = InsightsUsageResponse.parse(response);
-  // A newer contract can supply an additive default. Absence is a capability
-  // signal, so this raw implementation must not manufacture source support.
+  // Preserve an older reader's missing capability marker when validation
+  // supplies an additive default.
   if (!Object.hasOwn(response.facets, "sources")) Reflect.deleteProperty(parsed.facets, "sources");
   return parsed;
 }
@@ -128,6 +128,8 @@ export function insightsUsageCoalesceKey(
     scope.workspaceId,
     [...(scope.detailsWorkspaceIds ?? [])].sort(),
     scope.detailsSharedWorkspaces === true,
+    [...(scope.automationWorkspaceIds ?? [])].sort(),
+    scope.automationSharedWorkspaces === true,
     query,
     actor,
   ]);
@@ -145,6 +147,11 @@ export function organizationInsightsScope(
       "sessions:read",
       authority.permissionMode,
     );
+    const automationReadable = hasPermission(
+      authority.permissions,
+      "scheduled_tasks:run",
+      authority.permissionMode,
+    );
     return {
       accountId,
       workspaceId: null,
@@ -153,24 +160,39 @@ export function organizationInsightsScope(
           ? [...authority.workspaceScope.workspaceIds].sort()
           : [],
       detailsSharedWorkspaces: readable && authority.workspaceScope.kind === "all",
+      ...(automationReadable
+        ? authority.workspaceScope.kind === "selected"
+          ? { automationWorkspaceIds: [...authority.workspaceScope.workspaceIds].sort() }
+          : { automationSharedWorkspaces: true }
+        : {}),
     };
   }
+  const memberGrants = context.workspaceGrants.filter(
+    (grant) => grant.accountId === accountId && grant.subjectId === context.subjectId,
+  );
+  const automationWorkspaceIds = [
+    ...new Set(
+      memberGrants
+        .filter((grant) =>
+          hasPermission(grant.permissions, "scheduled_tasks:run", grant.permissionMode),
+        )
+        .map((grant) => grant.workspaceId),
+    ),
+  ].sort();
   return {
     accountId,
     workspaceId: null,
     detailsWorkspaceIds: [
       ...new Set(
-        context.workspaceGrants
-          .filter(
-            (grant) =>
-              grant.accountId === accountId &&
-              grant.subjectId === context.subjectId &&
-              hasPermission(grant.permissions, "sessions:read", grant.permissionMode),
+        memberGrants
+          .filter((grant) =>
+            hasPermission(grant.permissions, "sessions:read", grant.permissionMode),
           )
           .map((grant) => grant.workspaceId),
       ),
     ].sort(),
     detailsSharedWorkspaces: false,
+    ...(automationWorkspaceIds.length ? { automationWorkspaceIds } : {}),
   };
 }
 
