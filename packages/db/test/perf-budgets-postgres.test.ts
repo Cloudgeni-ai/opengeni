@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -54,11 +54,13 @@ import {
 // FORCE RLS, SECURITY DEFINER bodies owned by a BYPASSRLS migration owner) and
 // its EXPLAIN (ANALYZE, BUFFERS) shared buffers, hit + read, must stay within
 // its committed budget in perf-budgets.ts. Buffers, not time: the same plan
-// on the same rows reads the same pages on any runner.
+// on the same rows reads the same pages on any runner, and every measuring
+// connection plans with PostgreSQL's default planner settings (PINNED_PLANNER).
 //
 // The last tests put back the regressions these budgets exist for (#8168's
-// admission body, no index 1579, unguarded owner definers, no index 1696 and
-// the unsplit lookup) and require each budget to fail on it, then restore.
+// admission body, no index 1589, no index 1579, unguarded owner definers, no
+// index 1696 and the unsplit lookup) and require each budget to fail on it,
+// then restore.
 
 let shared: RestrictedRuntimeTestDatabase;
 let client: DbClient;
@@ -75,30 +77,66 @@ const BOTH_PLANS: PlanMode[] = ["force_generic_plan", "force_custom_plan"];
 
 // Fixture sizes. Production's worst cases are larger; these are large enough
 // that every regression below reads several times its budget.
-const CHAT_TURNS = 2_000;
-const CHAT_BACKGROUND_SESSIONS = 6_000;
+//
+// OPENGENI_PERF_BUDGETS_SCALE (default 1) multiplies the shared sizes, for
+// checking that a probe is isolated (docs/perf-budgets.md): a bounded probe
+// must measure the same at scale 2. The sizes marked "own" are the data a
+// probe's cost is proportional to by design (the GC claim reads every live
+// checkpoint, the inventory every plan organization); they do not scale.
+const SCALE = Number(process.env.OPENGENI_PERF_BUDGETS_SCALE ?? "1");
+if (!(SCALE >= 1)) throw new Error("OPENGENI_PERF_BUDGETS_SCALE must be a number >= 1");
+const scaled = (size: number) => Math.round(size * SCALE);
+const CHAT_TURNS = scaled(2_000);
+// Three short sessions' turns between each two of the chat's, as production
+// interleaves a long chat's turns with everyone else's over time.
+const CHAT_BACKGROUND_SESSIONS = 3 * CHAT_TURNS;
+// Older turns of other short sessions of the workspace, so the chat is a
+// small share of session_turns as in production. With the chat a quarter of
+// the table, a custom plan scanned the whole table for its person/API turns.
+const HISTORY_TURNS = scaled(90_000);
 const FIRST_SEQUENCE = 1_000;
-const TARGET_CHATS = 50;
-const SCHEDULED_TASKS = 200;
-const SCHEDULED_RUNS = 6_000;
-const BUSY_LEDGER_ROWS = 60_000;
-const PLAN_ORGANIZATIONS = 1_000;
-const PLAN_LEDGER_NOISE = 60_000;
-const CHECKPOINT_LEASES = 1_000;
+const TARGET_CHATS = 50; // own: schedule_targets_reads
+const SCHEDULED_TASKS = scaled(200);
+const SCHEDULED_RUNS = scaled(6_000);
+const BUSY_LEDGER_ROWS = scaled(60_000);
+const PLAN_ORGANIZATIONS = 1_000; // own: list_subscription_plan_maintenance_accounts
+const PLAN_LEDGER_NOISE = scaled(60_000);
+const CHECKPOINT_LEASES = 1_000; // own: checkpoint_gc_claim
 // Recently deleted checkpoints, kept until their retention passes.
-const CHECKPOINT_TOMBSTONES = 300;
-const ATTEMPTS = 11_000;
-const SETTLED_REQUESTS = 39_000;
+const CHECKPOINT_TOMBSTONES = 300; // own: checkpoint_gc_prune
+const ATTEMPTS = scaled(11_000);
+const SETTLED_REQUESTS = scaled(39_000);
 const OPEN_TURN_REQUESTS = 4;
-const BACKGROUND_LEASES = 1_000;
+const BACKGROUND_LEASES = scaled(1_000);
 const BACKGROUND_REQUESTS_PER_LEASE = 34;
-const RETAINED_PROCESSES = 3_000;
-const BACKGROUND_COMMANDS = 3_000;
-const OUTBOX_GRACE_ROWS = 5_000;
-const GOALS = 30_000;
-const OTHER_TENANT_SESSIONS = 3_000;
-const TERMINAL_CALLS = 3_000;
-const TERMINAL_FILLER_EVENTS = 4_000;
+const RETAINED_PROCESSES = scaled(3_000);
+const BACKGROUND_COMMANDS = scaled(3_000);
+const OUTBOX_GRACE_ROWS = 5_000; // own: host_export_outbox_prune (index entries of the window)
+const GOALS = scaled(30_000);
+const OTHER_TENANT_SESSIONS = 3_000; // own: rls_policy_heavy_read
+const TERMINAL_CALLS = scaled(3_000);
+const TERMINAL_FILLER_EVENTS = scaled(4_000);
+// One clock reading for every plan date, so plan maintenance's due set is
+// decided against one instant rather than each statement's now(); the
+// measurement runs well inside the hour of margin the seed leaves.
+const PLAN_ANCHOR = new Date().toISOString();
+
+/**
+ * Planner settings every measuring connection gets (docs/perf-budgets.md):
+ * PostgreSQL's compiled defaults for every planner method, cost and
+ * collapse setting and for work_mem, with no parallel workers and no JIT, so
+ * a test cluster's tuning cannot change a plan's shape or its buffers.
+ */
+const PINNED_PLANNER = `
+  select name, case name
+      when 'jit' then 'off'
+      when 'max_parallel_workers_per_gather' then '0'
+      else boot_val end as value
+  from pg_settings
+  where context = 'user'
+    and (category like 'Query Tuning%'
+      or name in ('work_mem', 'hash_mem_multiplier', 'max_parallel_workers_per_gather'))
+  order by name`;
 
 const fixture = {} as {
   chat: Grant & { sessionId: string; task: Awaited<ReturnType<typeof createScheduledTask>> };
@@ -112,13 +150,14 @@ const fixture = {} as {
   };
   idleGoalSession: string;
   reader: Grant;
+  otherTenant: Grant;
   wake: { parent: string; stranded: string };
   terminal: Grant & { sessionId: string; turnId: string };
 };
 
 const FIXTURES: Record<PerfBudgetId, string> = {
-  scheduled_admission: `one chat with ${CHAT_TURNS} scheduled turns after a settings write, ${CHAT_BACKGROUND_SESSIONS} short sessions beside it, ${SCHEDULED_TASKS} tasks and ${SCHEDULED_RUNS} runs`,
-  effective_model_read: `the same chat: ${CHAT_TURNS} scheduled turns after a settings write`,
+  scheduled_admission: `one chat with ${CHAT_TURNS} scheduled turns after a settings write, interleaved with ${CHAT_BACKGROUND_SESSIONS} short sessions' turns after ${HISTORY_TURNS} older ones, ${SCHEDULED_TASKS} tasks and ${SCHEDULED_RUNS} runs`,
+  effective_model_read: `the same chat: ${CHAT_TURNS} scheduled turns after a settings write, among ${CHAT_BACKGROUND_SESSIONS + HISTORY_TURNS} other turns`,
   schedule_targets_reads: `${TARGET_CHATS} target chats of ${SCHEDULED_TASKS} schedules`,
   schedule_targets_statements: `${TARGET_CHATS} target chats of ${SCHEDULED_TASKS} schedules`,
   credit_balance_read: `an organization with ${BUSY_LEDGER_ROWS} usage debits`,
@@ -180,6 +219,13 @@ beforeAll(async () => {
   await shared.admin.unsafe(
     `alter role opengeni_app in database "${database!.name}" set track_functions = 'all'`,
   );
+  // Pin the planner for every connection opened from here on.
+  const planner = await shared.admin.unsafe<{ name: string; value: string }[]>(PINNED_PLANNER);
+  for (const setting of planner) {
+    await shared.admin.unsafe(
+      `alter database "${database!.name}" set ${setting.name} = '${setting.value.replaceAll("'", "''")}'`,
+    );
+  }
   client = createDb(shared.appUrl, { max: 2, searchPath: shared.schema });
   // Production's migration owner bypasses row security; its triggers and
   // SECURITY DEFINER routines run that way while seeding and measuring.
@@ -195,7 +241,7 @@ beforeAll(async () => {
     ["otherTenant", seedOtherTenant],
     ["wakeRepairs", seedWakeRepairs],
     ["terminalTurn", seedTerminalTurn],
-    ["vacuumAnalyze", () => shared.admin`vacuum analyze`],
+    ["vacuumAnalyze", vacuumAnalyze],
   ] as const) {
     const stepStarted = performance.now();
     await seed();
@@ -204,6 +250,8 @@ beforeAll(async () => {
   console.info(
     "perf-budget-fixture",
     JSON.stringify({
+      scale: SCALE,
+      pinnedPlannerSettings: planner.length,
       migrateMs: Math.round(migrated - started),
       seedMs: Math.round(performance.now() - migrated),
       steps: seedMs,
@@ -394,6 +442,17 @@ async function asOwner<T>(fn: (owner: postgres.Sql) => Promise<T>): Promise<T> {
 // ---------------------------------------------------------------------------
 // Fixture
 
+/** Statistics at the pinned default_statistics_target. */
+async function vacuumAnalyze() {
+  const connection = await shared.admin.reserve();
+  try {
+    await connection`select set_config('default_statistics_target', '100', false)`;
+    await connection`vacuum analyze`;
+  } finally {
+    connection.release();
+  }
+}
+
 async function workspace(label: string): Promise<Grant> {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
@@ -482,10 +541,29 @@ async function seedScheduledChat() {
         status, source, position, prompt, model, reasoning_effort, latency_mode,
         sandbox_backend, resources, tools, metadata, started_at, finished_at
       ) select gen_random_uuid(), ${grant.accountId}::uuid, ${grant.workspaceId}::uuid,
-        ${chat.id}::uuid, gen_random_uuid(), ${`session-${chat.id}`}, 'completed',
-        'scheduled_task', n, 'turn', 'automated-model', 'medium', 'standard', 'none',
-        '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, now(), now()
-      from generate_series(1, ${CHAT_TURNS}) n`;
+        md5('perf-history-' || n / 3)::uuid, gen_random_uuid(), 'history', 'completed',
+        case when n % 5 = 0 then 'api' else 'user' end, 1 + n % 3, 'turn', 'history-model',
+        'medium', 'standard', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+        now() - interval '30 days', now() - interval '30 days'
+      from generate_series(1, ${HISTORY_TURNS}) n`;
+    // The chat's scheduled turns interleaved with the short sessions' turns
+    // (most sessions of a workspace are short: production-like statistics),
+    // so a read of every turn of the chat touches most of the table's pages,
+    // as it does in production.
+    await tx`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, source, position, prompt, model, reasoning_effort, latency_mode,
+        sandbox_backend, resources, tools, metadata, started_at, finished_at
+      ) select gen_random_uuid(), ${grant.accountId}::uuid, ${grant.workspaceId}::uuid,
+        case when chat_turn then ${chat.id}::uuid else gen_random_uuid() end, gen_random_uuid(),
+        case when chat_turn then ${`session-${chat.id}`} else 'background' end, 'completed',
+        case when chat_turn then 'scheduled_task' else 'user' end,
+        case when chat_turn then n / 4 else 1 end, 'turn',
+        case when chat_turn then 'automated-model' else 'background-model' end, 'medium',
+        'standard', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, now(), now()
+      from generate_series(1, ${CHAT_TURNS + CHAT_BACKGROUND_SESSIONS}) n,
+        lateral (select n % 4 = 0 as chat_turn) kind`;
     await tx`
       insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
       select turn.account_id, turn.workspace_id, turn.session_id, turn.id,
@@ -493,17 +571,6 @@ async function seedScheduledChat() {
         case when step.offset_value = 0 then 'turn.queued' else 'turn.started' end, '{}'::jsonb
       from session_turns turn cross join (values (0), (1)) step(offset_value)
       where turn.workspace_id = ${grant.workspaceId}::uuid and turn.session_id = ${chat.id}::uuid`;
-    // Most sessions of a workspace are short: production-like statistics.
-    await tx`
-      insert into session_turns (
-        id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
-        status, source, position, prompt, model, reasoning_effort, latency_mode,
-        sandbox_backend, resources, tools, metadata, started_at, finished_at
-      ) select gen_random_uuid(), ${grant.accountId}::uuid, ${grant.workspaceId}::uuid,
-        gen_random_uuid(), gen_random_uuid(), 'background', 'completed', 'user', 1, 'turn',
-        'background-model', 'medium', 'standard', 'none', '[]'::jsonb, '[]'::jsonb,
-        '{}'::jsonb, now(), now()
-      from generate_series(1, ${CHAT_BACKGROUND_SESSIONS})`;
     await tx`
       insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
       select turn.account_id, turn.workspace_id, turn.session_id, turn.id, step.offset_value,
@@ -573,11 +640,11 @@ async function seedLedgers() {
     await tx`
       insert into auth_users (id, name, email, email_verified, created_at)
       select 'plan-owner-' || i, 'Owner ' || i, 'plan-owner-' || i || '@example.test', true,
-        now() - (i * interval '7 hours')
+        ${PLAN_ANCHOR}::timestamptz - (i * interval '7 hours')
       from generate_series(1, ${PLAN_ORGANIZATIONS}) i`;
     await tx`
       insert into managed_accounts (name, created_at)
-      select 'plan-org-' || i, now() - ((i * 7) % 900) * interval '1 day' - interval '3 hours'
+      select 'plan-org-' || i, ${PLAN_ANCHOR}::timestamptz - ((i * 7) % 900) * interval '1 day' - interval '3 hours'
       from generate_series(1, ${PLAN_ORGANIZATIONS}) i`;
     await tx`
       create temp table plan_orgs on commit drop as
@@ -588,8 +655,8 @@ async function seedLedgers() {
         current_period_start, current_period_end)
       select id, case when i % 20 = 0 then 'pro' else 'free' end, 'active',
         case when i % 20 = 0 then 'sub_' || i end,
-        case when i % 20 = 0 then now() - interval '10 days' end,
-        case when i % 20 = 0 then now() + interval '20 days' end
+        case when i % 20 = 0 then ${PLAN_ANCHOR}::timestamptz - interval '10 days' end,
+        case when i % 20 = 0 then ${PLAN_ANCHOR}::timestamptz + interval '20 days' end
       from plan_orgs`;
     await tx`
       insert into credit_ledger_entries (account_id, type, amount_micros, source_type, source_id, idempotency_key)
@@ -613,14 +680,14 @@ async function seedLedgers() {
         (select min(revision) from opengeni_private.subscription_plan_catalog_revisions),
         anniversary.period_start, anniversary.period_end, 1000000, 0, grant_entry.id,
         'plan-credit:free:' || org.id::text || ':' || to_char(anniversary.period_start at time zone 'UTC', 'YYYY-MM'),
-        case when org.i % 10 < 3 then now() - interval '1 minute' end,
+        case when org.i % 10 < 3 then ${PLAN_ANCHOR}::timestamptz - interval '1 minute' end,
         case when org.i % 10 < 3 then grant_entry.id end,
         case when org.i % 10 < 3 then 0 end
       from plan_orgs org
       cross join lateral opengeni_private.subscription_plan_free_anniversary(org.created_at,
-        greatest(org.created_at, now())) anniversary
+        greatest(org.created_at, ${PLAN_ANCHOR}::timestamptz)) anniversary
       join credit_ledger_entries grant_entry on grant_entry.idempotency_key = 'plan-grant-' || org.id
-      where anniversary.period_end > now() + interval '1 hour'`;
+      where anniversary.period_end > ${PLAN_ANCHOR}::timestamptz + interval '1 hour'`;
   });
 }
 
@@ -864,6 +931,7 @@ async function seedOtherTenant() {
   const otherSession = await session(other);
   await session(reader);
   fixture.reader = reader;
+  fixture.otherTenant = other;
   await shared.admin.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
     await tx`
@@ -1157,6 +1225,19 @@ async function scheduledAdmissionBuffers(): Promise<number> {
   );
 }
 
+async function effectiveModelBuffers(): Promise<number> {
+  const { workspaceId, sessionId } = fixture.chat;
+  const [row] = await subjectScope(fixture.chat)(client.db, (tx) =>
+    effectiveSessionPolicyQuery(tx, workspaceId, [sessionId]),
+  );
+  expect(row?.model).toBe("stored-model");
+  const query = effectiveSessionPolicyQuery(client.db, workspaceId, [sessionId]).toSQL();
+  return await capturedBuffers(subjectScope(fixture.chat), {
+    query: query.sql,
+    parameters: query.params,
+  });
+}
+
 async function freePlanBuffers(): Promise<number> {
   let most = 0;
   for (const accountId of [fixture.busyOrganization, fixture.noTrialOrganization]) {
@@ -1248,19 +1329,7 @@ test("scheduled-run admission into a long scheduled chat", async () => {
 }, 300_000);
 
 test("the effective model of a long scheduled chat", async () => {
-  const { workspaceId, sessionId } = fixture.chat;
-  const [row] = await subjectScope(fixture.chat)(client.db, (tx) =>
-    effectiveSessionPolicyQuery(tx, workspaceId, [sessionId]),
-  );
-  expect(row?.model).toBe("stored-model");
-  const query = effectiveSessionPolicyQuery(client.db, workspaceId, [sessionId]).toSQL();
-  within(
-    "effective_model_read",
-    await capturedBuffers(subjectScope(fixture.chat), {
-      query: query.sql,
-      parameters: query.params,
-    }),
-  );
+  within("effective_model_read", await effectiveModelBuffers());
 }, 120_000);
 
 test("schedule target chats are read in one batch", async () => {
@@ -1354,10 +1423,15 @@ test("the hands-back active-goal check", async () => {
 
 test("runtime-role policies skip owner-only definers", async () => {
   within("rls_owner_definer_calls", await ownerDefinerCalls());
-  within(
-    "rls_policy_heavy_read",
-    await steadyBuffers(subjectScope(fixture.reader), "select count(*) from sessions"),
+  // Only the two tenants' rows (an index range), so other probes' sessions
+  // do not move this budget.
+  const read = `select count(*) from sessions
+    where workspace_id in ('${fixture.reader.workspaceId}'::uuid, '${fixture.otherTenant.workspaceId}'::uuid)`;
+  const [count] = await subjectScope(fixture.reader)(client.db, (tx) =>
+    tx.execute(sql.raw(`${read.replace("count(*)", "count(*)::int as count")}`)),
   );
+  expect((count as { count: number }).count).toBe(1);
+  within("rls_policy_heavy_read", await steadyBuffers(subjectScope(fixture.reader), read));
 }, 120_000);
 
 test("the terminal usage insert of a turn with thousands of calls", async () => {
@@ -1423,11 +1497,17 @@ test("the lost-provider retained-process session lookup", async () => {
 
 const DRIZZLE = new URL("../drizzle/", import.meta.url);
 
-test("regression: #8168's admission body (1567, before 1695) exceeds its budget", async () => {
-  const migration = await readFile(
-    new URL("1695_scheduled_target_admission_bounded_turn_reads.sql", DRIZZLE),
-    "utf8",
+/** The migration file with this number, whatever its name. */
+async function migrationFile(number: number): Promise<URL> {
+  const names = (await readdir(DRIZZLE)).filter(
+    (name) => name.startsWith(`${number}_`) && name.endsWith(".sql"),
   );
+  expect(names).toHaveLength(1);
+  return new URL(names[0]!, DRIZZLE);
+}
+
+test("regression: #8168's admission body (1567, before 1695) exceeds its budget", async () => {
+  const migration = await readFile(await migrationFile(1695), "utf8");
   const olds = [...migration.matchAll(/\$old\$([\s\S]*?)\$old\$/g)].map((match) => match[1]!);
   const news = [...migration.matchAll(/\$new\$([\s\S]*?)\$new\$/g)].map((match) => match[1]!);
   expect({ olds: olds.length, news: news.length }).toEqual({ olds: 3, news: 3 });
@@ -1449,6 +1529,19 @@ test("regression: #8168's admission body (1567, before 1695) exceeds its budget"
   // Restored.
   within("scheduled_admission", await scheduledAdmissionBuffers());
 }, 600_000);
+
+test("regression: the effective model read without index 1589 exceeds its budget", async () => {
+  await asOwner(async (owner) => {
+    const [index] = await owner<{ definition: string }[]>`
+      select pg_get_indexdef('session_turns_session_person_api_idx'::regclass) as definition`;
+    await owner`drop index session_turns_session_person_api_idx`;
+    try {
+      caught("effective_model_read", "no index 1589", await effectiveModelBuffers());
+    } finally {
+      await owner.unsafe(index!.definition);
+    }
+  });
+}, 300_000);
 
 test("regression: free_plan_credit_eligible without index 1579 exceeds its budget", async () => {
   await asOwner(async (owner) => {

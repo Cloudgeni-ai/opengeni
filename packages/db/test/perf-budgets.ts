@@ -12,10 +12,11 @@
  * - `statements`: database statements one application call sends.
  *
  * `measured` is the largest value seen at the commit that set the budget, on
- * the CI test image (PostgreSQL 16, pgvector 0.8.7) and on PostgreSQL 17.
- * Budgets are twice that, rounded up, with at least 25 buffers (or 5 calls or
- * statements) of fixed margin for small values, so ordinary drift passes and a
- * change of plan shape does not.
+ * PostgreSQL 16 (the CI test image, pgvector 0.8.7) and PostgreSQL 17, with
+ * the planner pinned to its defaults. A `buffers` budget is twice that,
+ * rounded up to the next multiple of 10; a `calls` or `statements` budget is
+ * twice that and at least 3 more. Ordinary drift passes and a change of plan
+ * shape does not.
  */
 export type PerfBudgetUnit = "buffers" | "calls" | "statements";
 
@@ -38,17 +39,18 @@ export const PERF_BUDGETS = {
   scheduled_admission: {
     routine: "create_scheduled_agent_run_with_admission into a long scheduled chat",
     unit: "buffers",
-    budget: 1700,
-    measured: 820,
+    budget: 670,
+    measured: 333,
     guards:
       "#8243 migration 1695 (bounded effective/latest turn reads); #8168 migration 1567 regressed it",
   },
-  // #8201: the effective model of a chat walked every start since a settings write.
+  // #8201: the effective model of a chat walked every start since a settings write;
+  // without index 1589 it reads every turn of the chat (1,351 buffers here).
   effective_model_read: {
     routine: "effectiveSessionPolicyQuery for a long scheduled chat",
     unit: "buffers",
-    budget: 440,
-    measured: 217,
+    budget: 470,
+    measured: 235,
     guards: "#8201 (newest 16 starts, then person/API turns; index 1589)",
   },
   // #8201: GET /scheduled-tasks read each target chat with a full getSession.
@@ -56,13 +58,13 @@ export const PERF_BUDGETS = {
     routine: "getSessionToolConfigs for every target chat of a schedule-heavy workspace",
     unit: "buffers",
     budget: 220,
-    measured: 110,
+    measured: 109,
     guards: "#8201 (one batched read of target chats)",
   },
   schedule_targets_statements: {
     routine: "getSessionToolConfigs statements for every target chat",
     unit: "statements",
-    budget: 7,
+    budget: 5,
     measured: 2,
     guards: "#8201 (24 session reads for 8 schedules became 1)",
   },
@@ -70,14 +72,14 @@ export const PERF_BUDGETS = {
   credit_balance_read: {
     routine: "getBillingBalance for an organization with a large ledger",
     unit: "buffers",
-    budget: 40,
+    budget: 30,
     measured: 15,
     guards: "#8197 migrations 1576-1577 (credit_ledger_account_totals)",
   },
   read_organization_plan_balance: {
     routine: "read_organization_plan_balance for an organization with a large ledger",
     unit: "buffers",
-    budget: 30,
+    budget: 10,
     measured: 2,
     guards: "#8197",
   },
@@ -85,8 +87,8 @@ export const PERF_BUDGETS = {
   list_subscription_plan_maintenance_accounts: {
     routine: "list_subscription_plan_maintenance_accounts(50), steady state",
     unit: "buffers",
-    budget: 8900,
-    measured: 4404,
+    budget: 8640,
+    measured: 4318,
     guards: "#8197 migration 1578",
   },
   // #8197 (1579): the trial check read every ledger row of the account.
@@ -133,7 +135,7 @@ export const PERF_BUDGETS = {
     routine:
       "owner-only policy definer calls of a runtime-role scan past another tenant's sessions",
     unit: "calls",
-    budget: 5,
+    budget: 3,
     measured: 0,
     guards: "#8214 (inline owner test before owner-only capability definers)",
   },
@@ -141,22 +143,22 @@ export const PERF_BUDGETS = {
     routine: "runtime-role count(*) of sessions past another tenant's sessions",
     unit: "buffers",
     budget: 570,
-    measured: 283,
+    measured: 284,
     guards: "#8214",
   },
   // #8215 (1663-1668): the terminal insert re-summed every usage row of the turn.
   terminal_usage_insert: {
     routine: "terminal turn event insert for a turn with thousands of model calls",
     unit: "buffers",
-    budget: 210,
-    measured: 104,
+    budget: 220,
+    measured: 107,
     guards: "#8215 migrations 1663-1668 (session_turn_credit_totals)",
   },
   // #8221 (1670): planned an 8-way catalog join on each of a connection's first calls.
   editable_artifact_schema_resolver: {
     routine: "resolve_editable_artifact_data_schema, steady state",
     unit: "buffers",
-    budget: 50,
+    budget: 40,
     measured: 20,
     guards: "#8221 migration 1670",
   },
@@ -164,14 +166,14 @@ export const PERF_BUDGETS = {
   wake_inventory_child_terminal: {
     routine: "list_pending_child_terminal_wake_repairs_v1(100), steady state",
     unit: "buffers",
-    budget: 40,
+    budget: 30,
     measured: 13,
     guards: "#8221 1671, #8223 1672-1677, #8226 1681-1693",
   },
   wake_inventory_quiescence: {
     routine: "list_quiescence_receipt_wake_repairs_v1(100), steady state",
     unit: "buffers",
-    budget: 40,
+    budget: 30,
     measured: 13,
     guards: "#8221 1671, #8223 1672-1677, #8226 1681-1693",
   },
@@ -180,7 +182,7 @@ export const PERF_BUDGETS = {
     routine: "the lost-provider settlement's retained-process session lookup",
     unit: "buffers",
     budget: 130,
-    measured: 64,
+    measured: 62,
     guards: "#8243 index 1696 and the owner-arm split of the lookup",
   },
 } as const satisfies Record<string, PerfBudget>;
