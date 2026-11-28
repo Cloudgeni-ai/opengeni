@@ -495,8 +495,9 @@ export class EditableArtifactAgentApplication {
         { kind: "workbook-metadata" }
       > | null;
       const sheet = workbook?.projection.sheets[0] ?? null;
+      // Cells beyond the response bound (long text) draw as an empty grid too.
       const viewport = sheet
-        ? (
+        ? ((
             (await query({
               modality: "spreadsheet",
               query: {
@@ -511,8 +512,11 @@ export class EditableArtifactAgentApplication {
                   maxBytes: limits.spreadsheetResponseBytes,
                 },
               },
-            })) as Extract<SpreadsheetArtifactKernelProjection, { kind: "viewport" }>
-          ).projection
+            }).catch(() => null)) as Extract<
+              SpreadsheetArtifactKernelProjection,
+              { kind: "viewport" }
+            > | null
+          )?.projection ?? null)
         : null;
       svg = spreadsheetPreviewSvg(sheet, viewport);
     }

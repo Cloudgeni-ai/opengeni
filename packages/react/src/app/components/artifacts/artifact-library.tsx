@@ -732,7 +732,36 @@ function useSitePreviewSlot(enabled: boolean): { granted: boolean; release: () =
 }
 
 type SitePreviewState = "loading" | "painted" | "blank";
+/* Site versions found blank, by `id:versionId`. */
 const blankSitePreviews = new Set<string>();
+
+/*
+ * A preview is marked pending in this tab's session storage while it runs. A
+ * page that hangs the browser never clears its mark, so after a reload that
+ * version keeps its glyph instead of hanging the library again.
+ */
+const PENDING_SITE_PREVIEW = "opengeni:site-preview:pending:";
+const hungSitePreviews: ReadonlySet<string> = (() => {
+  const hung = new Set<string>();
+  try {
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index);
+      if (key?.startsWith(PENDING_SITE_PREVIEW)) hung.add(key.slice(PENDING_SITE_PREVIEW.length));
+    }
+  } catch {
+    // No session storage: nothing to remember.
+  }
+  return hung;
+})();
+
+function markSitePreviewPending(versionKey: string, pending: boolean) {
+  try {
+    if (pending) sessionStorage.setItem(PENDING_SITE_PREVIEW + versionKey, "1");
+    else sessionStorage.removeItem(PENDING_SITE_PREVIEW + versionKey);
+  } catch {
+    // Best effort.
+  }
+}
 
 function SiteStill({
   workspaceId,
@@ -746,12 +775,17 @@ function SiteStill({
   const html = useSiteHtml(workspaceId, item);
   const [preview, setPreview] = useState<{ html: string; state: SitePreviewState } | null>(null);
   if (!html) return placeholder;
-  // A page found blank isn't run again when its card scrolls back into view.
+  const versionKey = `${item.id}:${item.versionId}`;
+  // A page found blank (or that hung the tab last time) isn't run again.
   const state =
-    preview?.html === html ? preview.state : blankSitePreviews.has(html) ? "blank" : "loading";
+    preview?.html === html
+      ? preview.state
+      : blankSitePreviews.has(versionKey) || hungSitePreviews.has(versionKey)
+        ? "blank"
+        : "loading";
   const finish = (next: SitePreviewState, remember = true) => {
     if (next === "blank" && remember) {
-      blankSitePreviews.add(html);
+      blankSitePreviews.add(versionKey);
       if (blankSitePreviews.size > SITE_HTML_CACHE_LIMIT)
         blankSitePreviews.delete(blankSitePreviews.values().next().value!);
     }
@@ -773,6 +807,7 @@ function SiteStill({
             key={html}
             title={`Preview of ${item.title}`}
             html={html}
+            versionKey={versionKey}
             onSettled={(painted, reported) => finish(painted ? "painted" : "blank", reported)}
             onLeft={() => finish("blank")}
           />
@@ -812,11 +847,13 @@ function useSitePreviewScale(hostRef: { current: HTMLDivElement | null }) {
 function SiteStillFrame({
   title,
   html,
+  versionKey,
   onSettled,
   onLeft,
 }: {
   title: string;
   html: string;
+  versionKey: string;
   /** `reported` is false when the page never said, so it may be tried again later. */
   onSettled: (painted: boolean, reported: boolean) => void;
   /** The page navigated itself away: drop it. */
@@ -852,10 +889,11 @@ function SiteStillFrame({
     (painted: boolean, reported: boolean) => {
       if (settledRef.current) return;
       settledRef.current = true;
+      markSitePreviewPending(versionKey, false);
       releaseSlot();
       onSettledRef.current(painted, reported);
     },
-    [releaseSlot],
+    [releaseSlot, versionKey],
   );
   const frameHost = useHtmlFrameHost({
     frameRef,
@@ -867,6 +905,7 @@ function SiteStillFrame({
   const mounted = fit !== null && slotGranted && theme !== null;
   useEffect(() => {
     if (!mounted) return;
+    if (!settledRef.current) markSitePreviewPending(versionKey, true);
     const receive = (event: MessageEvent) => {
       // Only this card's own opaque-origin frame can report.
       const frameWindow = frameRef.current?.contentWindow;
@@ -884,8 +923,9 @@ function SiteStillFrame({
     return () => {
       window.removeEventListener("message", receive);
       clearTimeout(timer);
+      markSitePreviewPending(versionKey, false);
     };
-  }, [mounted, settle]);
+  }, [mounted, settle, versionKey]);
   const frameStyle = fit
     ? {
         width: `${SITE_PREVIEW_WIDTH}px`,

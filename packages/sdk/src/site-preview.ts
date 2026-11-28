@@ -61,11 +61,15 @@ function previewScript(theme: "light" | "dark" | undefined): string {
     // Only a loading message (an app waiting on the stand-in) isn't a picture.
     `const t=(b.innerText||"").trim();if(t)return !/^(loading|please wait)\\W*$/i.test(t);`,
     `if(document.querySelector("img,svg,canvas,video,picture,object,embed"))return true;`,
-    `if([document.documentElement,b].some((e)=>!blank.test(getComputedStyle(e).backgroundColor)))return true;`,
+    // The page's own canvas color (the Opengeni look's, or the system's) is
+    // empty too, in either theme.
+    `const canv=new Set();try{for(const v of ["var(--og-canvas)","Canvas"]){const e=document.createElement("i");e.style.backgroundColor=v;b.appendChild(e);canv.add(getComputedStyle(e).backgroundColor);e.remove();}}catch{}`,
+    `const empty=(c)=>blank.test(c)||canv.has(c);`,
+    `if([document.documentElement,b].some((e)=>!empty(getComputedStyle(e).backgroundColor)))return true;`,
     // Boxes drawn with CSS alone: sample a grid for any element with a fill.
     `const w=innerWidth,v=innerHeight;for(let i=1;i<6;i++)for(let j=1;j<6;j++)for(const e of document.elementsFromPoint(w*i/6,v*j/6)){`,
     `if(e===b||e===document.documentElement)break;const s=getComputedStyle(e);`,
-    `if(!blank.test(s.backgroundColor)||s.backgroundImage!=="none"||parseFloat(s.borderTopWidth)>0)return true;}`,
+    `if(!empty(s.backgroundColor)||s.backgroundImage!=="none"||parseFloat(s.borderTopWidth)>0)return true;}`,
     `return false;}catch{return false;}};`,
     // A page with no background of its own gets its canvas color (white, or
     // dark for a page that follows a dark theme), so its text never lands on
@@ -114,7 +118,7 @@ export function sitePreviewDocument(
   return (
     `<!doctype html><meta http-equiv="Content-Security-Policy" content="${HTML_FRAME_PREVIEW_POLICY}">` +
     `<script>${previewScript(ownTheme ? undefined : options.theme)}</script>` +
-    `<meta name="viewport" content="width=${SITE_PREVIEW_WIDTH}">` +
+    `<meta name="viewport" content="width=${SITE_PREVIEW_WIDTH}"><meta name="referrer" content="no-referrer">` +
     `<style>html,body{overflow:hidden!important;scrollbar-width:none}::-webkit-scrollbar{display:none}</style>` +
     page
   );

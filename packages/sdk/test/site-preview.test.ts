@@ -17,7 +17,7 @@ const scriptOf = (document: string) => {
 /** Runs the preview script against a stand-in window and returns what it posts. */
 function runPreviewScript(
   document: string,
-  page: { text: string; media?: boolean; background?: string; box?: string },
+  page: { text: string; media?: boolean; background?: string; box?: string; canvas?: string },
 ) {
   const posted: unknown[] = [];
   const timers: Array<() => void> = [];
@@ -28,7 +28,8 @@ function runPreviewScript(
     style: {} as Record<string, string>,
     setAttribute: (name: string, value: string) => (fakeGlobal[name] = value),
   };
-  const body = { innerText: page.text };
+  const body = { innerText: page.text, appendChild: () => undefined };
+  const probes = new Set<unknown>();
   const box = { box: page.box };
   const fakeDocument = {
     readyState: "loading",
@@ -36,6 +37,11 @@ function runPreviewScript(
     body,
     querySelector: () => (page.media ? {} : null),
     elementsFromPoint: () => (page.box ? [box, body, root] : [body, root]),
+    createElement: () => {
+      const probe = { style: {}, remove: () => undefined };
+      probes.add(probe);
+      return probe;
+    },
   };
   new Function(
     "globalThis",
@@ -57,8 +63,9 @@ function runPreviewScript(
     },
     (callback: () => void) => timers.push(callback),
     (element: unknown) => ({
-      backgroundColor:
-        element === root
+      backgroundColor: probes.has(element)
+        ? (page.canvas ?? "rgba(0, 0, 0, 0)")
+        : element === root
           ? (root.style["backgroundColor"] ?? "rgba(0, 0, 0, 0)")
           : element === box
             ? page.box
@@ -203,6 +210,9 @@ describe("Site card preview document", () => {
     // Cards and panels drawn with CSS alone, on a white page.
     [{ text: "", box: "rgb(37, 99, 235)" }, true],
     [{ text: "", box: "rgba(0, 0, 0, 0)" }, false],
+    // An empty page in the Opengeni look's dark canvas is as empty as a white one.
+    [{ text: "", background: "rgb(32, 32, 32)", canvas: "rgb(32, 32, 32)" }, false],
+    [{ text: "", background: "rgb(17, 17, 17)", canvas: "rgb(32, 32, 32)" }, true],
     // An app still waiting on the stand-in client isn't a picture.
     [{ text: "Loading…", background: "rgb(17, 17, 17)" }, false],
     [{ text: "Loading issues: 12 open" }, true],

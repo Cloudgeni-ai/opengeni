@@ -225,7 +225,8 @@ scripts, styles, fonts and images load as when the Site is opened, so viewing
 the library can reach the hosts a Site uses (never with workspace credentials).
 A `<meta>` refresh is removed, and a page that navigates itself away reports
 leaving (`pagehide`) and is dropped for the glyph. There is no Site bridge: the Site client
-script is removed (however it is tagged) and
+script tag is removed (whatever its attributes; a client loaded any other way
+fails harmlessly) and
 `createOpenGeniSiteClient` is a stand-in whose calls never settle, so a card
 reaches no workspace data, tools, AI or credentials and an app shows its loading
 state. The Opengeni look (`/__opengeni/ui.css`) and charts are inlined. Once
@@ -233,7 +234,9 @@ loaded and settled the page reports whether it painted anything
 (`opengeni.site-preview.painted`); until then, and for a page that stays blank
 or never reports (10 s from when the frame mounts), the card keeps its type
 glyph. At most three previews load at a time, and a frame is unmounted when its
-card leaves the viewport (a page found blank isn't run again). Without a frame
+card leaves the viewport (a version found blank isn't run again). A running
+preview is marked in the tab's session storage, so a version that hung the tab
+keeps its glyph after a reload instead of hanging the library again. Without a frame
 host the same preview document runs in a `srcdoc` frame with the same
 `sandbox="allow-scripts"`, as a Site's own viewer does.
 

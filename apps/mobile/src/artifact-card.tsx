@@ -352,8 +352,12 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
     failedPictures.add(pictureKey);
     setPictureFailed(pictureKey);
   }, [pictureKey]);
-  const pictureShown = useCallback(() => setPainted(true), []);
-  const [painted, setPainted] = useState(false);
+  // What has painted, by the still it was: a new version, edit or reused card
+  // shows its glyph again until its own still is up.
+  const [paintedKey, setPaintedKey] = useState<string | null>(null);
+  const stillKeyRef = useRef<string | null>(null);
+  const markPainted = useCallback(() => setPaintedKey(stillKeyRef.current), []);
+  const pictureShown = markPainted;
   const onCaptured = useCallback(
     (uri: string) => previewName && setSite({ name: previewName, uri }),
     [previewName],
@@ -364,19 +368,22 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
   );
   const onLive = useCallback(() => {
     if (previewName) setSite({ name: previewName, uri: null, live: true });
-    setPainted(true);
-  }, [previewName]);
+    markPainted();
+  }, [markPainted, previewName]);
   let still: ReactNode = null;
+  let stillKey: string | null = null;
   if (capturedUri) {
+    stillKey = capturedUri;
     still = (
       <Image
         source={{ uri: capturedUri }}
         resizeMode="cover"
-        onLoad={() => setPainted(true)}
-        style={{ flex: 1, opacity: painted ? 1 : 0 }}
+        onLoad={markPainted}
+        style={{ flex: 1, opacity: paintedKey === capturedUri ? 1 : 0 }}
       />
     );
   } else if (html && previewName && (!siteState || siteState.live)) {
+    stillKey = `live:${previewName}`;
     still = (
       <SiteRender
         html={html}
@@ -389,12 +396,13 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
       />
     );
   } else if (imageUrl) {
+    stillKey = imageUrl;
     still = (
       <Image
         source={{ uri: imageUrl }}
         resizeMode="cover"
-        onLoad={() => setPainted(true)}
-        style={{ flex: 1, opacity: painted ? 1 : 0 }}
+        onLoad={markPainted}
+        style={{ flex: 1, opacity: paintedKey === imageUrl ? 1 : 0 }}
       />
     );
   } else if (
@@ -403,8 +411,11 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
     pictureFailed !== pictureKey &&
     !failedPictures.has(pictureKey)
   ) {
+    stillKey = pictureKey;
     still = <EditablePicture svg={picture} onShown={pictureShown} onFailed={onPictureFailed} />;
   }
+  stillKeyRef.current = stillKey;
+  const painted = stillKey !== null && paintedKey === stillKey;
   return (
     <View
       accessibilityElementsHidden
