@@ -4652,23 +4652,29 @@ async function openBrowser(
   // opened tab's observation, which replaces the two reads below.
   let initialView: Awaited<ReturnType<InteractionTransport["createBrowserSession"]>>["initialView"];
   let profileChoice: AttachedProfileChoice | undefined;
+  // Continue in the same Chrome profile as a session there that ended when
+  // that Chrome reconnected: reuse this chat's live session there, or open
+  // one, exactly as an open of that profile would.
+  const continueReconnected = async (
+    ended: z.infer<typeof BrowserSession> & {
+      placement: { kind: "attached_device"; deviceId: string };
+    },
+  ) => {
+    reattached.from = ended.id;
+    const { browserSessionId: _ended, ...rest } = value;
+    return await openBrowser(
+      transport,
+      workspaceId,
+      sourceSessionId,
+      { ...rest, placement: { kind: "attached_device", deviceId: ended.placement.deviceId } },
+      context,
+      extensionUrl,
+      chatMove,
+    );
+  };
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
-    if (isReconnectedAttachedBrowser(session)) {
-      // Continue in the same Chrome profile: reuse this chat's live session
-      // there, or open one, exactly as an open of that profile would.
-      reattached.from = session.id;
-      const { browserSessionId: _ended, ...rest } = value;
-      return await openBrowser(
-        transport,
-        workspaceId,
-        sourceSessionId,
-        { ...rest, placement: { kind: "attached_device", deviceId: session.placement.deviceId } },
-        context,
-        extensionUrl,
-        chatMove,
-      );
-    }
+    if (isReconnectedAttachedBrowser(session)) return await continueReconnected(session);
     if (value.storageMode && browserSessionStorageMode(session) !== value.storageMode)
       throw new Error("existing BrowserSession storage mode does not match request");
   } else {
@@ -4868,6 +4874,18 @@ async function openBrowser(
     targets =
       initialView?.targets ?? (await transport.listBrowserTargets(workspaceId, session.id)).targets;
   } catch (error) {
+    // A session in the person's Chrome can still read as active after that
+    // Chrome reconnected: the server ends it only when it is next used, and
+    // this read is that use. Read it again, and continue in the same profile
+    // as for a session that had already ended.
+    if (
+      session.placement.kind === "attached_device" &&
+      error instanceof OpenGeniApiError &&
+      error.status === 409
+    ) {
+      const now = await transport.getBrowserSession(workspaceId, session.id).catch(() => null);
+      if (now && isReconnectedAttachedBrowser(now)) return await continueReconnected(now);
+    }
     const replacement = await replaceUncontinuable(error);
     if (replacement) return replacement;
     throw error;

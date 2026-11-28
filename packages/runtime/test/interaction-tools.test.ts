@@ -2434,6 +2434,80 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test("browser_open naming a session in the person's Chrome that still read as active when Chrome had reconnected continues in that profile", async () => {
+    // The server ends such a session only when it is next used (here, by the
+    // tab read), so the open first sees it active.
+    const deviceId = randomUUID();
+    const replacementId = randomUUID();
+    const stale = discoveredBrowserSession(browserSessionId, sessionId);
+    stale.lifecycle = "active";
+    stale.placement = { kind: "attached_device", deviceId };
+    stale.controller = {
+      controllerId: "opengeni-browserd",
+      controllerGeneration: "controller-1",
+      placementInstanceId: "chrome-generation-1",
+    };
+    const replacement = discoveredBrowserSession(replacementId, sessionId);
+    replacement.lifecycle = "active";
+    replacement.placement = { kind: "attached_device", deviceId };
+    replacement.controller = {
+      controllerId: "opengeni-browserd",
+      controllerGeneration: "controller-2",
+      placementInstanceId: "chrome-generation-2",
+    };
+    const target = { ...browserTarget(), browserSessionId: replacementId };
+    let ended = false;
+    const creates: Array<Record<string, unknown>> = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getBrowserSession: async (_workspaceId, id) =>
+          id === browserSessionId
+            ? ended
+              ? reconnectedAttachedBrowser(deviceId)
+              : stale
+            : replacement,
+        listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+        createBrowserSession: async (_workspaceId, request) => {
+          creates.push(request as unknown as Record<string, unknown>);
+          return { session: replacement } as never;
+        },
+        listBrowserTargets: async (_workspaceId, id) => {
+          if (id === browserSessionId) {
+            ended = true;
+            throw new OpenGeniApiError(409, "BrowserSession controller authority changed");
+          }
+          return {
+            browserSessionId: replacementId,
+            controllerGeneration: "controller-2",
+            targets: [target],
+          };
+        },
+        observeBrowserTarget: async () => browserObservation(target),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      session: { id: replacementId, lifecycle: "active" },
+    });
+    expect(creates).toEqual([
+      expect.objectContaining({ placement: { kind: "attached_device", deviceId } }),
+    ]);
+    const text = result.content
+      .flatMap((part) => (part.type === "text" ? [part.text] : []))
+      .join("\n");
+    expect(text).toContain(
+      `BrowserSession ${browserSessionId} ended when the person's Chrome reconnected; this continues in the same Chrome profile as BrowserSession ${replacementId}. Use the new ID from now on.`,
+    );
+  });
+
   test.each([
     ["browser_observe", { targetId: "tab-1" }],
     ["browser_act", { targetId: "tab-1", action: { type: "scroll", deltaX: 0, deltaY: 400 } }],
