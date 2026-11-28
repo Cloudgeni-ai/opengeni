@@ -34,6 +34,7 @@ import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation
 import { setAnalyticsConsentDecisionSender } from "@opengeni/react/app/lib/analytics-consent";
 import { recordErrorToasts } from "@opengeni/react/app/lib/recent-errors";
 import { installFeedbackTrail } from "@opengeni/react/app/lib/feedback-trail";
+import { reportCaughtExceptionToAnalytics } from "./lib/caught-exception-analytics";
 import { ANALYTICS_CONSENT_PATH } from "@opengeni/contracts/analytics-consent-report";
 import {
   availableSessionStorage,
@@ -106,7 +107,14 @@ if (reportClientSignals) {
 }
 
 function renderApp() {
-  createRoot(document.getElementById("root")!).render(
+  createRoot(document.getElementById("root")!, {
+    // Boundaries keep their own fallback; this only adds the consented,
+    // scrubbed PostHog report (see lib/analytics.ts) to React's default log.
+    onCaughtError: (error) => {
+      console.error(error);
+      reportCaughtExceptionToAnalytics(error, "react_boundary");
+    },
+  }).render(
     <React.StrictMode>
       <PurchasePresentationProvider showPurchasePrompts={!iosAppContext}>
         <SimplifiedInterfaceProvider>

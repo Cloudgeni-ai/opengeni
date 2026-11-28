@@ -34,6 +34,18 @@ import {
   takePendingAuthReturn,
   type AuthReturnEvent,
 } from "./signup-attribution";
+import { bundleDeploymentRevision } from "../api";
+import {
+  clientRevision,
+  hasObservedChunkLoadFailure,
+  isChunkLoadError,
+} from "./client-error-reporting";
+import { installCaughtExceptionAnalytics } from "./caught-exception-analytics";
+import {
+  leadingException,
+  scrubPosthogExceptionProperties,
+  type ExceptionSource,
+} from "./posthog-exception-scrubbing";
 
 type AnalyticsConfig = ClientConfig["analytics"];
 export type AnalyticsIdentity = Readonly<{
@@ -81,6 +93,10 @@ let suspended = false;
 /** Sessions this page started, awaiting their first completed turn (bounded). */
 const pendingFirstTurns = new Map<string, AnalyticsProperties>();
 const PENDING_FIRST_TURN_LIMIT = 20;
+/** Exceptions React boundaries caught: at most this many per window. */
+const CAUGHT_EXCEPTION_LIMIT = 10;
+const CAUGHT_EXCEPTION_WINDOW_MS = 10 * 60_000;
+let caughtExceptionTimes: number[] = [];
 
 declare global {
   interface Window {
@@ -301,22 +317,44 @@ async function initializePostHog(projectKey: string, host: string): Promise<void
     posthogClient.opt_in_capturing();
     return;
   }
-  const { default: posthog } = await import("posthog-js");
+  // The SDK otherwise downloads its exception autocapture code from PostHog's
+  // asset host, which the page's script policy refuses. It must be in place
+  // before init so autocapture starts with it.
+  const [{ default: posthog }] = await Promise.all([
+    import("posthog-js"),
+    import("posthog-js/dist/exception-autocapture"),
+  ]);
   if (!analyticsCollectionAllowed()) {
     return;
   }
   posthog.init(projectKey, {
     api_host: host,
     autocapture: false,
+    // Uncaught errors and unhandled rejections become `$exception` events,
+    // scrubbed of message text and source context in `before_send`. Errors
+    // React boundaries catch arrive through `captureCaughtException`. The
+    // explicit setting overrides the project's autocapture setting.
+    capture_exceptions: {
+      capture_unhandled_errors: true,
+      capture_unhandled_rejections: true,
+      capture_console_errors: false,
+    },
+    // Exception steps are free-form breadcrumbs; Opengeni sends none.
+    error_tracking: { exception_steps: { enabled: false } },
     // PostHog can derive GeoIP properties before its project-level IP discard runs.
     // Disable that enrichment at the event boundary as well.
-    before_send: (event) =>
-      event
-        ? {
-            ...event,
-            properties: safePosthogProperties(event.properties),
-          }
-        : null,
+    before_send: (event) => {
+      if (!event) return null;
+      try {
+        const properties = safePosthogProperties(event.properties);
+        if (event.event !== "$exception") return { ...event, properties };
+        const scrubbed = safeExceptionProperties(properties);
+        return scrubbed ? { ...event, properties: scrubbed } : null;
+      } catch {
+        // A projection that fails sends nothing.
+        return null;
+      }
+    },
     // Consented visitors keep closed campaign tokens and the referring domain;
     // the outbound projection below still removes URLs and click identifiers.
     save_campaign_params: true,
@@ -327,6 +365,7 @@ async function initializePostHog(projectKey: string, host: string): Promise<void
     person_profiles: "identified_only",
   });
   posthogClient = posthog;
+  installCaughtExceptionAnalytics(captureCaughtException);
   // The landing URL may be gone after an in-app navigation; keep first-touch
   // campaign tokens captured in memory as first-wins super properties.
   const attribution = signupAttributionAnalyticsProperties();
@@ -403,6 +442,38 @@ function safePosthogProperties(properties: Record<string, unknown>): Record<stri
   // only campaign facts kept are closed-charset utm tokens and the referring
   // domain, for visitors who consented.
   return safe;
+}
+
+/**
+ * A `$exception` event's content-free projection, or null to drop it. Once a
+ * lazy module failed to load the tab runs a replaced build, and the failure
+ * and what follows it are counted by the first-party error beacon instead.
+ */
+function safeExceptionProperties(
+  properties: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (hasObservedChunkLoadFailure()) return null;
+  const leading = leadingException(properties);
+  if (leading && isChunkLoadError(leading)) return null;
+  const scrubbed = scrubPosthogExceptionProperties(properties, {
+    revision: clientRevision(bundleDeploymentRevision || "dev"),
+  });
+  if (!scrubbed) return null;
+  return { ...scrubbed, ...(latestPathname ? journeyPage(latestPathname, latestSearch) : {}) };
+}
+
+/**
+ * Report an error a React boundary caught. The SDK rate-limits only
+ * autocaptured exceptions, so a render loop is bounded here.
+ */
+function captureCaughtException(error: unknown, source: ExceptionSource): void {
+  if (!posthogClient || !providersReady || !analyticsCollectionAllowed()) return;
+  if (hasObservedChunkLoadFailure() || isChunkLoadError(error)) return;
+  const now = Date.now();
+  caughtExceptionTimes = caughtExceptionTimes.filter((at) => now - at < CAUGHT_EXCEPTION_WINDOW_MS);
+  if (caughtExceptionTimes.length >= CAUGHT_EXCEPTION_LIMIT) return;
+  caughtExceptionTimes.push(now);
+  posthogClient.captureException(error, { exception_source: source });
 }
 
 /** Report a consumed Better Auth return marker once collection is active. */
