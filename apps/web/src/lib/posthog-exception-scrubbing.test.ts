@@ -184,7 +184,8 @@ describe("PostHog exception scrubbing", () => {
     );
     expect(JSON.stringify(scrubbed)).not.toContain(SECRET);
     expect(JSON.stringify(scrubbed)).not.toContain("acme");
-    expect((scrubbed?.$exception_list as { stacktrace: unknown }[])[0]!.stacktrace).toEqual({
+    const list = scrubbed!.$exception_list as { stacktrace: unknown }[];
+    expect(list[0]!.stacktrace).toEqual({
       type: "raw",
       frames: [
         { platform: "web:javascript", filename: EXTERNAL_LOCATION, lineno: 9 },
