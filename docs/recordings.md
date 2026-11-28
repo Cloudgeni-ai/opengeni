@@ -181,6 +181,67 @@ as a line where it starts ("Ingrid's microphone wasn't recording from 17:39 to
 track is silent at once it says "Nothing was recorded", and no turn runs across
 a stretch, so a missing voice doesn't read as words the model missed.
 
+## Importing a transcript
+
+A meeting can also start from a transcript that already exists, for example
+one exported from another meeting tool, or a fixture for tests: no audio, no
+upload and nothing to pay for transcription.
+
+`POST /v1/workspaces/:workspaceId/recordings/import-transcript` takes the
+same permission as creating a meeting (`sessions:create`) and needs the
+person's consent to share with AI providers, since the meeting's notes are
+written from it. It makes meetings only, never dictations.
+
+```json
+{
+  "recordingId": "8b2f…",
+  "title": "Planning call",
+  "startedAt": "2026-03-02T09:00:00.000Z",
+  "visibility": "workspace",
+  "externalRef": "other-tool:42",
+  "metadata": {},
+  "language": "en",
+  "segments": [
+    { "startMilliseconds": 0, "endMilliseconds": 3500, "speaker": "Ana", "text": "Morning, everyone." },
+    { "startMilliseconds": 4000, "speaker": "Ben", "text": "Then we ship on Friday." }
+  ]
+}
+```
+
+- Everything but `segments` is optional. `visibility` defaults to the
+  workspace's recording setting, as for a new meeting; without a `title` the
+  meeting is named after when it started; `language` is an ISO 639-1 or
+  639-3 code.
+- `segments` holds 1 to 20,000 segments, each with a whole
+  `startMilliseconds` from the meeting's start, an optional
+  `endMilliseconds` no earlier than it, an optional `speaker` name (1 to 200
+  characters) and its `text` (1 to 10,000 characters). Together the texts may
+  be at most 2 MB; a larger transcript is refused with a 400. A segment
+  without an end ends where the next one starts, and the last one after
+  about as long as its words take to say (400 ms a word).
+- Pass a `recordingId`: importing the same id again returns the existing
+  meeting with `200` instead of `201`, so a retry never makes a second one.
+  An id another recording already uses is a `409` (`recording_id_taken`).
+
+The meeting is `ready` at once, lasts until its last segment ends, and has no
+tracks. Its one transcript version is complete and current, with
+`providerId: "import"` and `model: "text"`: that pair is how clients tell an
+imported meeting apart (`recordingTranscriptImported` in
+`@opengeni/contracts`), showing "Imported transcript" where a model's name
+would be, and no player. Each distinct speaker name becomes one speaker,
+labelled `imported:1`, `imported:2`, … in order of first appearance and
+named as given, as a person would name them; a segment without a speaker
+has none. Names, speakers and segment text can be corrected as in any other
+meeting. The import sends `recording.started` and
+`recording.transcript.ready` (see [Events](#events)), and its notes are
+written as a recorded meeting's are (see [Built-in summary](#built-in-summary)).
+
+An imported meeting has no audio, so it can't be transcribed again:
+`POST …/transcripts` answers `409` with the code `no_audio`.
+
+In the SDK it is
+`new OpenGeniRecordingsClient(client).importRecordingTranscript(workspaceId, body)`.
+
 ## Embedding
 
 Products do not need to implement the capture contract by hand.
@@ -985,7 +1046,9 @@ memory and storage at rates you set to your cloud's prices.
 - `POST …/recordings/:recordingId/transcripts` makes a new version over the
   same audio, for example with another model. Versions never change; when a
   new one completes it becomes the shown version, and names carry over to the
-  speakers whose speech overlaps.
+  speakers whose speech overlaps. A meeting
+  [imported as text](#importing-a-transcript) has no audio for one (`409`,
+  `no_audio`).
 - `POST …/recordings/:recordingId/transcripts/:versionId/current` switches the
   shown version.
 - `PATCH …/recordings/:recordingId/speakers` names speakers (a person from the
@@ -1091,6 +1154,11 @@ notes describe the transcript the re-run replaced, so the new chat is told
 the notes' revision and saves over exactly that one; if anyone saved since,
 it keeps theirs. Notes a person edited, an automation wrote, or someone
 talked to the notes chat about are never replaced.
+
+A meeting [imported as text](#importing-a-transcript) is ready the moment it
+is imported, so nothing transcribes it: the import starts a small workflow,
+one per transcript version (`recording-imported-summary:<versionId>`), that
+starts this same summary under the same settings and conditions.
 
 - **Whose chat.** The meeting owner's: an Only me chat owned by them for an
   Only me meeting, or a workspace chat for a meeting shared with the

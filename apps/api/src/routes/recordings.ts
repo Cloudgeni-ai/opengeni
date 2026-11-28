@@ -7,8 +7,11 @@ import {
   UpcomingMeetingsResponse,
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
+  ImportRecordingTranscriptRequest,
+  importedRecordingTranscriptSegments,
   RecordingCapturePurpose,
   RecordingClientTimings,
+  recordingTranscriptImported,
   RECORDING_UPLOAD_BATCH_MAX,
   FinalizeRecordingRequest,
   RecordingNoteKind,
@@ -53,6 +56,8 @@ import {
   getRecordingTrackPreparedObject,
   getRecordingTranscriptPage,
   getWorkspace,
+  importRecordingTranscript,
+  importedRecordingNoAudioError,
   workspaceMemberDisplayName,
   listRecordingChunks,
   listRecordingLiveSegments,
@@ -1085,6 +1090,44 @@ export function registerRecordingRoutes(
     return c.json(result.recording, result.created ? 201 : 200);
   });
 
+  /**
+   * A meeting from a transcript that already exists, such as one exported
+   * from another meeting tool, or a fixture for tests: ready at once, with
+   * no audio and nothing to pay for. Its notes are written as a recorded
+   * meeting's are once its transcript is ready.
+   */
+  app.post(`${base}/import-transcript`, async (c) => {
+    await requireAiProcessingConsent(c, deps);
+    const actor = await actorFor(c, "sessions:create");
+    const body = await parseRequestJson(c, ImportRecordingTranscriptRequest);
+    const workspace = await getWorkspace(db, actor.workspaceId);
+    const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
+    const result = await guard(() =>
+      importRecordingTranscript(db, {
+        ...actor,
+        recordingId: body.recordingId ?? crypto.randomUUID(),
+        versionId: crypto.randomUUID(),
+        title: body.title,
+        startedAt: body.startedAt ? new Date(body.startedAt) : undefined,
+        visibility: body.visibility ?? settings.defaultVisibility ?? "private",
+        externalRef: body.externalRef,
+        metadata: body.metadata,
+        language: body.language,
+        segments: importedRecordingTranscriptSegments(body.segments),
+      }),
+    );
+    // Starting it again for a repeated import does nothing once it has run,
+    // and starts it when the first attempt's start was lost.
+    await deps.workflowClient.startImportedRecordingSummary?.({
+      accountId: actor.accountId,
+      workspaceId: result.recording.workspaceId,
+      recordingId: result.recording.id,
+      versionId: result.version.id,
+      ownerSubjectId: result.recording.ownerSubjectId,
+    });
+    return c.json(result.recording, result.created ? 201 : 200);
+  });
+
   // The caller's own meetings about to start, with the links that join them,
   // for a reminder that joins one and starts its recording (the desktop app's).
   app.get("/v1/workspaces/:workspaceId/upcoming-meetings", async (c) => {
@@ -1514,6 +1557,12 @@ export function registerRecordingRoutes(
     const recording = await guard(() => getRecording(db, { ...actor, recordingId }));
     if (recording.purpose === "dictation" && body.transcription) {
       throw invalid("A dictation uses the workspace's voice input model");
+    }
+    // Said before choosing a model, which a meeting without audio never needs.
+    if (recordingTranscriptImported(recording.transcript)) {
+      await guard(async () => {
+        throw importedRecordingNoAudioError();
+      });
     }
     // Dictations are paid for with credits, which their ledger debit counts.
     if (recording.purpose !== "dictation") await admitRecordingUsage(actor);

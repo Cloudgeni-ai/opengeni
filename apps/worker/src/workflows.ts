@@ -50,12 +50,15 @@ export {
   browserRecordingVideoWorkflowId,
   recordingDeletionWorkflow,
   recordingDeletionWorkflowId,
+  recordingImportedSummaryWorkflow,
+  recordingImportedSummaryWorkflowId,
   recordingSpeakerScanWorkflow,
   recordingSpeakerScanWorkflowId,
   recordingTranscriptWorkflow,
   recordingTranscriptWorkflowId,
   type BrowserRecordingVideoWorkflowInput,
   type RecordingDeletionWorkflowInput,
+  type RecordingImportedSummaryWorkflowInput,
   type RecordingTranscriptWorkflowInput,
 } from "./workflows/recordings";
 export {

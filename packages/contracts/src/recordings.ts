@@ -394,6 +394,153 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type CreateRecordingRequest = z.infer<typeof CreateRecordingRequest>;
 
+/**
+ * An imported transcript's version carries this provider and model, so
+ * clients and the server can tell a meeting imported as text (no audio, no
+ * tracks) from a recorded one.
+ */
+export const RECORDING_IMPORT_PROVIDER_ID = "import";
+export const RECORDING_IMPORT_MODEL = "text";
+/** The most segments one imported transcript has. */
+export const RECORDING_IMPORT_MAX_SEGMENTS = 20_000;
+/** The most characters one imported segment has. */
+export const RECORDING_IMPORT_MAX_SEGMENT_CHARACTERS = 10_000;
+/** The most text, in UTF-8 bytes across every segment, one import takes. */
+export const RECORDING_IMPORT_MAX_TEXT_BYTES = 2 * 1024 * 1024;
+/**
+ * How long a word takes to say, for the end of a last segment that gives
+ * none: about 150 words a minute.
+ */
+export const RECORDING_IMPORT_MILLISECONDS_PER_WORD = 400;
+
+/** Whether a transcript version is an imported text transcript rather than one made from audio. */
+export function recordingTranscriptImported(
+  version: { providerId: string; model: string } | null | undefined,
+): boolean {
+  return (
+    version?.providerId === RECORDING_IMPORT_PROVIDER_ID && version.model === RECORDING_IMPORT_MODEL
+  );
+}
+
+function utf8Bytes(text: string): number {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      // A surrogate pair is one four-byte character.
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+export const ImportRecordingTranscriptSegment = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** When the segment starts, in milliseconds from the meeting's start. */
+      startMilliseconds: z.number().int().min(0).max(RECORDING_MAX_DURATION_MILLISECONDS),
+      /**
+       * When it ends. Without one it ends where the next segment starts; the
+       * last one ends after about as long as its words take to say.
+       */
+      endMilliseconds: z.number().int().min(0).max(RECORDING_MAX_DURATION_MILLISECONDS).optional(),
+      /** Who spoke it, by name. Segments with the same name are one speaker. */
+      speaker: z.string().trim().min(1).max(200).optional(),
+      text: z.string().trim().min(1).max(RECORDING_IMPORT_MAX_SEGMENT_CHARACTERS),
+    })
+    .strict()
+    .refine(
+      (segment) =>
+        segment.endMilliseconds === undefined ||
+        segment.endMilliseconds >= segment.startMilliseconds,
+      { message: "endMilliseconds can't be before startMilliseconds", path: ["endMilliseconds"] },
+    ),
+);
+export type ImportRecordingTranscriptSegment = z.infer<typeof ImportRecordingTranscriptSegment>;
+
+/**
+ * A meeting from a transcript that already exists, such as one exported from
+ * another meeting tool. It has no audio: it is ready at once, and can't be
+ * transcribed again.
+ */
+export const ImportRecordingTranscriptRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Client-generated id; importing the same id again returns the existing meeting. */
+      recordingId: z.string().uuid().optional(),
+      /** Without one the meeting is named after when it started, until its notes name it. */
+      title: z.string().trim().min(1).max(300).optional(),
+      /** When the meeting started; now when left out. */
+      startedAt: z.string().datetime({ offset: true }).optional(),
+      /** The workspace's default for new meetings when left out. */
+      visibility: RecordingVisibility.optional(),
+      externalRef: externalRef.optional(),
+      metadata: recordingMetadata.optional(),
+      /** The language spoken, as an ISO 639-1 or 639-3 code. */
+      language: z
+        .string()
+        .regex(/^[a-z]{2,3}$/u)
+        .optional(),
+      segments: z
+        .array(ImportRecordingTranscriptSegment)
+        .min(1)
+        .max(RECORDING_IMPORT_MAX_SEGMENTS)
+        .refine(
+          (segments) =>
+            segments.reduce((sum, segment) => sum + utf8Bytes(segment.text), 0) <=
+            RECORDING_IMPORT_MAX_TEXT_BYTES,
+          "The transcript's text is larger than 2 MB, the most one import takes",
+        ),
+    })
+    .strict(),
+);
+export type ImportRecordingTranscriptRequest = z.infer<typeof ImportRecordingTranscriptRequest>;
+
+/** An imported segment with its end settled. */
+export type ImportedRecordingTranscriptSegment = {
+  startMilliseconds: number;
+  endMilliseconds: number;
+  speaker: string | null;
+  text: string;
+};
+
+/**
+ * An imported transcript's segments in start order (segments that start
+ * together keep the order they were given), each with an end: its own, else
+ * the next segment's start, else for the last one its start plus about as
+ * long as its words take to say.
+ */
+export function importedRecordingTranscriptSegments(
+  segments: readonly ImportRecordingTranscriptSegment[],
+): ImportedRecordingTranscriptSegment[] {
+  const ordered = segments
+    .map((segment, given) => ({ segment, given }))
+    .sort(
+      (left, right) =>
+        left.segment.startMilliseconds - right.segment.startMilliseconds ||
+        left.given - right.given,
+    )
+    .map(({ segment }) => segment);
+  return ordered.map((segment, index) => {
+    const next = ordered[index + 1];
+    const words = segment.text.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
+    const endMilliseconds =
+      segment.endMilliseconds ??
+      (next
+        ? next.startMilliseconds
+        : segment.startMilliseconds + Math.max(1, words) * RECORDING_IMPORT_MILLISECONDS_PER_WORD);
+    return {
+      startMilliseconds: segment.startMilliseconds,
+      endMilliseconds,
+      speaker: segment.speaker ?? null,
+      text: segment.text,
+    };
+  });
+}
+
 /** A meeting on the caller's own calendar that starts soon, with the link that joins it. */
 export const UpcomingMeeting = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -887,6 +1034,12 @@ export type RecordingSpeaker = z.infer<typeof RecordingSpeaker>;
 
 const DIARIZED_SPEAKER_LABEL = /^(?:t\d+_)?speaker_(\d+)$/u;
 const TRACK_SPEAKER_LABEL = /^track-(\d+)$/u;
+const IMPORTED_SPEAKER_LABEL = /^imported:(\d+)$/u;
+
+/** The label of an imported transcript's nth distinct speaker, counted from 1. */
+export function recordingImportedSpeakerLabel(number: number): string {
+  return `imported:${number}`;
+}
 
 /**
  * True when a recording's microphone is the person recording's: computer or
@@ -924,6 +1077,8 @@ export function recordingSpeakerDefault(
 ): RecordingSpeakerDefault {
   const diarized = DIARIZED_SPEAKER_LABEL.exec(label);
   if (diarized) return { kind: "speaker", number: Number(diarized[1]) + 1 };
+  const imported = IMPORTED_SPEAKER_LABEL.exec(label);
+  if (imported) return { kind: "speaker", number: Number(imported[1]) };
   const track = TRACK_SPEAKER_LABEL.exec(label);
   if (track) {
     const trackNumber = Number(track[1]);

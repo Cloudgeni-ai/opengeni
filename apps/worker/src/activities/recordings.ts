@@ -1135,39 +1135,9 @@ export function createRecordingActivities(
       };
     }
 
-    /**
-     * The built-in meeting summary. A failure is only logged: the meeting
-     * keeps its transcript and shows "No notes yet", and its owner can still
-     * ask an agent to write them.
-     */
+    /** The built-in meeting summary of the version just made. */
     async function summarize(): Promise<void> {
-      try {
-        // Choosing the model can ask Codex upstream: keep the activity alive.
-        const outcome = await withHeartbeat(async () =>
-          (options.startMeetingSummary ?? startMeetingSummary)(await services(), {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            recordingId: input.recordingId,
-            versionId: input.versionId,
-            ownerSubjectId: input.ownerSubjectId,
-          }),
-        );
-        observability.info("meeting summary", {
-          workspaceId: input.workspaceId,
-          recordingId: input.recordingId,
-          versionId: input.versionId,
-          ...(outcome.started
-            ? { started: true, sessionId: outcome.sessionId, model: outcome.model }
-            : { started: false, reason: outcome.reason }),
-        });
-      } catch (error) {
-        observability.warn("meeting summary not started", {
-          workspaceId: input.workspaceId,
-          recordingId: input.recordingId,
-          versionId: input.versionId,
-          ...(error instanceof Error ? { error: error.message.slice(0, 1_000) } : {}),
-        });
-      }
+      await startSummary(input, withHeartbeat);
     }
 
     async function transcribeClaimed(): Promise<RecordingTranscriptOutcome> {
@@ -2349,6 +2319,64 @@ export function createRecordingActivities(
   }
 
   /**
+   * Start the built-in meeting summary for one ready transcript version. A
+   * failure is only logged: the meeting keeps its transcript and shows "No
+   * notes yet", and its owner can still ask an agent to write them.
+   * `keepAlive` heartbeats while it works, since choosing the model can ask
+   * Codex upstream.
+   */
+  async function startSummary(
+    input: RecordingWorkInput & { versionId: string },
+    keepAlive: <T>(work: () => Promise<T>) => Promise<T>,
+  ): Promise<void> {
+    const { observability } = await services();
+    try {
+      const outcome = await keepAlive(async () =>
+        (options.startMeetingSummary ?? startMeetingSummary)(await services(), {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          recordingId: input.recordingId,
+          versionId: input.versionId,
+          ownerSubjectId: input.ownerSubjectId,
+        }),
+      );
+      observability.info("meeting summary", {
+        workspaceId: input.workspaceId,
+        recordingId: input.recordingId,
+        versionId: input.versionId,
+        ...(outcome.started
+          ? { started: true, sessionId: outcome.sessionId, model: outcome.model }
+          : { started: false, reason: outcome.reason }),
+      });
+    } catch (error) {
+      observability.warn("meeting summary not started", {
+        workspaceId: input.workspaceId,
+        recordingId: input.recordingId,
+        versionId: input.versionId,
+        ...(error instanceof Error ? { error: error.message.slice(0, 1_000) } : {}),
+      });
+    }
+  }
+
+  /**
+   * The built-in summary of a meeting imported as text, whose transcript was
+   * ready the moment it was made: the same summary, under the same settings
+   * and conditions, as a recorded meeting gets once its transcript is ready.
+   */
+  async function summarizeImportedRecording(
+    input: RecordingWorkInput & { versionId: string },
+  ): Promise<void> {
+    await startSummary(input, async (work) => {
+      const timer = setInterval(() => heartbeat({ phase: "summarizing" }), 30_000);
+      try {
+        return await work();
+      } finally {
+        clearInterval(timer);
+      }
+    });
+  }
+
+  /**
    * A dictation's day is up: delete it as its owner would, unless it is
    * already gone. Only dictations; anything else is left alone.
    */
@@ -2632,6 +2660,7 @@ export function createRecordingActivities(
     transcribeRecordingVersion,
     scanRecordingSpeakers,
     failRecordingTranscript,
+    summarizeImportedRecording,
     archiveDeletedMeetingSummaries,
     deleteRecordingMedia,
     expireDictation,

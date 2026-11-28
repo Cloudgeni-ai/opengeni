@@ -386,6 +386,20 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    startImportedRecordingSummary: async (input) => {
+      try {
+        await temporal.workflow.start("recordingImportedSummaryWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // One per version: a repeated import never starts a second summary.
+          workflowId: `recording-imported-summary:${input.versionId}`,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+          args: [input],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
     startBrowserRecordingVideo: async (input) => {
       try {
         await temporal.workflow.start("browserRecordingVideoWorkflow", {

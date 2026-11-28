@@ -1,6 +1,11 @@
 import {
   defaultRecordingSpeakerName,
+  RECORDING_IMPORT_MODEL,
+  RECORDING_IMPORT_PROVIDER_ID,
   recordingMicrophoneIsOwner,
+  recordingImportedSpeakerLabel,
+  recordingTranscriptImported,
+  type ImportedRecordingTranscriptSegment,
   type Recording,
   type RecordingDiarization,
   type RecordingPerson,
@@ -2420,6 +2425,7 @@ export async function createRecordingTranscriptVersion(
     if (recording.state === "capturing") {
       throw new RecordingConflictError("This recording is still capturing", "still_capturing");
     }
+    if (await recordingWasImported(tx, recording)) throw importedRecordingNoAudioError();
     if (recording.audioDeletedAt) {
       throw new RecordingConflictError(
         "The audio was deleted under this workspace's retention, so it can't be transcribed again",
@@ -2481,6 +2487,197 @@ export async function createRecordingTranscriptVersion(
         );
     }
     return recordingTranscriptVersionView(version!);
+  });
+}
+
+/** Refuses transcribing a meeting imported as text again: it has no audio. */
+export function importedRecordingNoAudioError(): RecordingConflictError {
+  return new RecordingConflictError(
+    "This meeting was imported as text, so it has no audio to transcribe again.",
+    "no_audio",
+  );
+}
+
+/** Whether a meeting was imported as text: its transcript is an import, and it has no audio. */
+async function recordingWasImported(tx: Database, recording: RecordingRow): Promise<boolean> {
+  const [imported] = await tx
+    .select({ id: schema.recordingTranscriptVersions.id })
+    .from(schema.recordingTranscriptVersions)
+    .where(
+      and(
+        eq(schema.recordingTranscriptVersions.workspaceId, recording.workspaceId),
+        eq(schema.recordingTranscriptVersions.recordingId, recording.id),
+        eq(schema.recordingTranscriptVersions.providerId, RECORDING_IMPORT_PROVIDER_ID),
+        eq(schema.recordingTranscriptVersions.model, RECORDING_IMPORT_MODEL),
+      ),
+    )
+    .limit(1);
+  return imported !== undefined;
+}
+
+export type ImportRecordingTranscriptInput = RecordingActor & {
+  accountId: string;
+  recordingId: string;
+  /** The id of the meeting's one transcript version. */
+  versionId: string;
+  /** Without one the meeting is named after when it started. */
+  title?: string | undefined;
+  startedAt?: Date | undefined;
+  visibility: RecordingVisibility;
+  externalRef?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+  language?: string | undefined;
+  /** In start order, each with its end (importedRecordingTranscriptSegments). */
+  segments: readonly ImportedRecordingTranscriptSegment[];
+};
+
+/**
+ * Make a meeting from a transcript that already exists, in one transaction:
+ * a ready meeting with no tracks, one complete current transcript version
+ * marked as imported, its segments, one speaker per distinct name (named as
+ * given, as a person would), and `recording.started` and
+ * `recording.transcript.ready`. Importing the same id again returns it
+ * unchanged; an id another recording uses is a conflict.
+ */
+export async function importRecordingTranscript(
+  db: Database,
+  input: ImportRecordingTranscriptInput,
+): Promise<{ recording: Recording; version: RecordingTranscriptVersion; created: boolean }> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const startedAt = input.startedAt ?? new Date();
+    const durationMilliseconds = input.segments.reduce(
+      (longest, segment) => Math.max(longest, segment.endMilliseconds),
+      0,
+    );
+    const options = input.language ? { language: input.language } : {};
+    const inserted = await tx
+      .insert(schema.recordings)
+      .values({
+        id: input.recordingId,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        ownerSubjectId: input.subjectId,
+        purpose: "meeting",
+        visibility: toVisibility(input.visibility),
+        title: input.title ?? defaultTitle(startedAt),
+        titleSource: input.title === undefined ? "default" : "person",
+        state: "ready",
+        startedAt,
+        captureEndedAt: new Date(startedAt.getTime() + durationMilliseconds),
+        durationMilliseconds,
+        externalRef: input.externalRef ?? null,
+        metadata: input.metadata ?? {},
+        transcription: options,
+      })
+      .onConflictDoNothing({ target: schema.recordings.id })
+      .returning();
+    const created = inserted.length > 0;
+    if (created) {
+      const recording = inserted[0]!;
+      const labels = new Map<string, string>();
+      const segments = input.segments.map((segment) => {
+        let speakerLabel: string | null = null;
+        if (segment.speaker) {
+          speakerLabel =
+            labels.get(segment.speaker) ?? recordingImportedSpeakerLabel(labels.size + 1);
+          labels.set(segment.speaker, speakerLabel);
+        }
+        return {
+          startMilliseconds: segment.startMilliseconds,
+          endMilliseconds: segment.endMilliseconds,
+          trackNumber: null,
+          speakerLabel,
+          text: segment.text,
+        };
+      });
+      const languages = input.language ? [input.language] : [];
+      const [version] = await tx
+        .insert(schema.recordingTranscriptVersions)
+        .values({
+          id: input.versionId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          recordingId: recording.id,
+          versionNumber: 1,
+          providerId: RECORDING_IMPORT_PROVIDER_ID,
+          model: RECORDING_IMPORT_MODEL,
+          options,
+          state: "complete",
+          isCurrent: true,
+          languages,
+          diarized: false,
+          diarization: "none",
+          audioMilliseconds: durationMilliseconds,
+          segmentCount: segments.length,
+          costUsdMicros: null,
+          requestedBySubjectId: input.subjectId,
+          completedAt: sql`clock_timestamp()`,
+        })
+        .returning();
+      await insertTranscriptSegments(tx, recording, version!.id, segments);
+      // In batches, like the segments: every segment may name its own speaker.
+      const named = [...labels];
+      for (let offset = 0; offset < named.length; offset += 500) {
+        await tx.insert(schema.recordingSpeakerAssignments).values(
+          named.slice(offset, offset + 500).map(([displayName, speakerLabel]) => ({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            recordingId: recording.id,
+            versionId: version!.id,
+            speakerLabel,
+            personId: null,
+            displayName,
+            source: "confirmed" as const,
+            assignedBySubjectId: input.subjectId,
+          })),
+        );
+      }
+      await insertEvent(tx, recording, "recording.started", {
+        startedAt: startedAt.toISOString(),
+        trackCount: 0,
+      });
+      await insertEvent(tx, recording, "recording.transcript.ready", {
+        versionId: version!.id,
+        versionNumber: version!.versionNumber,
+        providerId: version!.providerId,
+        model: version!.model,
+        segmentCount: segments.length,
+        languages,
+        previousVersionId: null,
+      });
+    }
+    const [row] = await tx
+      .select()
+      .from(schema.recordings)
+      .where(
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, input.recordingId),
+        ),
+      );
+    // A reused id that belongs to another workspace or person is invisible here.
+    if (!row || row.ownerSubjectId !== input.subjectId || row.state === "deleting") {
+      throw new RecordingConflictError("This recording id is already used", "recording_id_taken");
+    }
+    const [recording] = await loadViews(tx, input.workspaceId, [row]);
+    const [version] = await tx
+      .select()
+      .from(schema.recordingTranscriptVersions)
+      .where(
+        and(
+          eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+          eq(schema.recordingTranscriptVersions.recordingId, row.id),
+          eq(schema.recordingTranscriptVersions.versionNumber, 1),
+        ),
+      );
+    // The id is a recorded meeting's or a dictation's, not an imported one.
+    if (row.purpose !== "meeting" || !version || !recordingTranscriptImported(version)) {
+      throw new RecordingConflictError(
+        "This recording id is already used by a recording that wasn't imported",
+        "recording_id_taken",
+      );
+    }
+    return { recording: recording!, version: recordingTranscriptVersionView(version), created };
   });
 }
 
@@ -2642,6 +2839,35 @@ export type CompletedRecordingSegment = {
 /** Labels that name a whole track ("track-0") mean the same speaker in every version. */
 export function isTrackSpeakerLabel(label: string): boolean {
   return /^track-[0-7]$/u.test(label);
+}
+
+/** Store a version's segments, already in start order, numbered from 0. */
+async function insertTranscriptSegments(
+  tx: Database,
+  recording: RecordingRow,
+  versionId: string,
+  ordered: readonly CompletedRecordingSegment[],
+): Promise<void> {
+  for (let offset = 0; offset < ordered.length; offset += 500) {
+    await tx.insert(schema.recordingTranscriptSegments).values(
+      ordered.slice(offset, offset + 500).map((segment, index) => ({
+        accountId: recording.accountId,
+        workspaceId: recording.workspaceId,
+        recordingId: recording.id,
+        versionId,
+        segmentIndex: offset + index,
+        startMilliseconds: Math.max(0, Math.round(segment.startMilliseconds)),
+        endMilliseconds: Math.max(
+          Math.round(segment.startMilliseconds),
+          Math.round(segment.endMilliseconds),
+        ),
+        trackNumber: segment.trackNumber,
+        speakerLabel: segment.speakerLabel,
+        text: segment.text,
+        words: segment.words ?? null,
+      })),
+    );
+  }
 }
 
 /**
@@ -2941,26 +3167,7 @@ export async function completeRecordingTranscriptVersion(
         left.startMilliseconds - right.startMilliseconds ||
         (left.trackNumber ?? 0) - (right.trackNumber ?? 0),
     );
-    for (let offset = 0; offset < ordered.length; offset += 500) {
-      await tx.insert(schema.recordingTranscriptSegments).values(
-        ordered.slice(offset, offset + 500).map((segment, index) => ({
-          accountId: recording.accountId,
-          workspaceId: input.workspaceId,
-          recordingId: recording.id,
-          versionId: version.id,
-          segmentIndex: offset + index,
-          startMilliseconds: Math.max(0, Math.round(segment.startMilliseconds)),
-          endMilliseconds: Math.max(
-            Math.round(segment.startMilliseconds),
-            Math.round(segment.endMilliseconds),
-          ),
-          trackNumber: segment.trackNumber,
-          speakerLabel: segment.speakerLabel,
-          text: segment.text,
-          words: segment.words ?? null,
-        })),
-      );
-    }
+    await insertTranscriptSegments(tx, recording, version.id, ordered);
     const [previous] = await tx
       .select({ id: schema.recordingTranscriptVersions.id })
       .from(schema.recordingTranscriptVersions)

@@ -163,6 +163,19 @@ export type SessionWorkflowClient = {
     ownerSubjectId: string;
   }) => Promise<void>;
   /**
+   * Start the built-in summary of an imported meeting's transcript version,
+   * as a recorded meeting's transcript starts it when it is ready. One
+   * workflow per version: starting it again does nothing. Optional: without
+   * it an imported meeting gets no automatic notes.
+   */
+  startImportedRecordingSummary?: (input: {
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    versionId: string;
+    ownerSubjectId: string;
+  }) => Promise<void>;
+  /**
    * Record an agent's browser recording whose frame bundle is uploaded and
    * make its video. Starting it again for the same recording while it runs,
    * or after it finished, does nothing.

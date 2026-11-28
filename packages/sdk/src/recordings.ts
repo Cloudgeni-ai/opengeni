@@ -29,6 +29,7 @@ import type {
   CreateRecordingUploadsResponse,
   FinalizeRecordingRequest,
   FinalizeRecordingResponse,
+  ImportRecordingTranscriptRequest,
   ListRecordingModelsResponse,
   ListRecordingLiveSegmentsResponse,
   ListRecordingNotesResponse,
@@ -208,6 +209,22 @@ export class OpenGeniRecordingsClient {
     return await this.client.requestJson<Recording>(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings`,
+      request,
+    );
+  }
+
+  /**
+   * Make a meeting from a transcript that already exists, such as one from
+   * another meeting tool. It is ready at once, has no audio and can't be
+   * transcribed again. Importing the same `recordingId` again returns it.
+   */
+  async importRecordingTranscript(
+    workspaceId: string,
+    request: ImportRecordingTranscriptRequest,
+  ): Promise<Recording> {
+    return await this.client.requestJson<Recording>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/import-transcript`,
       request,
     );
   }

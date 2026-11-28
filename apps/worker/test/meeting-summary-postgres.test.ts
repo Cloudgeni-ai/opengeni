@@ -22,6 +22,7 @@ import {
   ensureManagedAccessForUser,
   finalizeRecording,
   freezeAgentLearningPolicy,
+  importRecordingTranscript,
   markRecordingDeleting,
   getSessionForSubject,
   markRecordingChunksUploaded,
@@ -33,6 +34,7 @@ import {
   type DbClient,
   type SessionCreateInput,
 } from "@opengeni/db";
+import { createObservability } from "@opengeni/observability";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -884,6 +886,44 @@ describe("built-in meeting summary", () => {
     expect(await insertCopy({ resources: [{ kind: "repository", url: "https://x.test/r" }] })).toBe(
       "42501",
     );
+  }, 180_000);
+
+  test("a meeting imported as text gets the same one notes chat, however often its summary starts", async () => {
+    if (!realDb) return;
+    serveCodex();
+    const scope = await workspace({ subscription: true });
+    const { recording, version } = await importRecordingTranscript(client.db, {
+      ...scope.actor,
+      accountId: scope.accountId,
+      recordingId: crypto.randomUUID(),
+      versionId: crypto.randomUUID(),
+      title: "Roof planning",
+      visibility: "private",
+      language: "en",
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 4_000,
+          speaker: "Tomas",
+          text: "I will order the roof tiles by Friday.",
+        },
+      ],
+    });
+    const input = {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      recordingId: recording.id,
+      versionId: version.id,
+      ownerSubjectId: scope.owner,
+    };
+    const recordings = createRecordingActivities(async () => ({
+      ...services(),
+      observability: createObservability(settings, { component: "worker-control" }),
+    }));
+    // A retried activity or a repeated import runs it again.
+    await recordings.summarizeImportedRecording(input);
+    await recordings.summarizeImportedRecording(input);
+    expect(await scope.sessionsFor(recording.id)).toHaveLength(1);
   }, 180_000);
 });
 
