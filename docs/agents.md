@@ -960,8 +960,9 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   connection reaches; the full automation form narrows them. On the agent page
   **Starts when** lists a ready-made agent's own suggestions only (each fits
   its job, so Bug fixer isn't offered PR triggers); an agent made from scratch
-  gets the common triggers. Either way, one no automation of the agent
-  already listens to (by name or by event types), at most three, as off switches
+  gets the common triggers (so does a ready-made one whose template can't be
+  read). Each is offered until an automation of the agent listens to it (by
+  name or by event types), at most three, as off switches
   (`agentTriggerOffers`); turning one on adds the automation at once, or opens
   the trigger dialog when its source needs setup. That dialog's Open full form
   passes `?agentCommonTrigger=<key>`, so the automation form starts from the

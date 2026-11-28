@@ -492,6 +492,7 @@ export function LibraryTab({
   const loaded = useHeldWhileLoading(
     list.loading && list.entries.length === 0 ? undefined : list.entries,
     swapKey,
+    workspaceId,
   );
   const entries = loaded.value ?? [];
   let body: ReactNode;

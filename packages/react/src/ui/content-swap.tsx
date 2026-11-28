@@ -20,21 +20,31 @@ export type HeldValue<T> = {
 /**
  * Keeps the last loaded value while the value for a new `key` loads
  * (`value` is `undefined` while loading). Before anything has loaded, it
- * returns `undefined`, so the first load still shows its skeleton.
+ * returns `undefined`, so the first load still shows its skeleton. A new
+ * `scope` (another workspace, agent or app) drops the held value: only a
+ * toggle within one scope keeps the old list.
  */
-export function useHeldWhileLoading<T>(value: T | undefined, key: string): HeldValue<T> {
-  const [held, setHeld] = useState<{ value: T; key: string } | null>(null);
-  if (value !== undefined && (held === null || held.value !== value || held.key !== key)) {
-    setHeld({ value, key });
+export function useHeldWhileLoading<T>(
+  value: T | undefined,
+  key: string,
+  scope = "",
+): HeldValue<T> {
+  const [held, setHeld] = useState<{ value: T; key: string; scope: string } | null>(null);
+  if (
+    value !== undefined &&
+    (held === null || held.value !== value || held.key !== key || held.scope !== scope)
+  ) {
+    setHeld({ value, key, scope });
   }
   if (value !== undefined) return { value, key, stale: false };
-  if (held) return { value: held.value, key: held.key, stale: true };
+  if (held && held.scope === scope) return { value: held.value, key: held.key, stale: true };
   return { value: undefined, key, stale: false };
 }
 
 /**
- * Wraps content that a toggle swaps. While `stale`, the old content dims and
- * is marked busy; when `swapKey` changes, the new content fades in.
+ * Wraps content that a toggle swaps. While `stale`, the old content dims, is
+ * marked busy and is inert (no pointer, focus or keyboard action); when
+ * `swapKey` changes, the new content fades in.
  */
 export function ContentSwap({
   swapKey,
@@ -52,6 +62,7 @@ export function ContentSwap({
       data-content-swap=""
       data-stale={stale ? "" : undefined}
       aria-busy={stale || undefined}
+      inert={stale || undefined}
       className={cn(
         "min-w-0 transition-opacity duration-150 motion-reduce:transition-none",
         stale && "pointer-events-none opacity-60",

@@ -160,6 +160,8 @@ export function AgentWhenItWorks({
   const navigate = useNavigate();
   const nameOf = usePersonName(workspaceId);
   const [template, setTemplate] = useState<AgentTemplate | null>(null);
+  // Its ready-made template has been read (or couldn't be): offers wait for it.
+  const [templateSettled, setTemplateSettled] = useState(!agent.templateKey);
   const [sources, setSources] = useState<{ id: string; name: string; kind: string }[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   // The light Add trigger dialog, blank or at one offer.
@@ -181,10 +183,15 @@ export function AgentWhenItWorks({
     );
     if (agent.templateKey) {
       client.listAgentTemplates(workspaceId).then(
-        (list) =>
-          live && setTemplate(list.find((entry) => entry.key === agent.templateKey) ?? null),
-        () => undefined,
+        (list) => {
+          if (!live) return;
+          setTemplate(list.find((entry) => entry.key === agent.templateKey) ?? null);
+          setTemplateSettled(true);
+        },
+        () => live && setTemplateSettled(true),
       );
+    } else {
+      setTemplateSettled(true);
     }
     return () => {
       live = false;
@@ -291,15 +298,18 @@ export function AgentWhenItWorks({
     }
   };
   const githubConnected = githubConnectedOf(context.githubStatus?.status);
-  // A ready-made agent's own suggestions; otherwise the common triggers it
-  // can use. Each is offered until it is set up.
-  const offers = agentTriggerOffers({
-    templateSuggestions: template?.suggestedTriggers ?? [],
-    fromTemplate: Boolean(agent.templateKey),
-    usesGitHub: agentUsesGitHub(agent.toolPermissions, githubConnected),
-    agentName: agent.name,
-    tasks,
-  });
+  // A ready-made agent's own suggestions; otherwise (or when its template
+  // can't be read) the common triggers it can use. Each is offered until it
+  // is set up; none while its template is still being read.
+  const offers = templateSettled
+    ? agentTriggerOffers({
+        templateSuggestions: template?.suggestedTriggers ?? [],
+        fromTemplate: template !== null,
+        usesGitHub: agentUsesGitHub(agent.toolPermissions, githubConnected),
+        agentName: agent.name,
+        tasks,
+      })
+    : [];
   // A shared agent already starts when someone asks it in Slack.
   const inSlack = agent.visibility !== "private" && agent.slack.length > 0;
   const now = new Date();
@@ -598,7 +608,6 @@ function MemoryEntryRow({
   );
 }
 
-/** What the agent's Memory holds: each entry, editable and removable. */
 /** Memory entries shown inline; the rest are one link away in Knowledge. */
 export const AGENT_MEMORY_PREVIEW = 5;
 const AGENT_MEMORY_FETCH = 50;
@@ -617,6 +626,7 @@ export function agentMemoryLinkText(total: number, more: boolean): string {
     : "Open in Knowledge";
 }
 
+/** What the agent's Memory holds: the newest entries, editable and removable. */
 export function AgentMemoryEntries({ agent, workspaceId }: { agent: Agent; workspaceId: string }) {
   const { client } = useAppContext();
   const navigate = useNavigate();

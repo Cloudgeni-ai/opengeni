@@ -253,6 +253,13 @@ function createFixture() {
     }),
     getWorkspaceArtifactHtml: async () =>
       `<nav><a href="/">Home</a><a href="/releases">Releases</a><a href="/roadmap">Roadmap</a><a href="#/changelog">Changelog</a></nav>`,
+    // The rail's Inbox link reads its counts.
+    listInbox: async () => ({
+      items: [],
+      needsYouCount: 0,
+      unreadCount: 0,
+      billingNotifications: [],
+    }),
   };
   return {
     context: {
@@ -262,6 +269,7 @@ function createFixture() {
         accountId: "kit-account",
         // No grants: the rail's review and attention marks stay off in the kit.
         workspaceGrants: [],
+        accountGrants: [],
       },
       workspaces: [currentWorkspace],
       resetSessionView: () => undefined,

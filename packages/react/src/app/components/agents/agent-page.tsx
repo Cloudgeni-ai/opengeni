@@ -206,7 +206,7 @@ function AgentChats({
   );
   const chats = useAgentChats(workspaceId, agent.id, filter);
   // Switching Yours and Everyone's keeps the old list, dimmed, until the new one is in.
-  const listed = useHeldWhileLoading(chats.chats, filter);
+  const listed = useHeldWhileLoading(chats.chats, filter, `${workspaceId}:${agent.id}`);
   // An Only me agent's chats are all its owner's.
   const shared = agent.visibility !== "private";
   return (

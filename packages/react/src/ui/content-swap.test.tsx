@@ -48,6 +48,7 @@ const render = async (items: string[] | undefined, filter: string) => {
     stale: swap?.hasAttribute("data-stale") ?? false,
     busy: swap?.getAttribute("aria-busy") ?? null,
     reducedMotion: swap?.innerHTML.includes("motion-reduce:animate-none") ?? false,
+    inert: swap?.hasAttribute("inert") ?? false,
   };
 };
 
@@ -62,6 +63,8 @@ describe("ContentSwap", () => {
       text: "ab",
       stale: true,
       busy: "true",
+      // Not clickable, focusable or keyboard-operable while it stands in.
+      inert: true,
     });
     // Loaded: the new list replaces it and fades in (not under reduced motion).
     expect(await render(["b"], "yours")).toMatchObject({
@@ -70,6 +73,18 @@ describe("ContentSwap", () => {
       stale: false,
       busy: null,
       reducedMotion: true,
+      inert: false,
     });
+  });
+
+  test("another scope (workspace, agent, app) never shows the previous one's list", async () => {
+    function Scoped(props: { items: string[] | undefined; scope: string }) {
+      const held = useHeldWhileLoading(props.items, "all", props.scope);
+      return held.value ? <ul>{held.value.join(",")}</ul> : <p data-skeleton="">Loading</p>;
+    }
+    await act(async () => root.render(<Scoped items={["a"]} scope="workspace-a" />));
+    await act(async () => root.render(<Scoped items={undefined} scope="workspace-b" />));
+    expect(host.querySelector("[data-skeleton]")).not.toBeNull();
+    expect(host.querySelector("ul")).toBeNull();
   });
 });

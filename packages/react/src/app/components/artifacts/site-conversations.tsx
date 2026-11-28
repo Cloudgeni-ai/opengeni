@@ -116,7 +116,11 @@ export function SiteConversationsPanel({
     setPageKey(viewKey);
     setPage(null);
   }
-  const listed = useHeldWhileLoading(page ?? (error ? null : undefined), viewKey);
+  const listed = useHeldWhileLoading(
+    page ?? (error ? null : undefined),
+    viewKey,
+    `${workspaceId}:${siteId}`,
+  );
   const shownPage = listed.value ?? null;
   const visibleSessions = shownPage
     ? [...new Map([...shownPage.pinned, ...shownPage.sessions].map((s) => [s.id, s])).values()]

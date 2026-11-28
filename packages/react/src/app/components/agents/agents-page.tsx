@@ -114,7 +114,7 @@ export function AgentsPage({
   const slackNotice = useDismissedNotice("agents.slackAgentsMoved");
   const agents = state.agents;
   // Switching All and Yours keeps the old list, dimmed, until the new one is in.
-  const listed = useHeldWhileLoading(agents, filter);
+  const listed = useHeldWhileLoading(agents, filter, workspaceId);
   const listedFilter = listed.key as AgentListFilter;
 
   const open = (agent: Pick<AgentSummary, "id">) =>
