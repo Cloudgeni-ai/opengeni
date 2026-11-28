@@ -14,7 +14,9 @@
 import {
   defaultRecordingSpeakerName,
   RECORDING_NOTE_MAX_BYTES,
+  meetingSharingDecision,
   type AccessGrant,
+  type MeetingSharingRequest,
   type Recording,
   type RecordingNote,
   type RecordingSpeaker,
@@ -742,75 +744,48 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         throw error;
       }
 
-      // Who can open it, chosen the way the meeting page in this workspace
-      // does, then sent as its request to the recording's PATCH.
-      let sharing:
-        | {
-            visibility: "workspace" | "private";
-            sharedWorkspaceId?: string;
-            reachWorkspaceIds?: string[];
-          }
-        | undefined;
+      // Who can open it, decided as the meeting page's Share menu decides,
+      // then sent as its request to the recording's PATCH.
+      let sharing: MeetingSharingRequest | undefined;
       if (request.visibility !== undefined) {
         const here = grant.workspaceId;
         const storing = recording.workspaceId;
         const person = { subjectId: who.subjectId, accountId: grant.accountId };
-        const personalHere = (await reachingHere({ ...person, workspaceId: here })) === null;
-        if (request.visibility === "only_me") {
-          // Only me again, it keeps working here, where the person is looking from.
-          const reach = Array.isArray(recording.reachWorkspaceIds)
-            ? recording.reachWorkspaceIds
-            : null;
-          const keepHere =
-            storing !== here &&
-            !personalHere &&
-            reach !== null &&
-            !reach.includes(here) &&
-            (await ownRecordingWorkspaces(deps.db, { ...person, workspaceId: storing })).some(
-              (workspace) => workspace.id === here && workspace.personal !== true,
-            );
-          sharing = {
-            visibility: "private",
-            ...(keepHere && reach ? { reachWorkspaceIds: [...reach, here] } : {}),
-          };
-        } else if (storing === here) {
-          // A Personal workspace is the person's alone: shared there, nobody
-          // else sees it, so the page offers their team workspaces instead.
-          if (personalHere && recording.visibility === "private") {
-            return failure(
-              json,
-              "not_shareable",
-              "This is the person's Personal workspace, where nobody else sees a meeting. Share it from a chat in the team workspace to share it with.",
-            );
-          }
-          sharing = { visibility: "workspace" };
-        } else {
-          // Stored in the person's Personal workspace, it can be shared with
-          // any of their team workspaces where they may start work; stored in
-          // a team workspace, only there.
-          const personalStoring =
-            (await reachingHere({ ...person, workspaceId: storing })) === null;
-          const target = personalStoring
-            ? (await ownRecordingWorkspaces(deps.db, { ...person, workspaceId: storing })).find(
-                (workspace) => workspace.id === here && workspace.personal !== true,
-              )
-            : undefined;
-          if (!personalStoring || personalHere) {
-            return failure(
-              json,
-              "not_shareable",
-              `This meeting belongs to ${recordedIn ?? "another workspace"}, so it can be shared only there.`,
-            );
-          }
-          if (!target || !hasPermission(target.permissions, "sessions:create")) {
+        // The person's workspaces of the organization, the storing one included.
+        const [personalStoring, others] = await Promise.all([
+          reachingHere({ ...person, workspaceId: storing }).then((reach) => reach === null),
+          ownRecordingWorkspaces(deps.db, { ...person, workspaceId: storing }),
+        ]);
+        const decision = meetingSharingDecision({
+          target: request.visibility === "only_me" ? null : here,
+          meeting: recording,
+          viewingWorkspaceId: here,
+          workspaces: [
+            { id: storing, personal: personalStoring },
+            ...others.map((workspace) => ({
+              id: workspace.id,
+              personal: workspace.personal === true,
+              shareable: hasPermission(workspace.permissions, "sessions:create"),
+            })),
+          ],
+        });
+        if (!decision.ok) {
+          if (decision.code === "not_allowed") {
             return failure(
               json,
               "not_allowed",
               "The person can't share meetings with this workspace.",
             );
           }
-          sharing = { visibility: "workspace", sharedWorkspaceId: here };
+          return failure(
+            json,
+            "not_shareable",
+            decision.because === "other_workspace"
+              ? `This meeting belongs to ${recordedIn ?? "another workspace"}, so it can be shared only there.`
+              : "This is the person's Personal workspace, where nobody else sees a meeting. Share it from a chat in the team workspace to share it with.",
+          );
         }
+        sharing = decision.request;
       }
 
       // Speakers are named by the labels meeting_read gave, in the transcript it reads.
