@@ -37,6 +37,19 @@ export function recordingSpeakerScanWorkflowId(recordingId: string): string {
   return `recording-speaker-scan:${recordingId}`;
 }
 
+export type RecordingImportedSummaryWorkflowInput = {
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+  versionId: string;
+  ownerSubjectId: string;
+};
+
+/** One per version, so a repeated start never writes a second summary. */
+export function recordingImportedSummaryWorkflowId(versionId: string): string {
+  return `recording-imported-summary:${versionId}`;
+}
+
 export type BrowserRecordingVideoWorkflowInput = BrowserRecordingVideoInput;
 
 export function browserRecordingVideoWorkflowId(recordingId: string): string {
@@ -67,6 +80,23 @@ const transcriptActivity = proxyActivities<Pick<typeof activities, "transcribeRe
 const settleActivity = proxyActivities<Pick<typeof activities, "failRecordingTranscript">>({
   startToCloseTimeout: "1 minute",
   retry: { initialInterval: "5 seconds", backoffCoefficient: 2, maximumInterval: "5 minutes" },
+});
+
+/**
+ * Starting a summary chat takes seconds (choosing its model may ask Codex
+ * upstream); it is keyed by the version, so a retry never starts a second.
+ */
+const importedSummaryActivity = proxyActivities<
+  Pick<typeof activities, "summarizeImportedRecording">
+>({
+  startToCloseTimeout: "5 minutes",
+  heartbeatTimeout: "2 minutes",
+  retry: {
+    initialInterval: "10 seconds",
+    backoffCoefficient: 2,
+    maximumInterval: "5 minutes",
+    maximumAttempts: 5,
+  },
 });
 
 const deletionActivity = proxyActivities<
@@ -183,6 +213,17 @@ export async function recordingTranscriptWorkflow(
       ownerSubjectId: input.ownerSubjectId,
     });
   }
+}
+
+/**
+ * Write the notes of a meeting imported as text. Its transcript is ready the
+ * moment it is imported, so nothing transcribes it and this starts the
+ * built-in summary a recorded meeting's transcript starts.
+ */
+export async function recordingImportedSummaryWorkflow(
+  input: RecordingImportedSummaryWorkflowInput,
+): Promise<void> {
+  await importedSummaryActivity.summarizeImportedRecording(input);
 }
 
 /**

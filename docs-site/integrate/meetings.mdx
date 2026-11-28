@@ -60,6 +60,28 @@ for (const segment of page.segments) console.log(segment.speakerLabel, segment.t
 
 Pages carry `nextAfter` until the last one; each `segment.speakerLabel` points at one of `page.speakers`, which carries the name people gave that speaker. A recording is private to the person who recorded it unless they share it with the workspace.
 
+## Import a transcript
+
+A transcript you already have, from another meeting tool or as a test fixture, becomes a meeting without audio or transcription cost:
+
+```ts
+import { OpenGeniRecordingsClient } from "@opengeni/sdk/recordings";
+
+const recordings = new OpenGeniRecordingsClient(og);
+const meeting = await recordings.importRecordingTranscript(workspaceId, {
+  recordingId: crypto.randomUUID(),
+  title: "Planning call",
+  startedAt: "2026-03-02T09:00:00.000Z",
+  language: "en",
+  segments: [
+    { startMilliseconds: 0, endMilliseconds: 3500, speaker: "Ana", text: "Morning, everyone." },
+    { startMilliseconds: 4000, speaker: "Ben", text: "Then we ship on Friday." },
+  ],
+});
+```
+
+It is `ready` at once, with each speaker named as given and the same built-in notes a recorded meeting gets. A segment without an end ends where the next one starts. Pass a `recordingId` so a retry returns the same meeting. Its transcript is marked `providerId: "import"`, `model: "text"`, and it can't be transcribed again (`409`, `no_audio`). See [Recordings](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/recordings.md#importing-a-transcript) for the limits.
+
 ## React from your backend
 
 Recording events go out through your [workspace webhooks](/guides/webhooks-and-credentials): `recording.started`, `recording.finished`, `recording.transcript.ready`, `recording.transcript.failed`, `recording.transcript.current_changed`, `recording.speakers.updated` and `recording.deleted`. They carry ids, states and your `externalRef`, never titles, audio or transcript text, so your backend reads the recording through the API with its own authority.

@@ -6,7 +6,8 @@
    the meeting's sticky player and Ask bars must still meet the window's edges
    with the page's own background, with nothing scrolling past beyond them.
    `?theme=dark` puts the host in dark mode (`class="dark"` on <html> and a
-   dark page). */
+   dark page). `?meeting=imported` opens a meeting imported as text, which
+   has no audio. */
 import { createRoot } from "react-dom/client";
 import { MeetingDetailPage } from "@opengeni/react/meetings";
 import { createMeetingsFixture } from "@opengeni/react/testing/meetings";
@@ -22,7 +23,7 @@ document.documentElement.classList.toggle("dark", theme === "dark");
 document.body.style.background = palette.page;
 document.body.style.color = palette.ink;
 
-const fixture = createMeetingsFixture();
+const fixture = createMeetingsFixture({ imported: params.get("meeting") === "imported" });
 
 function Host() {
   return (

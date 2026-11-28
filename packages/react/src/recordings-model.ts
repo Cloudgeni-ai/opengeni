@@ -18,6 +18,9 @@ import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 const defaultText = createOpenGeniText();
 
+/** Whether a version is a transcript imported as text: the meeting has no audio. */
+export { recordingTranscriptImported } from "@opengeni/contracts";
+
 /** "4:07", "1:02:09". Never negative; rounds down to the second. */
 export function formatClock(milliseconds: number): string {
   const total = Math.max(0, Math.floor(milliseconds / 1000));

@@ -8848,6 +8848,19 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/recordings/import-transcript",
+      "sdk": [
+        "OpenGeniRecordingsClient.importRecordingTranscript"
+      ],
+      "request": [
+        "ImportRecordingTranscriptRequest"
+      ],
+      "response": [
+        "Recording"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/rigs",
       "sdk": [
@@ -22059,6 +22072,43 @@
         "$": "object",
         "$.operationId": "string?",
         "$.supersedesRevisionId": "string? null"
+      }
+    },
+    "ImportRecordingTranscriptRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.externalRef": "string?",
+        "$.language": "string?",
+        "$.metadata": "object?",
+        "$.metadata{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
+        "$.metadata{}|0": "string",
+        "$.metadata{}|1": "number",
+        "$.metadata{}|2": "boolean",
+        "$.metadata{}|3": "array",
+        "$.metadata{}|3[]": "ref(__schema0)",
+        "$.metadata{}|4": "object",
+        "$.metadata{}|4{}": "ref(__schema0)",
+        "$.recordingId": "string?",
+        "$.segments": "array!",
+        "$.segments[]": "ref(ImportRecordingTranscriptSegment)",
+        "$.startedAt": "string?",
+        "$.title": "string?",
+        "$.visibility": "ref(SessionVisibility)?"
+      }
+    },
+    "ImportRecordingTranscriptSegment": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.endMilliseconds": "integer?",
+        "$.speaker": "string?",
+        "$.startMilliseconds": "integer!",
+        "$.text": "string!"
       }
     },
     "InboundEvent": {
@@ -44814,6 +44864,7 @@
       "recordingOwnerKey": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
+      "recordingTranscriptImported": "value",
       "registerLiveRecordingCapture": "value",
       "setSignOutRecordingsPrompt": "value",
       "SignOutRecordingsChoice": "type",
@@ -49413,6 +49464,7 @@
       "getRecording",
       "getRecordingTrackAudio",
       "getRecordingTranscript",
+      "importRecordingTranscript",
       "listRecordingLiveSegments",
       "listRecordingModels",
       "listRecordingNotes",
@@ -64618,6 +64670,9 @@
       ],
       "getRecordingTranscript": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"after\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"limit\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptPage\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "importRecordingTranscript": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ImportRecordingTranscriptRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Recording\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listRecordingLiveSegments": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"after\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListRecordingLiveSegmentsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

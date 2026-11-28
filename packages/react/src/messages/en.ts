@@ -2681,6 +2681,7 @@ export const englishMessages = {
   "meetings.detailPage.enterAWholeNumberFrom": "Enter a whole number from 1 to 32.",
   "meetings.detailPage.error": "Error",
   "meetings.detailPage.failed": "Failed",
+  "meetings.detailPage.importedTranscript": "Imported transcript",
   "meetings.detailPage.itMayHaveBeenDeleted":
     "It may have been deleted, or only the person who recorded it can open it.",
   "meetings.detailPage.itSStillBeingRecorded":

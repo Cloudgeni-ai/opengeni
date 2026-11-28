@@ -32,12 +32,13 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { userErrorText } from "../ui/api-error";
-import type {
-  Recording,
-  RecordingNote,
-  RecordingPerson,
-  RecordingTranscriptVersion,
-  RecordingTranscriptionModel,
+import {
+  recordingTranscriptImported,
+  type Recording,
+  type RecordingNote,
+  type RecordingPerson,
+  type RecordingTranscriptVersion,
+  type RecordingTranscriptionModel,
 } from "@opengeni/contracts";
 import {
   activeSegmentIndex,
@@ -1165,10 +1166,13 @@ function MeetingDetailPageForRecording({
 
   const modelName = useCallback(
     (entry: RecordingTranscriptVersion) =>
-      models.models.find(
-        (candidate) => candidate.providerId === entry.providerId && candidate.model === entry.model,
-      )?.name ?? entry.model,
-    [models.models],
+      recordingTranscriptImported(entry)
+        ? msg("meetings.detailPage.importedTranscript")
+        : (models.models.find(
+            (candidate) =>
+              candidate.providerId === entry.providerId && candidate.model === entry.model,
+          )?.name ?? entry.model),
+    [models.models, msg],
   );
   const modelOf = useCallback(
     (entry: RecordingTranscriptVersion): ModelAbout | null => {
@@ -1533,14 +1537,19 @@ function MeetingDetailPageForRecording({
       entry.versionNumber > shownVersionNumber &&
       (entry.state === "queued" || entry.state === "processing"),
   );
+  // Imported as text: there never was audio, so nothing plays, nothing says
+  // it is gone, and it can't be transcribed again.
+  const imported = recordingTranscriptImported(recording.transcript);
   // Gone once retention deleted it, or when none was ever uploaded. Uploaded
   // audio without a playable copy yet (while it's transcribed, or after a
   // failure before that step) can still be transcribed again.
   const audioGone =
-    recording.audioDeletedAt !== null ||
-    (recording.state !== "capturing" &&
-      !recording.tracks.some((track) => track.playable || track.chunkCount > 0));
-  const canRerun = !readOnly && recording.state !== "capturing" && !audioGone && !rerunPending;
+    !imported &&
+    (recording.audioDeletedAt !== null ||
+      (recording.state !== "capturing" &&
+        !recording.tracks.some((track) => track.playable || track.chunkCount > 0)));
+  const canRerun =
+    !readOnly && !imported && recording.state !== "capturing" && !audioGone && !rerunPending;
   // Pending before any transcript is done, it is the first one, not "again".
   const firstPending = rerunPending && shownVersionNumber === 0;
   const unnamedCount = speakerLabels.filter(
@@ -1759,7 +1768,7 @@ function MeetingDetailPageForRecording({
                   {msg("meetings.detailPage.availableInMenu")}
                 </DropdownMenuItem>
               ) : null}
-              {recording.state !== "capturing" ? (
+              {recording.state !== "capturing" && !imported ? (
                 <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
                   <RefreshCwIcon aria-hidden="true" />
                   {rerunPending && !firstPending
@@ -1840,7 +1849,7 @@ function MeetingDetailPageForRecording({
                   )}
                 </span>
               )}
-              {phase.kind === "failed" || firstPending || readOnly ? null : (
+              {phase.kind === "failed" || firstPending || readOnly || imported ? null : (
                 <Button
                   type="button"
                   size="sm"

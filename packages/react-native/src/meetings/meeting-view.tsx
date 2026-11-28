@@ -13,6 +13,7 @@ import {
   meetingHereStatus,
   meetingPhase,
   meetingTitle,
+  recordingTranscriptImported,
   speakerDisplayName,
   speakerIsNamed,
   trackSpeakerName,
@@ -152,12 +153,16 @@ export function useMeetingView({
   // A failed transcript names its model too, to say which provider it needs.
   const models = useRecordingModels({ ...scope, enabled: ready || phase?.kind === "failed" });
   const version = recording?.transcript ?? null;
-  const modelName = version
-    ? (models.models.find(
-        (candidate) =>
-          candidate.providerId === version.providerId && candidate.model === version.model,
-      )?.name ?? null)
-    : null;
+  // Imported as text: no audio, so nothing to transcribe again, and no model.
+  const imported = recordingTranscriptImported(version);
+  const modelName = imported
+    ? msg("meetings.detailPage.importedTranscript")
+    : version
+      ? (models.models.find(
+          (candidate) =>
+            candidate.providerId === version.providerId && candidate.model === version.model,
+        )?.name ?? null)
+      : null;
   const failedVersion = phase?.kind === "failed" ? (phase.version ?? null) : null;
   const failedModel = failedVersion
     ? (models.models.find(
@@ -343,7 +348,7 @@ export function useMeetingView({
               : msg("native.meetings.meetingView.makePrivate"),
           systemImage: recording.visibility === "private" ? "person.2" : "lock",
         },
-        ...(phase?.kind === "ready" || phase?.kind === "failed"
+        ...((phase?.kind === "ready" || phase?.kind === "failed") && !imported
           ? [
               {
                 id: "rerun" as const,

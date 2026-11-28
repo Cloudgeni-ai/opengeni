@@ -1546,6 +1546,52 @@ describe("Meeting page", () => {
     }
   });
 
+  test("a meeting imported as text says so, with no player, audio notice or Transcribe again", async () => {
+    const fixture = createMeetingsFixture({ imported: true });
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Imported transcript");
+      const text = view.container.textContent ?? "";
+      expect(text).not.toContain("The audio was deleted");
+      expect(text).not.toContain("Scribe");
+      const buttons = () =>
+        [...view.container.querySelectorAll("button")].map((button) => button.textContent?.trim());
+      expect(buttons()).not.toContain("Transcribe again");
+      await act(async () => {
+        view.container
+          .querySelector<HTMLElement>('[aria-label^="More actions for"]')!
+          .dispatchEvent(
+            new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }),
+          );
+      });
+      await settle(50);
+      const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map((item) =>
+        item.textContent?.trim(),
+      );
+      expect(items).toContain("Delete meeting");
+      expect(items.some((item) => item?.includes("Transcribe"))).toBe(false);
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      await openTab(view.container, "Transcript");
+      await waitFor(() => view.container.querySelector('ol[aria-label="Transcript"]') !== null);
+      // Named as the transcript gave them, and no time to play from.
+      expect(view.container.textContent).toContain("Sam Okafor");
+      expect(view.container.querySelector('[aria-label^="Play from"]')).toBeNull();
+      expect(view.container.querySelector("audio")).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a missing provider key names the model and the provider that isn't connected", async () => {
     const fixture = createMeetingsFixture();
     const missingKey = <T extends { transcript?: unknown }>(recording: T): T => ({

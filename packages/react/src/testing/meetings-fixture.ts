@@ -270,6 +270,12 @@ export function createMeetingsFixture(
      * anyone else in this workspace, read only.
      */
     sharedFromPersonal?: boolean;
+    /**
+     * The ready meeting was imported as a text transcript: no tracks or
+     * audio, a version marked `import`/`text`, and each speaker named as the
+     * transcript gave it (`imported:1`, `imported:2`, …).
+     */
+    imported?: boolean;
   } = {},
 ): MeetingsFixture {
   const readyId = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
@@ -328,6 +334,45 @@ export function createMeetingsFixture(
       segmentCount: segments.length,
     }),
   });
+  // An imported transcript's speakers are labelled in order of first
+  // appearance and named as the transcript gave them.
+  const importedLabels = new Map([
+    ["track-0", "imported:1"],
+    ["speaker_0", "imported:2"],
+    ["speaker_1", "imported:3"],
+    ["speaker_2", "imported:4"],
+  ]);
+  const importedNames = ["Ingrid Solberg", "Tomas Eriksen", "Sam Okafor", "Lea Haugen"];
+  let notesBody = SUMMARY_NOTES;
+  if (options.imported) {
+    speakers = importedNames.map((name, index) => ({
+      label: `imported:${index + 1}`,
+      name,
+      personId: null,
+      source: "confirmed",
+      confidence: null,
+    }));
+    segments = segments.map((segment) => ({
+      ...segment,
+      trackNumber: null,
+      speakerLabel: importedLabels.get(segment.speakerLabel ?? "") ?? null,
+    }));
+    for (const [label, imported] of importedLabels) {
+      notesBody = notesBody.replaceAll(`(speaker:${label})`, `(speaker:${imported})`);
+    }
+    Object.assign(ready, {
+      tracks: [],
+      transcript: version(readyId, 1, "complete", {
+        providerId: "import",
+        model: "text",
+        options: { language: "en" },
+        diarized: false,
+        diarization: "none",
+        audioMilliseconds: readyDuration,
+        segmentCount: segments.length,
+      }),
+    } satisfies Partial<Recording>);
+  }
   const reruns = new Map<string, RecordingTranscriptVersion[]>();
   let recordings: Recording[] =
     options.state === "empty"
@@ -576,7 +621,7 @@ export function createMeetingsFixture(
         },
         {
           kind: "notes",
-          body: SUMMARY_NOTES,
+          body: notesBody,
           revision: 1,
           updatedAt: iso(minutes(36)),
           updatedBy: { subjectId: ME, sessionId: "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f" },

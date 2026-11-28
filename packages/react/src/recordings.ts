@@ -57,6 +57,7 @@ export {
   meetingTitle,
   meetingUploadFailure,
   ownerLiveLaneName,
+  recordingTranscriptImported,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
