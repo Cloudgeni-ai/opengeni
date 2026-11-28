@@ -32,7 +32,11 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
   },
   "company-brain.ts": { count: 1, userContent: true, why: "Company Brain export" },
   "computer-sessions.ts": { count: 1, userContent: true, why: "live computer frame" },
-  "editable-artifacts.ts": { count: 1, userContent: true, why: "materialized export download" },
+  "editable-artifacts.ts": {
+    count: 2,
+    userContent: true,
+    why: "materialized export download, and the card picture: an SVG the server draws from the artifact (text escaped, hex colours only) sent with a sandbox CSP",
+  },
   "feedback.ts": { count: 1, userContent: true, why: "the author's own feedback screenshot bytes" },
   "files.ts": { count: 1, userContent: true, why: "retained file and screenshot content" },
   "image-proxy.ts": {
