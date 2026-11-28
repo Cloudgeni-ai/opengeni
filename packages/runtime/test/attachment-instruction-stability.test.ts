@@ -183,6 +183,24 @@ describe("file attachments and the cached instruction prefix", () => {
         sandboxWorkspaceRoot: "/home/user",
       }),
     ).toBe("/home/user");
+    // A chat created on a Connected Machine keeps that system prompt; on the
+    // deployment's managed sandbox (the route rewrote the settings' backend)
+    // the layout says what working there means, and back on its machine the
+    // layout is the root alone.
+    const homeOnMachine = { homeSandboxBackend: "selfhosted" } as const;
+    const movedToManaged = workspaceFilesystemLayout(settings, [REPOSITORY], {
+      ...homeOnMachine,
+      activeSandboxBackend: settings.sandboxBackend,
+    });
+    expect(movedToManaged).toStartWith(`${managed}\n\nThis chat now runs in a managed sandbox`);
+    expect(movedToManaged).toContain("never link to `/tmp`");
+    expect(
+      workspaceFilesystemLayout({ ...settings, sandboxBackend: "selfhosted" }, [REPOSITORY], {
+        ...homeOnMachine,
+        activeSandboxBackend: "selfhosted",
+        sandboxWorkspaceRoot: "/home/user",
+      }),
+    ).toBe("/home/user");
     // A Connected Machine that reported no root has no workspace to describe;
     // the agent build refuses it the same way.
     expect(() =>

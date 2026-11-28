@@ -27,6 +27,7 @@ import {
   type ConnectorActionPolicyHooks,
   modelToolTextBudgetBytes,
   type ModelToolResultStore,
+  promptSandboxBackend,
   type RepositorySkillsIndex,
   type SandboxFileDownload,
   type TurnSandboxCommandSession,
@@ -766,6 +767,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     layout: workspaceFilesystemLayout(eventing.modelRunSettings, runtimeResources, {
       ...workspacePlacement,
+      homeSandboxBackend: runSettings.sandboxBackend,
       ...(session.agent ? { renderer: session.agent.renderer } : {}),
     }),
   });
@@ -883,7 +885,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   // Prompt text only: the repositories module names the person's login for
   // repositories mounted as them in a managed sandbox. Best effort and never
   // an authority; a failed read only drops the login from that turn's prompt.
-  const promptBackend = activeSandboxBackend ?? groupBoxBackend;
+  // It follows the kind of compute the system prompt describes, so a move to
+  // another machine neither adds nor drops it.
+  const promptBackend = promptSandboxBackend(
+    eventing.modelRunSettings,
+    activeSandboxBackend,
+    runSettings.sandboxBackend,
+  );
   const personalGitHubLogin =
     session.agent &&
     promptBackend !== "selfhosted" &&
@@ -902,6 +910,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       // Approval policy must use the same accepted account identities as tool
       // preparation. Keep the separately resolved model/sandbox settings intact.
       return runtime.buildAgent({ ...eventing.modelRunSettings, mcpServers }, runtimeResources, {
+        // The session's durable backend: the route rewrites the settings'
+        // backend, and the system prompt must not follow it (promptSandboxBackend).
+        homeSandboxBackend: runSettings.sandboxBackend,
         ...(linkedToolAuthority
           ? {
               authorizeAttemptExecution: async () => {

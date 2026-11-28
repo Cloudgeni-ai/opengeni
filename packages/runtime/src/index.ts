@@ -2958,6 +2958,15 @@ export type BuildAgentOptions = {
   // caller change.
   activeSandboxBackend?: Settings["sandboxBackend"];
   /**
+   * The session's own sandbox backend, which moving the session to another
+   * machine never changes. The worker rewrites `settings.sandboxBackend` to the
+   * route a turn runs on (a chat created on a Connected Machine runs on the
+   * deployment's managed sandbox after a move there), so the system prompt
+   * keys off this instead and stays byte-identical across the move
+   * (`promptSandboxBackend`). Defaults to `settings.sandboxBackend`.
+   */
+  homeSandboxBackend?: Settings["sandboxBackend"];
+  /**
    * Repositories removed from the session that may still be in a managed
    * sandbox. Their folders and unused credential bindings are removed before
    * the agent starts (never on a Connected Machine). `retained` lists the
@@ -3431,19 +3440,22 @@ function skillCatalogLayerApplies(
 
 /**
  * The kind of compute the system prompt describes. While the turn has compute,
- * this is the deployment's own sandbox backend rather than the active machine,
- * so moving a session between a managed sandbox and a Connected Machine leaves
- * the system prompt byte-identical (earlier requests already sent it). The
- * workspace filesystem layout item describes the machine the session is on
+ * this is the session's home backend (`homeSandboxBackend`, else the
+ * settings' backend) rather than the active machine, so moving a session
+ * between a managed sandbox and a Connected Machine leaves the system prompt
+ * byte-identical (earlier requests already sent it). The workspace filesystem
+ * layout item describes the machine the session is on
  * (`workspaceFilesystemLayout`). Whether the turn has compute at all still
  * follows the turn.
  */
 export function promptSandboxBackend(
   settings: Pick<Settings, "sandboxBackend">,
   activeSandboxBackend?: Settings["sandboxBackend"],
+  homeSandboxBackend?: Settings["sandboxBackend"],
 ): Settings["sandboxBackend"] {
+  const home = homeSandboxBackend ?? settings.sandboxBackend;
   const turn = activeSandboxBackend ?? settings.sandboxBackend;
-  return turn === "none" || settings.sandboxBackend === "none" ? turn : settings.sandboxBackend;
+  return turn === "none" || home === "none" ? turn : home;
 }
 
 export function agentPromptResourcesFor(
@@ -3452,6 +3464,7 @@ export function agentPromptResourcesFor(
   options: Pick<
     BuildAgentOptions,
     | "activeSandboxBackend"
+    | "homeSandboxBackend"
     | "gitCredentialBindings"
     | "gitTokenSeed"
     | "gitTokenSeeds"
@@ -3463,7 +3476,11 @@ export function agentPromptResourcesFor(
     | "skillCatalog"
   >,
 ): AgentPromptResources {
-  const backend = promptSandboxBackend(settings, options.activeSandboxBackend);
+  const backend = promptSandboxBackend(
+    settings,
+    options.activeSandboxBackend,
+    options.homeSandboxBackend,
+  );
   const connectedMachine = backend === "selfhosted";
   const managedSandbox = backend !== "none" && !connectedMachine;
   const gitTokenSeeds = Object.values(options.gitTokenSeeds ?? {}).filter(Boolean);
@@ -3591,7 +3608,7 @@ function inspectModularAgentInstructions(
     ...(options.agentInstructions ? { agentInstructions: options.agentInstructions } : {}),
     ...(gitBindingDiscoveryApplies(
       options.gitCredentialBindings,
-      promptSandboxBackend(settings, options.activeSandboxBackend),
+      promptSandboxBackend(settings, options.activeSandboxBackend, options.homeSandboxBackend),
     )
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
       : {}),
@@ -3680,7 +3697,7 @@ export function inspectPersistentAgentInstructions(
     if (
       gitBindingDiscoveryApplies(
         options.gitCredentialBindings,
-        promptSandboxBackend(settings, options.activeSandboxBackend),
+        promptSandboxBackend(settings, options.activeSandboxBackend, options.homeSandboxBackend),
       )
     ) {
       add({
@@ -3714,7 +3731,7 @@ export function inspectPersistentAgentInstructions(
     if (
       gitBindingDiscoveryApplies(
         options.gitCredentialBindings,
-        promptSandboxBackend(settings, options.activeSandboxBackend),
+        promptSandboxBackend(settings, options.activeSandboxBackend, options.homeSandboxBackend),
       )
     ) {
       add({
@@ -14448,6 +14465,8 @@ export function workspaceFilesystemLayout(
   options: WorkspacePlacement & {
     /** The configured agent's renderer; omitted for a plain chat. */
     renderer?: AgentRenderer;
+    /** The session's own backend, as the system prompt describes it (`promptSandboxBackend`). */
+    homeSandboxBackend?: Settings["sandboxBackend"];
   } = {},
 ): string | null {
   if (settings.sandboxBackend === "none") return null;
@@ -14459,10 +14478,23 @@ export function workspaceFilesystemLayout(
     options,
   );
   const layout = renderManifestDescription(manifest, { depth: 3 }).text;
+  // A chat created on a Connected Machine keeps that system prompt after it
+  // moves to a managed sandbox; it learns what the managed sandbox means here.
+  const activeBackend = options.activeSandboxBackend ?? settings.sandboxBackend;
+  if (
+    options.homeSandboxBackend === "selfhosted" &&
+    activeBackend !== "selfhosted" &&
+    activeBackend !== "none"
+  )
+    return [layout, MANAGED_SANDBOX_NOT_CONNECTED_MACHINE_GUIDANCE].join("\n\n");
   // The system prompt describes the deployment's own kind of compute
   // (promptSandboxBackend). A session that moved onto a Connected Machine
   // learns what that means here, with the layout that changes with the move.
-  if (options.activeSandboxBackend !== "selfhosted" || settings.sandboxBackend === "selfhosted")
+  if (
+    options.activeSandboxBackend !== "selfhosted" ||
+    settings.sandboxBackend === "selfhosted" ||
+    options.homeSandboxBackend === "selfhosted"
+  )
     return layout;
   return [
     layout,
@@ -14474,6 +14506,10 @@ export function workspaceFilesystemLayout(
 /** What the managed-sandbox guidance in the system prompt does not cover on a Connected Machine. */
 const CONNECTED_MACHINE_NOT_MANAGED_GUIDANCE =
   "Guidance about managed sandboxes does not apply on this machine: repository resources are not mounted under repos/, no brokered Git credentials or credential bindings are installed, and git, gh and other provider CLIs use whatever this machine is already signed in to.";
+
+/** What a chat whose system prompt describes a Connected Machine needs to know in a managed sandbox. */
+const MANAGED_SANDBOX_NOT_CONNECTED_MACHINE_GUIDANCE =
+  "This chat now runs in a managed sandbox, not on a Connected Machine, so guidance about Connected Machines does not apply here. In a `sandbox:` link use a path inside the workspace root above; never link to `/tmp` or another file outside it, and copy such a file into the workspace first. Repository resources are mounted under repos/<host>/<owner>/<repo>, and provider CLIs such as gh may be pre-authenticated through brokered Git credentials, so try them before asking for credentials.";
 
 export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {
   workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];

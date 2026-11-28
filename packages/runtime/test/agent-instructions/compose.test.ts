@@ -739,6 +739,20 @@ describe("modular composer: prompt-cache stability", () => {
       gitCredentials: false,
       commandCompletionDelivery: true,
     });
+    // A chat created on a Connected Machine keeps those facts on the managed
+    // sandbox the worker routes it to (the route rewrote the settings' backend).
+    expect(
+      agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {
+        activeSandboxBackend: "docker",
+        homeSandboxBackend: "selfhosted",
+      }),
+    ).toEqual(
+      agentPromptResourcesFor(
+        testSettings({ sandboxBackend: "selfhosted" }),
+        [{ kind: "repository", uri: "x" }] as never,
+        { activeSandboxBackend: "selfhosted" },
+      ),
+    );
     // Compute itself still follows the turn.
     expect(
       agentPromptResourcesFor(settings, [], { activeSandboxBackend: "none" }).managedSandbox,
