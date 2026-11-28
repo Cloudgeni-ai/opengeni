@@ -212,6 +212,85 @@ describe("editable artifact agent application", () => {
     await expect(application.inspect(input)).rejects.toThrow("changed during receipt");
     expect(proofs).toHaveLength(1);
   });
+
+  test("draws a document's card picture from bounded reads, leaving no trace", async () => {
+    const fixture = await artifactFixture({ seed: false });
+    const queries: number[] = [];
+    let recorded = 0;
+    let touched = 0;
+    const application = new EditableArtifactAgentApplication({
+      domain: fixture.service,
+      associations: {
+        listArtifactIds: async () => [],
+        touch: async () => {
+          touched += 1;
+        },
+      },
+      exports: {} as EditableArtifactDurableExportService,
+      officeImports: {
+        prepare: async () => {
+          throw new Error("unused");
+        },
+      },
+      workspaceFiles: {
+        ensureMaterializationFile: async () => {
+          throw new Error("unused");
+        },
+      },
+      inspector: {
+        query: async ({ queryBytes }) => {
+          queries.push(queryBytes.byteLength);
+          return encodeDocumentArtifactQueryResponse({
+            revision: 0n,
+            items:
+              queries.length === 1
+                ? []
+                : [
+                    {
+                      kind: "paragraph",
+                      id: `p/${"1".repeat(16)}${"0".repeat(15)}1`,
+                      runs: [{ text: "Launch plan <draft>", style: {} }],
+                      style: { headingLevel: 1 },
+                    } as never,
+                  ],
+            nextCursor: null,
+            truncated: false,
+            projectedTextUtf16: queries.length === 1 ? 0 : 19,
+            projectedTableCells: 0,
+          });
+        },
+      },
+      recordInspection: async () => {
+        recorded += 1;
+        return "11111111-1111-4111-8111-111111111111";
+      },
+    });
+    const document = await application.create({
+      scope,
+      actor: agentActor,
+      sessionId,
+      idempotencyKey: editableArtifactClientTransactionId("picture"),
+      modality: "document",
+      title: "Plan",
+    });
+    touched = 0;
+    const humanActor: EditableArtifactActor = Object.freeze({
+      kind: "human",
+      subjectId: "user:viewer",
+      replicaId: editableArtifactReplicaId("1111222233334444"),
+    });
+    const picture = await application.preview({
+      scope,
+      actor: humanActor,
+      artifactId: document.id as never,
+    });
+    expect(picture.artifact).toMatchObject({ id: document.id, stateHash: document.stateHash });
+    expect(picture.svg).toContain(">Launch plan &lt;draft&gt;</text>");
+    // A summary for the page, then one bounded body read.
+    expect(queries).toHaveLength(2);
+    expect(recorded).toBe(0);
+    expect(touched).toBe(0);
+  });
   test("routes direct commands through the authoritative domain and recovers a lost response", async () => {
     const fixture = await artifactFixture();
     const touched: string[] = [];

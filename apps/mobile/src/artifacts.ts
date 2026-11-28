@@ -7,7 +7,6 @@ import {
   type ArtifactCatalogKind,
   type OpenGeniLinkTarget,
 } from "@opengeni/sdk";
-import { HTML_FRAME_STILL_POLICY } from "@opengeni/contracts/html-frame-host";
 import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import type { SFSymbol } from "sf-symbols-typescript";
 
@@ -315,13 +314,16 @@ export function deleteConfirmation(item: Pick<ArtifactCatalogItem, "kind" | "tit
   };
 }
 
-/** A Site's still for its card: the page as drawn, with no scripts running. */
-export function siteStillDocument(html: string): string {
-  // The web library's still: the same blocking policy ahead of the page, drawn
-  // at a desktop width and scaled into the card like a screenshot.
-  return (
-    `<!doctype html><meta http-equiv="Content-Security-Policy" content="${HTML_FRAME_STILL_POLICY}">` +
-    `<meta name="color-scheme" content="light"><meta name="viewport" content="width=1024">` +
-    `<style>html,body{overflow:hidden!important}</style>${html}`
-  );
+/**
+ * The file a Site version's captured preview is kept in on the device: one per
+ * workspace, version and theme (a version's page never changes). Ids are
+ * reduced to safe characters, so a file name never leaves its folder.
+ */
+export function sitePreviewFileName(
+  workspaceId: string,
+  versionId: string,
+  scheme: "light" | "dark",
+): string {
+  const safe = (value: string) => value.replace(/[^A-Za-z0-9_-]/gu, "").slice(0, 80);
+  return `v1-${safe(workspaceId)}-${safe(versionId)}-${scheme}.jpg`;
 }

@@ -6,24 +6,36 @@ import type {
   OpenGeniClient,
   RetainedArtifactReference,
 } from "@opengeni/sdk";
-import { memo, useEffect, useState, type ReactNode } from "react";
-import { Image, Pressable, Text, View } from "react-native";
+import {
+  SITE_PREVIEW_TIMEOUT_MS,
+  SITE_PREVIEW_WIDTH,
+  sitePreviewDocument,
+  sitePreviewPainted,
+} from "@opengeni/sdk/site-preview";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Image, Platform, Pressable, Text, View } from "react-native";
+import { SvgXml } from "react-native-svg";
+import { captureRef } from "react-native-view-shot";
 import { WebView } from "react-native-webview";
+import { newReplicaId } from "@/artifact-library";
 import {
   ARTIFACT_KIND_ICON,
   ARTIFACT_KIND_LABEL,
   editedLabel,
-  siteStillDocument,
+  isEditableKind,
+  sitePreviewFileName,
 } from "@/artifacts";
+import { blankSitePreviews, keepSitePreview, storedSitePreview } from "@/site-preview-store";
 
 export type ArtifactThumbnailClient = Pick<
   ChatClient<OpenGeniClient>,
-  "getWorkspaceArtifactHtml" | "createRetainedArtifactDownloadUrl"
+  "getWorkspaceArtifactHtml" | "createRetainedArtifactDownloadUrl" | "getEditableArtifactPreview"
 >;
 
-/* A Site's page and an image's address, shared across cards and remounts. */
+/* A Site's page, an image's address and a document's picture, shared across cards and remounts. */
 const siteHtml = new Map<string, Promise<string>>();
 const imageUrls = new Map<string, Promise<string>>();
+const editablePictures = new Map<string, Promise<string>>();
 const CACHE_LIMIT = 48;
 
 function cached<T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>) {
@@ -52,6 +64,154 @@ function useLoaded<T>(key: string | null, load: () => Promise<T>): T | null {
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- the key names what is loaded
   }, [key]);
   return state && state.key === key ? state.value : null;
+}
+
+/* Two Sites render at a time, so a screen of cards never runs every page at once. */
+const SITE_PREVIEW_SLOTS = 2;
+let sitePreviewsRendering = 0;
+const sitePreviewQueue: Array<() => void> = [];
+
+function releaseSitePreviewSlot() {
+  const next = sitePreviewQueue.shift();
+  if (next) next();
+  else sitePreviewsRendering = Math.max(0, sitePreviewsRendering - 1);
+}
+
+function useSitePreviewSlot(): { granted: boolean; release: () => void } {
+  const [granted, setGranted] = useState(false);
+  const heldRef = useRef(false);
+  const release = useCallback(() => {
+    if (!heldRef.current) return;
+    heldRef.current = false;
+    releaseSitePreviewSlot();
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const grant = () => {
+      if (!active) return releaseSitePreviewSlot();
+      heldRef.current = true;
+      setGranted(true);
+    };
+    if (sitePreviewsRendering < SITE_PREVIEW_SLOTS) {
+      sitePreviewsRendering += 1;
+      grant();
+    } else sitePreviewQueue.push(grant);
+    return () => {
+      active = false;
+      const queued = sitePreviewQueue.indexOf(grant);
+      if (queued >= 0) sitePreviewQueue.splice(queued, 1);
+      release();
+    };
+  }, [release]);
+  return { granted, release };
+}
+
+/**
+ * A Site's page drawn at a desktop width and scaled into the tile, in an
+ * isolated web view (`@opengeni/sdk/site-preview`: no bridge, no calls, no
+ * shared cookies on iOS). Once the page reports it painted, the tile is
+ * captured and `onCaptured` gets the picture; a page that stays blank calls
+ * `onBlank`. If capturing fails the live page stays (`onLive`).
+ */
+function SiteRender({
+  html,
+  name,
+  scheme,
+  onCaptured,
+  onBlank,
+  onLive,
+}: {
+  html: string;
+  name: string;
+  scheme: "light" | "dark";
+  onCaptured: (uri: string) => void;
+  onBlank: () => void;
+  onLive: () => void;
+}) {
+  const shotRef = useRef<View>(null);
+  const [box, setBox] = useState<{ width: number; height: number } | null>(null);
+  const { granted: slotGranted, release: releaseSlot } = useSitePreviewSlot();
+  const settledRef = useRef(false);
+  const document = useMemo(() => sitePreviewDocument(html, { theme: scheme }), [html, scheme]);
+  const settle = useCallback(
+    (painted: boolean) => {
+      if (settledRef.current) return;
+      settledRef.current = true;
+      if (!painted) {
+        blankSitePreviews.add(name);
+        releaseSlot();
+        onBlank();
+        return;
+      }
+      // One frame for the web view to present what it reported.
+      setTimeout(() => {
+        captureRef(shotRef, { format: "jpg", quality: 0.85, result: "tmpfile" }).then(
+          (uri) => {
+            releaseSlot();
+            onCaptured(keepSitePreview(name, uri));
+          },
+          () => {
+            releaseSlot();
+            onLive();
+          },
+        );
+      }, 120);
+    },
+    [name, onBlank, onCaptured, onLive, releaseSlot],
+  );
+  useEffect(() => {
+    if (!slotGranted) return;
+    const timer = setTimeout(() => settle(false), SITE_PREVIEW_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [settle, slotGranted]);
+  const scale = box ? box.width / SITE_PREVIEW_WIDTH : 0;
+  return (
+    <View
+      ref={shotRef}
+      collapsable={false}
+      onLayout={(event) => {
+        const { width, height } = event.nativeEvent.layout;
+        if (width > 0 && height > 0) setBox({ width, height });
+      }}
+      style={{ flex: 1, overflow: "hidden", backgroundColor: "#ffffff" }}
+    >
+      {box && slotGranted ? (
+        <WebView
+          source={{ html: document }}
+          originWhitelist={["about:*"]}
+          javaScriptEnabled
+          // A separate cookie and storage jar on iOS (Android keeps its
+          // third-party cookies off for this page already).
+          incognito={Platform.OS === "ios"}
+          scalesPageToFit={false}
+          scrollEnabled={false}
+          setSupportMultipleWindows={false}
+          javaScriptCanOpenWindowsAutomatically={false}
+          allowsLinkPreview={false}
+          mediaPlaybackRequiresUserAction
+          pointerEvents="none"
+          onMessage={(event) => {
+            const painted = sitePreviewPainted(event.nativeEvent.data);
+            if (painted !== null) settle(painted);
+          }}
+          onError={() => settle(false)}
+          onContentProcessDidTerminate={() => settle(false)}
+          onRenderProcessGone={() => settle(false)}
+          onShouldStartLoadWithRequest={(request) => request.url.startsWith("about:")}
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: SITE_PREVIEW_WIDTH,
+            height: Math.ceil(box.height / scale),
+            transformOrigin: "top left",
+            transform: [{ scale }],
+            backgroundColor: "#ffffff",
+          }}
+        />
+      ) : null}
+    </View>
+  );
 }
 
 /** The type glyph on a quiet tile: what a card shows before (or without) a still. */
@@ -83,8 +243,10 @@ function KindTile({ item, size }: { item: ArtifactCatalogItem; size: number }) {
 }
 
 /**
- * An artifact's still, as the web library draws it: a Site's page with no
- * scripts running, an image's own pixels, and the type glyph for the rest.
+ * An artifact's still, as the web library draws it: a Site's page as it looks
+ * when opened, an image's own pixels, the first page, slide or sheet of a
+ * document, presentation or spreadsheet, and the type glyph for the rest (and
+ * whenever a still can't be had).
  */
 export const ArtifactThumbnail = memo(function ArtifactThumbnail({
   client,
@@ -98,8 +260,24 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
   glyphSize?: number;
 }) {
   const theme = useNativeTimelineTheme();
+  const previewName =
+    item.kind === "site" && item.versionId
+      ? sitePreviewFileName(workspaceId, item.versionId, theme.scheme)
+      : null;
+  const stored = useMemo(
+    () => (previewName ? storedSitePreview(previewName) : null),
+    [previewName],
+  );
+  const [site, setSite] = useState<{ name: string; uri: string | null; live?: boolean } | null>(
+    null,
+  );
+  const siteState = site && site.name === previewName ? site : null;
+  const capturedUri = stored ?? siteState?.uri ?? null;
+  const blank = previewName !== null && blankSitePreviews.has(previewName);
   const siteKey =
-    item.kind === "site" && item.versionId ? `${workspaceId}:${item.id}:${item.versionId}` : null;
+    previewName && !capturedUri && !blank && !siteState
+      ? `${workspaceId}:${item.id}:${item.versionId}`
+      : null;
   const html = useLoaded(siteKey, () =>
     cached(siteHtml, siteKey!, () =>
       client.getWorkspaceArtifactHtml(workspaceId, item.id, { versionId: item.versionId! }),
@@ -112,20 +290,46 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
       client.createRetainedArtifactDownloadUrl(workspaceId, file!).then((link) => link.url),
     ),
   );
+  const pictureKey = isEditableKind(item.kind)
+    ? `${workspaceId}:${item.id}:${item.updatedAt}`
+    : null;
+  const picture = useLoaded(pictureKey, () =>
+    cached(editablePictures, pictureKey!, () =>
+      client.getEditableArtifactPreview(workspaceId, item.id, { replicaId: newReplicaId() }),
+    ),
+  );
   const [painted, setPainted] = useState(false);
+  const onCaptured = useCallback(
+    (uri: string) => previewName && setSite({ name: previewName, uri }),
+    [previewName],
+  );
+  const onBlank = useCallback(
+    () => previewName && setSite({ name: previewName, uri: null }),
+    [previewName],
+  );
+  const onLive = useCallback(() => {
+    if (previewName) setSite({ name: previewName, uri: null, live: true });
+    setPainted(true);
+  }, [previewName]);
   let still: ReactNode = null;
-  if (html) {
+  if (capturedUri) {
     still = (
-      <WebView
-        source={{ html: siteStillDocument(html) }}
-        originWhitelist={["about:*"]}
-        javaScriptEnabled={false}
-        scrollEnabled={false}
-        pointerEvents="none"
-        scalesPageToFit
-        onLoadEnd={() => setPainted(true)}
-        onShouldStartLoadWithRequest={(request) => request.url.startsWith("about:")}
-        style={{ flex: 1, backgroundColor: "#ffffff", opacity: painted ? 1 : 0 }}
+      <Image
+        source={{ uri: capturedUri }}
+        resizeMode="cover"
+        onLoad={() => setPainted(true)}
+        style={{ flex: 1, opacity: painted ? 1 : 0 }}
+      />
+    );
+  } else if (html && previewName && (!siteState || siteState.live)) {
+    still = (
+      <SiteRender
+        html={html}
+        name={previewName}
+        scheme={theme.scheme}
+        onCaptured={onCaptured}
+        onBlank={onBlank}
+        onLive={onLive}
       />
     );
   } else if (imageUrl) {
@@ -137,6 +341,8 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
         style={{ flex: 1, opacity: painted ? 1 : 0 }}
       />
     );
+  } else if (picture) {
+    still = <EditablePicture svg={picture} onShown={() => setPainted(true)} />;
   }
   return (
     <View
@@ -144,15 +350,25 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
       importantForAccessibility="no-hide-descendants"
       style={{ flex: 1, overflow: "hidden", backgroundColor: theme.colors["surface-2"] }}
     >
+      {still}
       {!painted ? (
         <View style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0 }}>
           <KindTile item={item} size={glyphSize} />
         </View>
       ) : null}
-      {still}
     </View>
   );
 });
+
+/** A document's, presentation's or spreadsheet's first page as the server drew it. */
+function EditablePicture({ svg, onShown }: { svg: string; onShown: () => void }) {
+  useEffect(() => onShown(), [onShown]);
+  return (
+    <View style={{ flex: 1, backgroundColor: "#ffffff" }}>
+      <SvgXml xml={svg} width="100%" height="100%" />
+    </View>
+  );
+}
 
 /**
  * One artifact in the list: a large rounded card, its still on the left and

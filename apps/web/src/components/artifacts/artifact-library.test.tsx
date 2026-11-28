@@ -15,11 +15,15 @@ import {
   defaultArtifactFilters,
   filterArtifactCatalog,
 } from "@opengeni/react/app/lib/artifact-catalog";
+import { configureContentHosting } from "@opengeni/react/app/lib/content-hosting";
+import { SITE_PREVIEW_PAINTED_MESSAGE } from "@opengeni/sdk/site-preview";
 
+// The client the cards read through; a test sets the calls it needs.
+const testClient: Record<string, unknown> = {};
 // Rows ask the app who the viewer is, to offer a file's owner its share action.
 mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
-    client: {},
+    client: testClient,
     accessKeyVersion: 0,
     workspaces: [{ id: "workspace", accountId: "account", kind: "shared", name: "Design" }],
     managedSelfContext: null,
@@ -181,6 +185,167 @@ test("an app still blocks scripts and the network before any of the app's markup
   expect(still).toContain("default-src 'none'");
   expect(still).not.toContain("script-src");
   expect(still.indexOf("Content-Security-Policy")).toBeLessThan(still.indexOf("<script>"));
+});
+
+/** Cards in view at once, with a measurable box, for the length of `run`. */
+async function withVisibleCards(run: () => Promise<void>) {
+  const previousObserver = Object.getOwnPropertyDescriptor(globalThis, "IntersectionObserver");
+  const previousWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+  const previousHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    configurable: true,
+    value: class {
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+      observe() {
+        this.callback(
+          [{ isIntersecting: true } as IntersectionObserverEntry],
+          this as unknown as IntersectionObserver,
+        );
+      }
+      disconnect() {}
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get: () => 320,
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get: () => 200,
+  });
+  try {
+    await run();
+  } finally {
+    for (const [target, key, previous] of [
+      [globalThis, "IntersectionObserver", previousObserver],
+      [HTMLElement.prototype, "clientWidth", previousWidth],
+      [HTMLElement.prototype, "clientHeight", previousHeight],
+    ] as const) {
+      if (previous) Object.defineProperty(target, key, previous);
+      else Reflect.deleteProperty(target, key);
+    }
+    for (const key of Object.keys(testClient)) delete testClient[key];
+    configureContentHosting({});
+  }
+}
+
+test("an app's card runs the page in a scripts-only frame and shows it once it painted", async () => {
+  await withVisibleCards(async () => {
+    configureContentHosting({ htmlFrameHost: "https://og.example.site" });
+    const html =
+      '<div id="app"></div><script src="/__opengeni/site-tools/client.js"></script><script>app.innerHTML="<h1>Issues</h1>"</script>';
+    testClient["getWorkspaceArtifactHtml"] = async () => html;
+    const sites: ArtifactCatalogItem[] = [
+      { ...items[0]!, id: "painted", title: "Issue tracker", versionId: "p1" },
+      { ...items[0]!, id: "blank", title: "Deployments", versionId: "b1" },
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await renderInRouter(root, () => (
+        <ArtifactLibrary
+          workspaceId="workspace"
+          items={sites}
+          filters={defaultArtifactFilters}
+          onFiltersChange={() => {}}
+          loading={false}
+          onRetry={() => {}}
+        />
+      ));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      const frame = (title: string) =>
+        container.querySelector<HTMLIFrameElement>(`iframe[title="Preview of ${title}"]`);
+      const card = (title: string) =>
+        Array.from(container.querySelectorAll("ul[aria-label=Artifacts] > li")).find((li) =>
+          li.textContent?.includes(title),
+        )!;
+      for (const title of ["Issue tracker", "Deployments"]) {
+        const element = frame(title)!;
+        // The page's own scripts may run, in an opaque origin, through the frame host.
+        expect(element.getAttribute("sandbox")).toBe("allow-scripts");
+        expect(element.getAttribute("src")).toStartWith("https://og.example.site/_og/html-frame");
+        expect(element.getAttribute("srcdoc")).toBeNull();
+        // Until it reports, the card keeps its glyph and the frame stays hidden.
+        expect(element.closest(".opacity-0")).not.toBeNull();
+        expect(card(title).querySelector("svg")).not.toBeNull();
+      }
+      // Happy DOM loads no frame pages; give each frame a window of its own.
+      for (const title of ["Issue tracker", "Deployments"])
+        Object.defineProperty(frame(title)!, "contentWindow", { value: { title } });
+      const report = async (title: string, painted: boolean, origin = "null") =>
+        act(async () => {
+          const event = new MessageEvent("message", {
+            data: { type: SITE_PREVIEW_PAINTED_MESSAGE, painted },
+            origin,
+          });
+          Object.defineProperty(event, "source", { value: frame(title)!.contentWindow });
+          window.dispatchEvent(event);
+        });
+      // A named origin is not the card's sandboxed frame.
+      await report("Issue tracker", true, "https://evil.example");
+      expect(frame("Issue tracker")!.closest(".opacity-0")).not.toBeNull();
+      await report("Issue tracker", true);
+      expect(frame("Issue tracker")!.closest(".opacity-100")).not.toBeNull();
+      // A page that drew nothing never shows as a blank tile: the glyph stays.
+      await report("Deployments", false);
+      expect(frame("Deployments")).toBeNull();
+      expect(card("Deployments").querySelector("svg")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});
+
+test("a document's card shows a picture of its first page, and its glyph if there is none", async () => {
+  await withVisibleCards(async () => {
+    const requested: Array<{ id: string; replicaId: string }> = [];
+    testClient["getEditableArtifactPreview"] = async (
+      _workspaceId: string,
+      id: string,
+      options: { replicaId: string },
+    ) => {
+      requested.push({ id, replicaId: options.replicaId });
+      if (id === "broken") throw new Error("unavailable");
+      return '<svg xmlns="http://www.w3.org/2000/svg"><text>Project brief</text></svg>';
+    };
+    const documents: ArtifactCatalogItem[] = [
+      { ...items[1]!, id: "brief", title: "Project brief" },
+      { ...items[1]!, id: "broken", title: "Old notes" },
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await renderInRouter(root, () => (
+        <ArtifactLibrary
+          workspaceId="workspace"
+          items={documents}
+          filters={defaultArtifactFilters}
+          onFiltersChange={() => {}}
+          loading={false}
+          onRetry={() => {}}
+        />
+      ));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(requested.map((request) => request.id).sort()).toEqual(["brief", "broken"]);
+      for (const request of requested) expect(request.replicaId).toMatch(/^[0-9a-f]{16}$/);
+      const pictures = container.querySelectorAll<HTMLImageElement>("img");
+      expect(pictures).toHaveLength(1);
+      const src = pictures[0]!.getAttribute("src")!;
+      expect(src).toStartWith("data:image/svg+xml;charset=utf-8,");
+      expect(decodeURIComponent(src)).toContain("<text>Project brief</text>");
+      const broken = Array.from(container.querySelectorAll("ul[aria-label=Artifacts] > li")).find(
+        (li) => li.textContent?.includes("Old notes"),
+      )!;
+      expect(broken.querySelector("img")).toBeNull();
+      expect(broken.querySelector("svg")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });
 
 test("the gallery is the default; List shows flush rows and is remembered", async () => {

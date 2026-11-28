@@ -1764,9 +1764,6 @@
 :where(.og-root).h-\[166\.667\%\],:where(.og-root) .h-\[166\.667\%\] {
     height: 166.667%;
   }
-:where(.og-root).h-\[300\%\],:where(.og-root) .h-\[300\%\] {
-    height: 300%;
-  }
 :where(.og-root).h-\[400px\],:where(.og-root) .h-\[400px\] {
     height: 400px;
   }
@@ -2186,9 +2183,6 @@
   }
 :where(.og-root).w-\[200px\],:where(.og-root) .w-\[200px\] {
     width: 200px;
-  }
-:where(.og-root).w-\[300\%\],:where(.og-root) .w-\[300\%\] {
-    width: 300%;
   }
 :where(.og-root).w-\[calc\(100\%\+0\.75rem\)\],:where(.og-root) .w-\[calc\(100\%\+0\.75rem\)\] {
     width: calc(100% + 0.75rem);
@@ -2706,9 +2700,6 @@
   }
 :where(.og-root).scale-\[0\.6\],:where(.og-root) .scale-\[0\.6\] {
     scale: 0.6;
-  }
-:where(.og-root).scale-\[0\.3333\],:where(.og-root) .scale-\[0\.3333\] {
-    scale: 0.3333;
   }
 :where(.og-root).-rotate-90,:where(.og-root) .-rotate-90 {
     rotate: calc(90deg * -1);
@@ -4776,6 +4767,9 @@
   }
 :where(.og-root).object-cover,:where(.og-root) .object-cover {
     object-fit: cover;
+  }
+:where(.og-root).object-left-top,:where(.og-root) .object-left-top {
+    object-position: left top;
   }
 :where(.og-root).object-top,:where(.og-root) .object-top {
     object-position: top;

@@ -77,8 +77,11 @@ see [Sidebar layout](../../docs/sidebar-layout.md#clients).
 
 **Artifacts** lists the workspace's Sites, documents, presentations,
 spreadsheets, images and files, newest change first, as large cards with a
-still (a Site's page drawn without scripts, an image's own pixels, the type
-glyph otherwise). Search and type chips filter it; pull down to refresh.
+preview: a Site's page drawn once per version at a desktop width with its own
+scripts (in an incognito web view that can call nothing), captured and cached
+on the device; a picture of a document's, spreadsheet's or presentation's first
+page, sheet or slide; an image's own pixels; the type glyph otherwise, and for a
+page that draws nothing. Search and type chips filter it; pull down to refresh.
 
 Tapping a card opens the viewer. Sites and editors show in the web app's
 chromeless pages (`/native-view/…`), signed in from the device session through

@@ -3102,6 +3102,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/preview",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/preview",
+    "request": [],
+    "query": [
+      "replicaId"
+    ],
+    "response": [],
+    "permission": "artifacts:read"
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/enrollments",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/enrollments",

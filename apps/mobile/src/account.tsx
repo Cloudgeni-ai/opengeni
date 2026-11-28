@@ -20,6 +20,7 @@ import {
 } from "@opengeni/react-native";
 import { createExpoOpenGeniAdapters, expoStreamingFetch } from "@opengeni/react-native/expo";
 import { forgetAccountRecordings, prepareAccountRecordingsForSignOut } from "@/sign-out-recordings";
+import { forgetArtifactPreviews } from "@/site-preview-store";
 import {
   createContext,
   type ReactNode,
@@ -515,6 +516,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       });
       // Nothing of theirs stays here, not even what a capture half-wrote.
       forgetAccountRecordings(id);
+      // Nor pictures of its apps.
+      forgetArtifactPreviews();
       return true;
     },
     [noteRead, persist, supersedeReads],

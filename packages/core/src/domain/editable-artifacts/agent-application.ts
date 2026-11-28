@@ -58,6 +58,17 @@ import {
   type EditableArtifactStateHash,
 } from "./types";
 import type { EditableArtifactKernelState } from "./ports";
+import {
+  EDITABLE_ARTIFACT_PREVIEW_LIMITS,
+  documentPreviewSvg,
+  presentationPreviewSvg,
+  spreadsheetPreviewSvg,
+} from "./preview-picture";
+import type {
+  DocumentArtifactProjection,
+  PresentationArtifactQueryResponse,
+  SpreadsheetArtifactKernelProjection,
+} from "@opengeni/contracts/editable-artifacts";
 
 export type EditableArtifactAgentCommandBatch =
   | Readonly<{ modality: "spreadsheet"; commands: readonly SpreadsheetArtifactCommand[] }>
@@ -367,6 +378,117 @@ export class EditableArtifactAgentApplication {
       projection,
       ...(inspectionReceiptId ? { inspectionReceiptId } : {}),
     });
+  }
+
+  /**
+   * A small picture of the current head for artifact cards: the first page,
+   * slide or sheet as an SVG (`./preview-picture`). It reads like any viewer
+   * (the actor's read permission), with bounded queries, and leaves nothing
+   * behind: no session association, inspection proof or export.
+   */
+  async preview(
+    input: Readonly<{
+      scope: EditableArtifactScope;
+      actor: EditableArtifactActor;
+      artifactId: EditableArtifactId;
+    }>,
+  ): Promise<Readonly<{ artifact: EditableArtifactAgentMetadata; svg: string }>> {
+    const scope = editableArtifactScope(input.scope);
+    validateEditableArtifactActor(input.actor);
+    const state = await this.dependencies.domain.readCurrentKernelState({
+      scope,
+      actor: input.actor,
+      artifactId: editableArtifactId(input.artifactId),
+    });
+    requireActive(state.artifact);
+    const query = async (request: EditableArtifactAgentQuery): Promise<unknown> =>
+      decodeQueryResponse(
+        request.modality,
+        await this.dependencies.inspector.query({ state, queryBytes: encodeQuery(request) }),
+      );
+    const limits = EDITABLE_ARTIFACT_PREVIEW_LIMITS;
+    let svg: string;
+    if (state.modality === "document") {
+      const summary = (await query({
+        modality: "document",
+        query: { kind: "summary" },
+      })) as DocumentArtifactProjection;
+      const body = (await query({
+        modality: "document",
+        query: {
+          kind: "body",
+          startBlock: 0,
+          limits: {
+            maxItems: limits.documentBlocks,
+            maxTextUtf16: limits.documentTextUtf16,
+            maxTableCells: limits.documentTableCells,
+          },
+        },
+      })) as DocumentArtifactProjection;
+      svg = documentPreviewSvg(summary, body);
+    } else if (state.modality === "presentation") {
+      const metadata = (await query({
+        modality: "presentation",
+        query: { kind: "metadata", maxBytes: limits.presentationResponseBytes },
+      })) as Extract<PresentationArtifactQueryResponse, { kind: "metadata" }>;
+      const catalog = (await query({
+        modality: "presentation",
+        query: {
+          kind: "slide-catalog",
+          startSlide: 0,
+          maxSlides: 1,
+          maxTextBytes: 1_024,
+          maxBytes: limits.presentationResponseBytes,
+        },
+      })) as Extract<PresentationArtifactQueryResponse, { kind: "slide-catalog" }>;
+      const first = catalog.slides[0];
+      const slide = first
+        ? ((await query({
+            modality: "presentation",
+            query: {
+              kind: "editor-slide",
+              slideId: first.id,
+              maxNodes: limits.presentationNodes,
+              maxTextBytes: limits.presentationTextBytes,
+              maxBytes: limits.presentationResponseBytes,
+            },
+          })) as Extract<PresentationArtifactQueryResponse, { kind: "editor-slide" }>)
+        : null;
+      svg = presentationPreviewSvg(metadata.slideSize, slide);
+    } else {
+      const workbook = (await query({
+        modality: "spreadsheet",
+        query: {
+          kind: "workbook-metadata",
+          query: {
+            maxSheets: limits.spreadsheetSheets,
+            maxBytes: limits.spreadsheetMetadataBytes,
+          },
+        },
+      })) as Extract<SpreadsheetArtifactKernelProjection, { kind: "workbook-metadata" }>;
+      const sheet = workbook.projection.sheets[0] ?? null;
+      const viewport = sheet
+        ? (
+            (await query({
+              modality: "spreadsheet",
+              query: {
+                kind: "viewport",
+                query: {
+                  sheetId: sheet.sheetId,
+                  startRow: 0,
+                  startColumn: 0,
+                  rowCount: limits.spreadsheetRows,
+                  columnCount: limits.spreadsheetColumns,
+                  maxCells: limits.spreadsheetRows * limits.spreadsheetColumns,
+                  maxBytes: limits.spreadsheetResponseBytes,
+                },
+              },
+            })) as Extract<SpreadsheetArtifactKernelProjection, { kind: "viewport" }>
+          ).projection
+        : null;
+      svg = spreadsheetPreviewSvg(sheet, viewport);
+    }
+    return Object.freeze({ artifact: projectArtifact(state.artifact), svg });
   }
 
   async apply(

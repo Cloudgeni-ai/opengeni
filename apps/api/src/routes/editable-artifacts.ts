@@ -334,7 +334,28 @@ export type EditableArtifactRouteDependencies = AccessDeps &
     ) => Promise<readonly string[]>;
     /** Test/embedding seam for audiences; production reads and writes Postgres. */
     editableArtifactAudiences?: EditableArtifactAudiencePort;
+    /** Draws an artifact card's picture (the native kernel's agent application in production). */
+    editableArtifactAgent?: EditableArtifactPreviewPort;
   }>;
+
+/** The first page, slide or sheet of an artifact's current head, as SVG. */
+export type EditableArtifactPreviewPort = Readonly<{
+  preview(
+    input: Readonly<{
+      scope: EditableArtifactRouteScope;
+      actor: EditableArtifactRouteActor;
+      artifactId: ReturnType<typeof editableArtifactId>;
+    }>,
+  ): Promise<Readonly<{ artifact: Readonly<{ stateHash: string }>; svg: string }>>;
+}>;
+
+/** The picture holds only shapes and text; as a document it may load and run nothing. */
+const EDITABLE_ARTIFACT_PREVIEW_HEADERS = Object.freeze({
+  ...USER_CONTENT_SECURITY_HEADERS,
+  "Content-Security-Policy": "default-src 'none'; sandbox",
+  "cache-control": "private, max-age=60",
+  "content-type": "image/svg+xml; charset=utf-8",
+});
 
 export type EditableArtifactApplicationErrorCode =
   | "not_found"
@@ -555,6 +576,29 @@ export function registerEditableArtifactRoutes(
     context.header("cache-control", "private, no-store");
     const [result] = await projectWithAudiences(grant, scope, [artifact]);
     return context.json(result, 200);
+  });
+
+  // The card picture: its first page, slide or sheet. A read like opening it,
+  // revalidated by state (the ETag is the head's state hash).
+  app.get(`${item}/preview`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    const artifactId = editableArtifactId(parseArtifactId(context.req.param("artifactId")));
+    const actor = editableArtifactActorForGrant(grant, context.req.query("replicaId") ?? "");
+    const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    if (!deps.editableArtifactAgent)
+      throw editableArtifactHttpError(new EditableArtifactApplicationError("unavailable"));
+    let preview: Awaited<ReturnType<EditableArtifactPreviewPort["preview"]>>;
+    try {
+      preview = await deps.editableArtifactAgent.preview({ scope, actor, artifactId });
+    } catch (error) {
+      throw editableArtifactHttpError(error);
+    }
+    const etag = `"${preview.artifact.stateHash}"`;
+    const headers = { ...EDITABLE_ARTIFACT_PREVIEW_HEADERS, etag };
+    if (context.req.header("if-none-match") === etag)
+      return new Response(null, { status: 304, headers });
+    return new Response(preview.svg, { status: 200, headers });
   });
 
   // Who can open it: the whole workspace, or only its owner. Only the owner

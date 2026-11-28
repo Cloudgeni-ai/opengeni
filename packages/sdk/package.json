@@ -70,6 +70,10 @@
       "types": "./src/site-ui.ts",
       "default": "./src/site-ui.ts"
     },
+    "./site-preview": {
+      "types": "./src/site-preview.ts",
+      "default": "./src/site-preview.ts"
+    },
     "./site": {
       "types": "./src/site.ts",
       "default": "./src/site.ts"

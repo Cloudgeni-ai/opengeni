@@ -10681,6 +10681,22 @@ export class OpenGeniClient {
     );
   }
 
+  /** A static SVG picture of the artifact's current head (first page, slide or
+   * sheet), for library thumbnails. Shapes and text only; no scripts. */
+  async getEditableArtifactPreview(
+    workspaceId: string,
+    artifactId: string,
+    options: OpenGeniRequestOptions & Readonly<{ replicaId: string }>,
+  ): Promise<string> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/preview`,
+      { replicaId: options.replicaId },
+      { ...options, accept: "image/svg+xml" },
+    );
+    return await response.text();
+  }
+
   /**
    * Change who can open a document, spreadsheet or presentation: the whole
    * workspace, or only you. Only its owner can, from the app.
