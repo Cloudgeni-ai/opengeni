@@ -155,8 +155,8 @@ describe("browser controller image build contract", () => {
     );
 
     for (const dockerfile of dockerfiles) {
-      expect(dockerfile).toContain("ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.108-1~deb13u1");
-      expect(dockerfile).toContain("ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261123T154646Z");
+      expect(dockerfile).toContain("ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.114-1~deb13u1");
+      expect(dockerfile).toContain("ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261127T221451Z");
       expect(dockerfile).toContain(
         "https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main",
       );
