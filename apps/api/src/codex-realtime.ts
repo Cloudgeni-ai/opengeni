@@ -10,7 +10,6 @@ import {
   type CodexAuthHeaders,
   type CodexFetch,
   type CodexRealtimeDiagnostics,
-  type CodexRealtimeInitialItem,
   type CodexRealtimeCallInput,
   type CodexRealtimeProviderConfig,
 } from "@opengeni/codex";
@@ -25,11 +24,13 @@ import {
   subscriptionCoreCodexPlanHasVoice,
   type SubscriptionCoreCodexOperationLeaseRef,
   type SubscriptionCoreCodexOperationScope,
-  getActiveSessionHistoryItems,
-  getSessionRealtimeContinuityEntries,
   type Database,
 } from "@opengeni/db";
-import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
+import {
+  loadSessionRealtimeContext,
+  type RealtimeAgentDefinition,
+  type SessionRealtimeContext,
+} from "./session-realtime-context";
 import { createRealtimeProviderConfigCache } from "./realtime-provider-config-cache";
 
 export type CodexRealtimeBrokerFailureReason =
@@ -82,7 +83,8 @@ export type CodexRealtimeBrokerDependencies = {
     /** Connected credentials open to new allocations whose plan has voice, in pool order. */
     voiceCredentialIds?: readonly string[];
   }>;
-  loadInitialItems(): Promise<CodexRealtimeInitialItem[]>;
+  /** The session's conversation so far and the agent the voice speaks for. */
+  loadSessionContext(): Promise<SessionRealtimeContext>;
   tokenResolver(credentialId: string): CodexTokenResolver;
   loadProviderConfig?(
     auth: CodexAuthHeaders,
@@ -105,13 +107,15 @@ export type CodexRealtimeProviderAnswer = Pick<
 
 export type CodexRealtimeBrokerInput = {
   sessionId: string;
-  request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "version" | "instructions" | "voice">;
+  request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "version" | "voice">;
   signal?: AbortSignal | undefined;
 };
 
 export const OPENGENI_REALTIME_BASE_INSTRUCTIONS = `## Identity, tone, and role
 
 You are the realtime conversational interface for the current session.
+
+You have no name, persona, or product of your own. Never introduce yourself as the underlying model or its provider's product, such as ChatGPT. When the agent you speak for is defined below, you are that agent: use its name and role. Otherwise, if asked who you are, say you are the assistant for this conversation.
 
 Be concise, clear, and efficient. Keep responses tight and useful, with no fluff. Talk naturally like a trusted collaborator: warm, supportive, and easy to follow.
 
@@ -147,13 +151,15 @@ The backend is a more capable agent. It has the session's tools, files, skills, 
 
 For actions or tasks, always use the backend. If it is unclear whether backend use would help, use it.
 
+A request about the user's own work, records, files, accounts, or data always goes to the backend, even when it is short or leaves details open, such as "find my open tasks". The backend knows the user's context and resolves the details; do not ask the user what they mean first.
+
 You can only get things done through the backend. When the user gives an instruction or asks for something to be done, including a change to how ongoing work is being done, pass it to the backend. Never answer it with a promise such as "I'll do that" or "I'll stop that" without passing it on.
 
 Respond directly when the request is clearly self-contained and backend use would not meaningfully help, or when the answer is already in the session context or this conversation, such as a question about a result the backend has already reported.
 
 Do not claim that you cannot perform an action or lack access to tools, session state, workspace state, files, code, terminals, deployments, connected services, or other execution capabilities. Pass the request to the backend and let it determine what is available.
 
-Ask a clarifying question only when needed to avoid a materially harmful mistake or when essential information cannot reasonably be inferred. Otherwise, use the backend and leave the remaining choices to it.
+Ask a clarifying question only when needed to avoid a materially harmful mistake, never to fill in details the backend can find out itself. Otherwise, use the backend and leave the remaining choices to it.
 
 ## Relaying requests faithfully
 
@@ -191,7 +197,7 @@ Treat instructions about update frequency, verbosity, pacing, detail level, and 
 
 Keep direct answers to one or two short sentences by default. Ask one clarification question at a time. Give tool or execution results as the outcome first, followed only by the next useful action.
 
-Only act on audio you understand with sufficient confidence. If speech is unclear, incomplete, ambiguous, or likely background conversation, ask for a brief clarification instead of guessing, reasoning from missing words, or using the backend.
+Only act on audio you heard clearly. If you could not make out the words, the speech was cut off, or it was likely background conversation, ask the user to repeat it briefly instead of guessing, reasoning from missing words, or using the backend. This is about hearing, not meaning: a request you heard clearly goes to the backend even when it is short or open-ended.
 
 ## Communication style
 
@@ -199,16 +205,41 @@ When the user makes a clear request, proceed directly. Do not paraphrase the req
 
 Avoid repetitive confirmation, filler, re-acknowledgement, and obvious play-by-play. By default, share progress only when it is brief, grounded, and genuinely useful.`;
 
-const REALTIME_INSTRUCTIONS_MAX_BYTES = 32_768;
+/**
+ * The head of the session agent's own text the voice receives. Identity and
+ * role come first in practice; the long tail is tool procedure for the
+ * backend. About 4,000 tokens, re-read (cached) by every voice response.
+ */
+export const REALTIME_AGENT_DEFINITION_MAX_BYTES = 16_384;
+const REALTIME_AGENT_DEFINITION_TRUNCATED = "\n…[rest omitted]";
 
-export function openGeniRealtimeInstructions(additional?: string): string {
-  const trimmed = additional?.trim();
-  if (!trimmed) return OPENGENI_REALTIME_BASE_INSTRUCTIONS;
-  const heading =
-    "\n\n## Additional realtime guidance\nFollow the guidance below for this conversation unless it conflicts with the operating, delegation, safety, permission, or context-handling rules above.\n";
-  const prefix = `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}${heading}`;
-  const remaining = REALTIME_INSTRUCTIONS_MAX_BYTES - Buffer.byteLength(prefix, "utf8");
-  return `${prefix}${takeUtf8Head(trimmed, Math.max(0, remaining))}`;
+const REALTIME_AGENT_DEFINITION_HEADING = `## The agent you speak for
+
+You are the voice of the agent defined below; the backend is the same agent doing the work. Take from it your name, your role, who you serve and what their work is about, and the language and tone to use. Its directions about tools, steps, links, and formats are for the backend: do not carry them out yourself or read them aloud, and keep passing requests to the backend as described above. Where it conflicts with the rules above, the rules above apply.`;
+
+/**
+ * The voice's instructions: Opengeni's realtime rules, then the text that
+ * defines the session's agent (the same identity and instructions its text
+ * agent gets). Both come from the server, on every provider path; a client
+ * never adds to them. Each part is constant for a call, so a provider never
+ * sees earlier text change.
+ */
+export function openGeniRealtimeInstructions(
+  input: { agent?: RealtimeAgentDefinition | undefined } = {},
+): string {
+  const agent = realtimeAgentDefinitionText(input.agent);
+  if (!agent) return OPENGENI_REALTIME_BASE_INSTRUCTIONS;
+  return `${OPENGENI_REALTIME_BASE_INSTRUCTIONS}\n\n${REALTIME_AGENT_DEFINITION_HEADING}\n\n<agent_definition>\n${agent}\n</agent_definition>`;
+}
+
+function realtimeAgentDefinitionText(agent: RealtimeAgentDefinition | undefined): string {
+  const text = [agent?.identity, agent?.agentInstructions, agent?.sessionInstructions]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
+  if (Buffer.byteLength(text, "utf8") <= REALTIME_AGENT_DEFINITION_MAX_BYTES) return text;
+  const marker = Buffer.byteLength(REALTIME_AGENT_DEFINITION_TRUNCATED, "utf8");
+  return `${takeUtf8Head(text, REALTIME_AGENT_DEFINITION_MAX_BYTES - marker).trimEnd()}${REALTIME_AGENT_DEFINITION_TRUNCATED}`;
 }
 
 function takeUtf8Head(value: string, maximumBytes: number): string {
@@ -259,7 +290,7 @@ export async function brokerSessionCodexRealtime(
   // History and credential/configuration reads are independent after owner
   // admission. Await both so failures cannot leave an unobserved rejection.
   const [historyResult, preparationResult] = await Promise.allSettled([
-    deps.loadInitialItems(),
+    deps.loadSessionContext(),
     resolver
       .getToken()
       .catch((error) => {
@@ -283,14 +314,14 @@ export async function brokerSessionCodexRealtime(
   // Keep the operation lease until both branches settle, even when one fails.
   if (historyResult.status === "rejected") throw historyResult.reason;
   if (preparationResult.status === "rejected") throw preparationResult.reason;
-  const initialItems = historyResult.value;
+  const { initialItems, agent } = historyResult.value;
   const prepared = preparationResult.value;
   let token = prepared.token;
   const callInput: CodexRealtimeCallInput = {
     ...input.request,
     sessionId: input.sessionId,
     initialItems,
-    instructions: openGeniRealtimeInstructions(input.request.instructions),
+    instructions: openGeniRealtimeInstructions({ agent }),
   };
   try {
     if (prepared.authenticationError) throw prepared.authenticationError;
@@ -330,18 +361,6 @@ export async function brokerSessionCodexRealtime(
     }
     throw brokerProviderError(error);
   }
-}
-
-async function loadRealtimeInitialItems(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<CodexRealtimeInitialItem[]> {
-  const [history, continuity] = await Promise.all([
-    getActiveSessionHistoryItems(db, workspaceId, sessionId),
-    getSessionRealtimeContinuityEntries(db, workspaceId, sessionId),
-  ]);
-  return projectSessionRealtimeInitialItems(history, continuity);
 }
 
 // Separate injected transports (including tests) and never cache a credential.
@@ -493,10 +512,7 @@ export async function brokerSessionCoreCodexRealtime(
             activeCredentialId: candidate.connectionId,
             connectedCredentialIds: new Set([candidate.connectionId]),
           }),
-          loadInitialItems: () =>
-            timed("history", () =>
-              loadRealtimeInitialItems(db, context.workspaceId, context.sessionId),
-            ),
+          loadSessionContext: () => timed("history", () => loadSessionRealtimeContext(db, context)),
           tokenResolver: () => ({
             getToken: () => timed("token", () => resolver.getToken()),
             refresh: () => timed("token", () => resolver.refresh()),

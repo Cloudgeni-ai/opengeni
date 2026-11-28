@@ -2118,6 +2118,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         expectedConnectionEpoch,
         rotate,
         browserActivation,
+        // Deprecated: the voice's instructions come from the session, never the client.
+        instructions: _clientInstructions,
         ...providerRequest
       } = parsed;
       const claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -2219,7 +2221,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
       const broker =
         claim.mode.model === AZURE_LIVE_MODEL_ID
-          ? buildSessionAzureLiveBroker(db, settings, workspaceId, sessionId, deps.codexFetch)
+          ? buildSessionAzureLiveBroker(
+              db,
+              settings,
+              { accountId: grant.accountId, workspaceId, sessionId },
+              deps.codexFetch,
+            )
           : buildSessionCodexRealtimeBroker(
               db,
               settings,

@@ -65,6 +65,8 @@ mock.module("@opengeni/db", () => ({
   }),
   getActiveSessionHistoryItems: async () => [],
   getSessionRealtimeContinuityEntries: async () => [],
+  getSessionRealtimeAgentText: async () => null,
+  readSessionAgentPrompt: async () => null,
   readSubscriptionCoreSessionOwner: async () => ({ ownerSubjectId: "user:owner" }),
   deliverSubscriptionCoreProviderWake: async (
     _db: unknown,

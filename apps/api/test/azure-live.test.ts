@@ -10,7 +10,10 @@ test("Azure Live negotiates server-side and sends history with client delegation
   const result = await brokerAzureLive({
     settings,
     request: { sdp: "synthetic offer" },
-    initialItems: [{ role: "user", text: "Build a page" }],
+    context: {
+      initialItems: [{ role: "user", text: "Build a page" }],
+      agent: { sessionInstructions: "You are Ada, the site builder." },
+    },
     fetch: async (url, init) => {
       request = new Request(url, init);
       return Response.json({
@@ -26,6 +29,14 @@ test("Azure Live negotiates server-side and sends history with client delegation
   expect(body.session.audio.output.voice).toBe("marin");
   expect(body.session.delegation).toEqual({ type: "client" });
   expect(body.session.instructions).toContain('"text":"Build a page"');
+  // The agent it speaks for comes before the prior conversation.
+  const instructions = body.session.instructions as string;
+  expect(
+    instructions.indexOf("<agent_definition>\nYou are Ada, the site builder."),
+  ).toBeGreaterThan(0);
+  expect(instructions.indexOf("</agent_definition>")).toBeLessThan(
+    instructions.indexOf("## Prior session conversation"),
+  );
   expect(result).toEqual({
     sdp: "synthetic answer",
     version: "v3",
@@ -38,7 +49,7 @@ test("provider rejection stays generic and is never retried", async () => {
     brokerAzureLive({
       settings,
       request: { sdp: "offer" },
-      initialItems: [],
+      context: { initialItems: [], agent: {} },
       fetch: async () => {
         calls++;
         return new Response("private upstream diagnostic", { status: 429 });

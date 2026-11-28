@@ -260,6 +260,7 @@ describe("Codex realtime browser negotiation", () => {
         expect(constraints).toEqual({ audio: true });
         return fixture.media;
       },
+      // Deprecated: accepted for compatibility, never sent.
       instructions: "Current session context",
       voice: "cove",
       negotiate: async (request, options) => {
@@ -269,7 +270,6 @@ describe("Codex realtime browser negotiation", () => {
           browserActivation: "required",
           sdp: offer,
           version: "v3",
-          instructions: "Current session context",
           voice: "cove",
         });
         expect(JSON.stringify(request)).not.toContain("Authorization");

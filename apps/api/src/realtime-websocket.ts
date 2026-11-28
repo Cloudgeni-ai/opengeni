@@ -17,9 +17,7 @@ import type {
 } from "@opengeni/contracts";
 import { resolveRealtimeVoiceSettings } from "@opengeni/contracts";
 import {
-  getActiveSessionHistoryItems,
   getOrganizationModelDefaults,
-  getSessionRealtimeContinuityEntries,
   getWorkspaceProviderApiKeyConnectionMetadata,
   getWorkspaceSettings,
   loadOrganizationModelProviderApiKey,
@@ -42,7 +40,7 @@ import {
 
 import { openGeniRealtimeInstructions } from "./codex-realtime";
 import {
-  projectSessionRealtimeInitialItems,
+  loadSessionRealtimeContext,
   realtimeInstructionsWithPriorConversation,
 } from "./session-realtime-context";
 
@@ -758,7 +756,14 @@ export async function createRealtimeWebsocketConnection(input: {
       "The selected model does not use a WebSocket realtime connection",
     );
   }
-  const instructions = openGeniRealtimeInstructions();
+  // Read once, when the provider asks for its instructions.
+  let context: ReturnType<typeof loadSessionRealtimeContext> | undefined;
+  const loadContext = () =>
+    (context ??= loadSessionRealtimeContext(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+    }));
   // Read alongside the provider's credential, not before it.
   const voice = Promise.all([
     getWorkspaceSettings(input.db, input.workspaceId),
@@ -786,15 +791,13 @@ export async function createRealtimeWebsocketConnection(input: {
       fetchImpl: input.fetchImpls?.[provider.id] ?? fetch,
     },
     async () => {
-      const [history, continuity] = await Promise.all([
-        getActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId),
-        getSessionRealtimeContinuityEntries(input.db, input.workspaceId, input.sessionId),
-      ]);
+      const { agent, initialItems } = await loadContext();
       return realtimeInstructionsWithPriorConversation(
-        instructions,
-        projectSessionRealtimeInitialItems(history, continuity),
+        openGeniRealtimeInstructions({ agent }),
+        initialItems,
       );
     },
   );
-  return { ...minted, instructions };
+  const { agent } = await loadContext();
+  return { ...minted, instructions: openGeniRealtimeInstructions({ agent }) };
 }
