@@ -2615,9 +2615,11 @@ export async function importRecordingTranscript(
         })
         .returning();
       await insertTranscriptSegments(tx, recording, version!.id, segments);
-      if (labels.size > 0) {
+      // In batches, like the segments: every segment may name its own speaker.
+      const named = [...labels];
+      for (let offset = 0; offset < named.length; offset += 500) {
         await tx.insert(schema.recordingSpeakerAssignments).values(
-          [...labels].map(([displayName, speakerLabel]) => ({
+          named.slice(offset, offset + 500).map(([displayName, speakerLabel]) => ({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             recordingId: recording.id,

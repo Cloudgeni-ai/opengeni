@@ -314,6 +314,24 @@ describe("importing a meeting transcript", () => {
     expect((await scope.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
   });
 
+  test("takes thousands of distinct speakers", async () => {
+    const scope = await fixture();
+    const imported = await scope.call("POST", "/recordings/import-transcript", {
+      segments: Array.from({ length: 8_000 }, (_, index) => ({
+        startMilliseconds: index * 1_000,
+        speaker: `Person ${index}`,
+        text: "Hello",
+      })),
+    });
+    expect(imported.status).toBe(201);
+    const counts = await shared.admin`
+      select (select count(*)::int from recording_speaker_assignments
+               where recording_id = ${imported.body.id}) as speakers,
+             (select count(*)::int from recording_transcript_segments
+               where recording_id = ${imported.body.id}) as segments`;
+    expect({ ...counts[0] }).toEqual({ speakers: 8_000, segments: 8_000 });
+  }, 60_000);
+
   test("refuses a transcript that is too large or malformed, and a recorded meeting's id", async () => {
     const scope = await fixture();
     const big = "word ".repeat(1_999);
