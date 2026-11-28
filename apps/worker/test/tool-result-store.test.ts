@@ -251,10 +251,13 @@ describe("tool result store", () => {
       output: full,
       store,
     })) as string;
-    const note = view.match(
+    // The first line says the output is partial; head, note and tail follow.
+    expect(view.startsWith("[Opengeni: partial output. This output is ")).toBe(true);
+    const body = view.slice(view.indexOf("\n") + 1);
+    const note = body.match(
       /\n\[Opengeni: bytes (\d+) to (\d+) of this \d+-byte output are not shown; the whole output is stored\. Read on with tool_result_read \{"resultId":"([0-9a-f-]+)","offset":\d+\}; load tool_result_read by that exact name with tool search first\.\]\n/,
     )!;
-    const [head, tail] = view.split(note[0]);
+    const [head, tail] = body.split(note[0]);
     const reader = createToolResultReadAttemptToolDefinition({
       read: store.readBytes,
       inlineMaxBytes: store.inlineMaxBytes,

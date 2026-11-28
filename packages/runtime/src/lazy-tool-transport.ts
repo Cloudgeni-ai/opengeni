@@ -63,7 +63,11 @@ import {
   streamPreemptibleModelRequest,
 } from "./model-request-capture";
 import { isRecord } from "@opengeni/contracts/values";
-import { isRarelyUsedRuntimeToolName, TOOL_DISCOVERY_CARD_META_KEY } from "@opengeni/contracts";
+import {
+  isRarelyUsedRuntimeToolName,
+  TOOL_DISCOVERY_CARD_META_KEY,
+  TOOL_RESULT_READ_TOOL_NAME,
+} from "@opengeni/contracts";
 import {
   integrationMentionsIn,
   integrationNameWords,
@@ -997,6 +1001,13 @@ export class LazyToolRuntime {
      * request, as before.
      */
     searchableRarelyUsedTools = false,
+    /**
+     * The session's frozen first-request tools revision puts
+     * `tool_result_read` in every request (revision 2 and later), so the note
+     * on a cut result names a call the model can make at once. False keeps it
+     * searchable, as earlier sessions' tool lists never carried it.
+     */
+    private readonly toolResultReaderListed = false,
   ) {
     this.routerWasExposed = routerInHistory;
     this.rarelyUsedToolsSearchable = searchableRarelyUsedTools && pendingPreparationDefers;
@@ -1227,6 +1238,7 @@ export class LazyToolRuntime {
       this.functionTools.set(tool.name, tool);
       if (ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(tool.name)) continue;
       if (!this.rarelyUsedToolsSearchable && isRarelyUsedRuntimeToolName(tool.name)) continue;
+      if (this.toolResultReaderListed && tool.name === TOOL_RESULT_READ_TOOL_NAME) continue;
       if (this.preparationIndependentToolNames.has(tool.name)) continue;
       // Exact first-party harness control tools (goal lifecycle, command
       // polling, wait_for_input) stay visible on every transport when the
@@ -2789,6 +2801,7 @@ export function installLazyToolRuntime(
   pendingPreparationDefers = true,
   connectCardRequest?: ConnectCardRequest,
   searchableRarelyUsedTools = false,
+  toolResultReaderListed = false,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -2811,6 +2824,7 @@ export function installLazyToolRuntime(
     pendingPreparationDefers,
     connectCardRequest,
     searchableRarelyUsedTools,
+    toolResultReaderListed,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;

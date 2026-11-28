@@ -5393,11 +5393,15 @@ recovery replays the stored bytes. The instructions never contain a clock.
    `Structured result: …` line, exactly what the model would have seen) is
    stored whole as a workspace File (`text/plain`, object key
    `…/tool-results/<resultId>.txt`), and the model receives a view that fits:
-   the start of the text, then one bracketed Opengeni note with the total size,
-   the byte range shown and the exact call that reads on, such as
-   `tool_result_read {"resultId":"…","offset":99012}`. Shell output
-   (`exec_command`, `write_stdin`) keeps its head and tail in the view, with the
-   note in the middle naming the bytes left out, since the end of a command's
+   a first line marking the result partial (its total size, the bytes shown
+   and the exact call that reads on, such as
+   `tool_result_read {"resultId":"…","offset":99012}`), the start of the
+   text, then a bracketed Opengeni note after the part shown with the same
+   call. The first line is there because a model reading a long result
+   otherwise meets the only sign that it is partial after the content it has
+   already acted on. Shell output (`exec_command`, `write_stdin`) keeps its
+   head and tail in the view, with the first line naming the bytes left out
+   and the note in the middle where they are, since the end of a command's
    output usually matters most. Cuts fall on UTF-8 characters and, when one is
    near, on line ends. The receipt (`tool_result_stored`: `resultId`,
    `byteSize`, `notShownFrom`, `notShownTo`, `sandboxPath`) rides in `_meta`
@@ -5429,16 +5433,25 @@ recovery replays the stored bytes. The instructions never contain a clock.
    could not be kept. Codemode callers receive exact results (the 16 MiB
    Codemode journal cap is unchanged). An attempt-gateway MCP result is
    bounded only by the 8 MiB MCP transport cap before this seam.
-   `tool_result_read` is never in a first-request tool list: it is needed only
-   after an oversized result, whose note names the exact call, so it joins as
-   a deferred tool behind the turn's search router and the model loads it by
-   exact name, which changes no prompt prefix. It is offered only on turns
-   that expect the router for other deferred tools, so it never brings the
-   router in by itself. A turn without a router (tool search turned off, or an
-   agent whose every tool is eager) has the shell copy when a sandbox runs and
-   is otherwise told to narrow the call. Only results
-   produced from now on pass through the store; history already sent is never
-   re-rendered. The request-time truncation behind the store applies 1.2x the
+   `tool_result_read` follows the session's frozen first-request tools
+   revision. From revision 2 it is in every request (when the agent allows
+   it), with or without a router, so the note names a call the model can make
+   at once: when the reader had to be found through tool search first, models
+   read on after only a small share of cut results and answered from the part
+   shown. Sessions of revision 0 and 1 never carried it, so for them it stays
+   a deferred tool behind the turn's search router, loaded by exact name,
+   which changes no prompt prefix; it is offered only on turns that expect
+   the router for other deferred tools, and a turn of theirs without a router
+   has the shell copy when a sandbox runs and is otherwise told to narrow the
+   call. A model `skill_read` of several paths returns each file whole or not
+   at all: when they do not all fit one result, it returns the first files in
+   request order that fit and, before them, names the rest with their sizes
+   and the exact `skill_read` that returns them, since a Skill file cut in the
+   middle reads as complete instructions. One file larger than a result is
+   still stored and shown as a view (Skill files may be up to 2 MiB). Only
+   results produced from now on pass through the store; history already sent
+   is never re-rendered, so views in the earlier format replay unchanged.
+   The request-time truncation behind the store applies 1.2x the
    policy (120,000 bytes by default), so it never cuts a view or an inline
    result, and since it only grew (Codex models never drop below their former
    10,000-token policy), every item bounded under the earlier policy replays

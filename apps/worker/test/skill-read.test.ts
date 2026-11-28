@@ -943,3 +943,89 @@ describe("skill_read use telemetry", () => {
     expect(skillUseFromToolOutput(result)).toMatchObject({ kind: "full" });
   });
 });
+
+// Skill files are instructions: a model read of several files returns each
+// file whole or not at all, and names the ones left out with the exact read.
+describe("skill_read whole files", () => {
+  const INLINE_MAX = 40_000;
+  const files = [
+    { path: "SKILL.md", content: "a".repeat(20_000) },
+    { path: "references/one.md", content: "b".repeat(15_000) },
+    { path: "references/two.md", content: "c".repeat(15_000) },
+    { path: "references/three.md", content: "d".repeat(2_000) },
+  ];
+  const loaded = {
+    skillId: "workspace-skill",
+    revisionId: "revision-1",
+    scopeVersion: 4,
+    files,
+    origin: { id: "workspace-skill", source: "workspace" as const },
+  };
+  const definition = (inline: boolean) =>
+    createSkillReadAttemptToolDefinition({
+      authorize: async () => {},
+      load: async () => loaded,
+      ...(inline ? { inlineMaxBytes: () => INLINE_MAX } : {}),
+    });
+  const read = (kind: "model" | "codemode", paths: string[], inline = true) =>
+    definition(inline).execute(
+      { skill: "deploy", paths },
+      { operationId: crypto.randomUUID(), caller: { kind, subjectId: "agent:test" } },
+    );
+  const paths = files.map((file) => file.path);
+
+  test("files that do not all fit return whole, and the rest are named with the exact read", async () => {
+    const output = await read("model", paths);
+    const content = output.structuredContent as {
+      notIncluded: { path: string; bytes: number }[];
+      notIncludedNote: string;
+      files: { path: string; content: string }[];
+    };
+    // Request order is kept: the first files that fit, then the rest named.
+    expect(content.files).toEqual(files.slice(0, 1).concat(files.slice(1, 2)));
+    expect(content.notIncluded).toEqual([
+      { path: "references/two.md", bytes: 15_000 },
+      { path: "references/three.md", bytes: 2_000 },
+    ]);
+    expect(content.notIncludedNote).toContain(
+      `skill_read {"skill":"deploy","paths":["references/two.md","references/three.md"]}`,
+    );
+    // The note comes before the files, so the model meets it first.
+    expect(Object.keys(content).indexOf("notIncluded")).toBeLessThan(
+      Object.keys(content).indexOf("files"),
+    );
+    // The result fits one tool result whole: nothing is cut mid-file.
+    expect(modelToolResultFits(output, INLINE_MAX)).toBe(true);
+  });
+
+  test("the named read returns the rest, and a read that fits is unchanged", async () => {
+    const rest = await read("model", ["references/two.md", "references/three.md"]);
+    const plain = await read("model", ["references/two.md", "references/three.md"], false);
+    expect(rest).toEqual(plain);
+    expect((rest.structuredContent as Record<string, unknown>).notIncluded).toBeUndefined();
+  });
+
+  test("Codemode reads get every file", async () => {
+    const output = await read("codemode", paths);
+    expect((output.structuredContent as { files: unknown[] }).files).toEqual(files);
+    expect((output.structuredContent as Record<string, unknown>).notIncluded).toBeUndefined();
+  });
+
+  test("one file larger than a result can show is still returned", async () => {
+    const big = {
+      ...loaded,
+      files: [{ path: "SKILL.md", content: "e".repeat(60_000) }, files[3]!],
+    };
+    const output = await createSkillReadAttemptToolDefinition({
+      authorize: async () => {},
+      load: async () => big,
+      inlineMaxBytes: () => INLINE_MAX,
+    }).execute(
+      { skill: "deploy", paths: ["SKILL.md", "references/three.md"] },
+      { operationId: crypto.randomUUID(), caller: { kind: "model", subjectId: "agent:test" } },
+    );
+    const content = output.structuredContent as { files: { path: string }[]; notIncluded: unknown };
+    expect(content.files.map((file) => file.path)).toEqual(["SKILL.md"]);
+    expect(content.notIncluded).toEqual([{ path: "references/three.md", bytes: 2_000 }]);
+  });
+});

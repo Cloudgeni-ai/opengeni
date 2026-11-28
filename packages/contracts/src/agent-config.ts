@@ -681,8 +681,12 @@ export type AgentFunctionToolName = keyof typeof AGENT_FUNCTION_TOOL_CAPABILITIE
  * From revision 1 those rarely used tools are found through tool search by
  * name like any deferred tool, but only on a turn that has the search router
  * for other tools anyway: they never bring the router on their own.
+ * From revision 2 `tool_result_read`, the reader of tool results too large to
+ * show whole, is in every request (when the agent allows it) instead of
+ * behind tool search, so the note on a cut result names a call the model can
+ * make at once. Sessions of revision 0 and 1 keep it deferred.
  */
-export const CURRENT_FIRST_REQUEST_TOOLS_REVISION = 1;
+export const CURRENT_FIRST_REQUEST_TOOLS_REVISION = 2;
 export const RARELY_USED_RUNTIME_TOOL_NAMES = [
   "list_models",
   "privacy_facts",
@@ -691,6 +695,11 @@ export const RARELY_USED_RUNTIME_TOOL_NAMES = [
 /** True when a session of this revision finds the rarely used runtime tools through search. */
 export function rarelyUsedRuntimeToolsSearchable(firstRequestToolsRevision: number): boolean {
   return firstRequestToolsRevision >= 1;
+}
+
+/** True when every request of a session of this revision carries `tool_result_read`. */
+export function toolResultReaderInEveryRequest(firstRequestToolsRevision: number): boolean {
+  return firstRequestToolsRevision >= 2;
 }
 
 /** True for a rarely used runtime tool (see RARELY_USED_RUNTIME_TOOL_NAMES). */

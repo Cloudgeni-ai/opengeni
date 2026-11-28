@@ -853,6 +853,28 @@ export function prefixChat(wire: Wire) {
       transition = name;
     },
     /**
+     * A tool call and its result land in history as the history sink stores
+     * them, for example a result too large to show whole, as its view.
+     */
+    addToolResult(callId: string, name: string, output: string) {
+      history.push(
+        {
+          type: "function_call",
+          callId,
+          name,
+          arguments: "{}",
+          status: "completed",
+        } as AgentInputItem,
+        {
+          type: "function_call_result",
+          callId,
+          name,
+          status: "completed",
+          output: { type: "text", text: output },
+        } as AgentInputItem,
+      );
+    },
+    /**
      * The latest turn's attempt restarts: its items are dropped and the next
      * `turn` runs the same logical turn again from freshly built state.
      */

@@ -178,6 +178,12 @@ export function createSkillReadAttemptToolDefinition(input: {
   /** Without it every read returns full text. */
   activeHistory?: SkillReadActiveHistory;
   telemetry?: SkillReadTelemetry;
+  /**
+   * UTF-8 bytes of text one tool result may show this turn's model. A model
+   * read of several files returns whole files within it and names the rest;
+   * without it every requested file is returned.
+   */
+  inlineMaxBytes?: () => number;
 }): AttemptToolDefinition {
   return {
     identity: { serverId: "opengeni", toolName: SKILL_READ_TOOL_NAME },
@@ -260,6 +266,7 @@ export function createSkillReadAttemptToolDefinition(input: {
           args as { skill: string; listFiles?: boolean; paths?: string[] },
           context,
           input.activeHistory,
+          input.inlineMaxBytes,
         );
       } catch (error) {
         observe(input.telemetry, { caller: context.caller.kind, kind: "refused", origin, skill });
@@ -279,6 +286,7 @@ async function readResult(
   args: { skill: string; listFiles?: boolean; paths?: string[] },
   context: AttemptToolExecutionContext,
   activeHistory: SkillReadActiveHistory | undefined,
+  inlineMaxBytes: (() => number) | undefined,
 ): Promise<{ kind: Exclude<SkillReadKind, "refused">; result: AttemptToolResult }> {
   if (args.listFiles === true) {
     return {
@@ -307,7 +315,15 @@ async function readResult(
     };
   }
   if (args.paths !== undefined) {
-    return { kind: "files", result: textResult({ ...identity, ...selected }) };
+    const output = { ...identity, ...selected };
+    return {
+      kind: "files",
+      result: textResult(
+        context.caller.kind === "model" && inlineMaxBytes
+          ? wholeFilesWithin(output, args.skill, inlineMaxBytes() - MODEL_VIEW_FRAMING_BYTES)
+          : output,
+      ),
+    };
   }
   // The default read also indexes runnable files (path and first usage line)
   // so the commands are visible without a sandbox checkout.
@@ -316,6 +332,59 @@ async function readResult(
     kind: "full",
     result: textResult({ ...identity, ...selected, ...(scripts ?? {}) }),
   };
+}
+
+/**
+ * Room kept for what the model view adds around a structured result (its
+ * `Structured result: ` prefix), so a result sized here is never cut.
+ */
+const MODEL_VIEW_FRAMING_BYTES = 256;
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+/**
+ * A model read of several files, each shown whole or not at all. Skill files
+ * are instructions, and a file cut in the middle reads as complete guidance
+ * that is not. When every requested file fits one result, the read is
+ * unchanged. Otherwise it returns the first files in request order that fit
+ * and names the rest, before the files, with their sizes and the exact read
+ * that returns them. The first file is always returned: one file larger than
+ * a result can show is stored whole and shown as a view that says so, like
+ * any other oversized result.
+ */
+type SkillReadOutput = NonNullable<AttemptToolResult["structuredContent"]>;
+
+export function wholeFilesWithin<T extends SkillReadOutput & { files: SkillTextFile[] }>(
+  output: T,
+  skill: string,
+  budgetBytes: number,
+): SkillReadOutput {
+  if (output.files.length <= 1 || jsonBytes(output) <= budgetBytes) return output;
+  const { files, ...rest } = output;
+  const identity = Object.fromEntries(
+    IDENTITY_KEYS.filter((key) => key in rest).map((key) => [key, rest[key]!]),
+  );
+  const others = Object.fromEntries(
+    Object.entries(rest).filter(([key]) => !(IDENTITY_KEYS as readonly string[]).includes(key)),
+  );
+  const withFirst = (count: number): SkillReadOutput => {
+    const left = files.slice(count);
+    return {
+      ...identity,
+      notIncluded: left.map((file) => ({
+        path: file.path,
+        bytes: Buffer.byteLength(file.content, "utf8"),
+      })),
+      notIncludedNote: `These requested files are not included: with them this result would be larger than one tool result may show. Each file is returned whole or not at all. Read them with skill_read ${JSON.stringify({ skill, paths: left.map((file) => file.path) })}.`,
+      files: files.slice(0, count),
+      ...others,
+    };
+  };
+  let count = 1;
+  while (count + 1 < files.length && jsonBytes(withFirst(count + 1)) <= budgetBytes) count += 1;
+  return withFirst(count);
 }
 
 /** Telemetry must never change or fail a read. */

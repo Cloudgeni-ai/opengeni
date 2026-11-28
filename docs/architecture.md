@@ -1859,7 +1859,9 @@ data-handling facts) follow the session's frozen first-request tools revision
 it keep both in every request; newer sessions find them through tool search by
 exact name whenever the turn has the search router for other tools, and keep
 them in the request when it does not, so they never bring the router on their
-own. Authorized first-party harness control
+own. From revision 2, `tool_result_read` (the reader of tool results too large
+to show whole) is in every request instead of behind search; earlier sessions
+keep it deferred. Authorized first-party harness control
 tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
 `opengeni__wait_for_input`) are also always visible; the `opengeni` server then
 joins the first-request barrier. Other non-MCP functions/non-eager MCP schemas require search.

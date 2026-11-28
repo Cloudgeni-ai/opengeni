@@ -2025,8 +2025,10 @@ describe("request_human_input follows who can answer", () => {
   });
 });
 
-// `tool_result_read` reads tool results too large to show whole. It is never
-// in a first-request tool list, so no session's prompt prefix changes for it.
+// `tool_result_read` reads tool results too large to show whole. A session of
+// first-request tools revision 2 or later carries it in every request; earlier
+// sessions never had it in a first-request tool list, so for them it stays
+// deferred and no existing session's prompt prefix changes for it.
 describe("stored tool result reader", () => {
   const embedding: FixtureOptions = {
     agent: agentConfig("none"),
@@ -2049,6 +2051,34 @@ describe("stored tool result reader", () => {
     const machine = await captureWorkerRequest({ ...embedding, machineAttached: true });
     expect(machine.names).not.toContain("tool_result_read");
     expect(machine.toolResultReaders.at(-1)).toEqual({ reader: "none", shell: true });
+  });
+
+  test("a revision 1 session keeps it deferred behind the router", async () => {
+    const turn = await captureWorkerRequest({ lazy: true, firstRequestToolsRevision: 1 });
+    expect(turn.names).not.toContain("tool_result_read");
+    expect(turn.deferredNames).toContain("tool_result_read");
+    expect(turn.toolResultReaders.at(-1)?.reader).toBe("searchable");
+  });
+
+  test("a new session (revision 2) lists it in every request; nothing else changes", async () => {
+    const before = await captureWorkerRequest({ lazy: true, firstRequestToolsRevision: 1 });
+    const turn = await captureWorkerRequest({ lazy: true, firstRequestToolsRevision: 2 });
+    expect(turn.names).toContain("tool_result_read");
+    expect(turn.deferredNames).not.toContain("tool_result_read");
+    expect(turn.toolResultReaders.at(-1)?.reader).toBe("listed");
+    // The request is the revision 1 request plus only the reader's definition.
+    expect(turn.request.tools.filter((entry) => toolName(entry) !== "tool_result_read")).toEqual(
+      before.request.tools,
+    );
+    expect(turn.request.systemInstructions).toBe(before.request.systemInstructions);
+    expect(turn.request.input).toEqual(before.request.input);
+  });
+
+  test("a new session without a search router lists it too", async () => {
+    const turn = await captureWorkerRequest({ ...embedding, firstRequestToolsRevision: 2 });
+    expect(turn.names).toContain("tool_result_read");
+    expect(turn.names).not.toContain("tool_search");
+    expect(turn.toolResultReaders.at(-1)).toEqual({ reader: "listed", shell: false });
   });
 });
 

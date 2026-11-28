@@ -253,6 +253,7 @@ import {
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
   rarelyUsedRuntimeToolsSearchable,
+  toolResultReaderInEveryRequest,
   type ResolvedAgentConfig,
   AttemptToolResult,
   type AttemptToolCatalog,
@@ -2765,8 +2766,10 @@ export type BuildAgentOptions = {
    * The session's frozen first-request tools revision
    * (`sessions.first_request_tools_revision`). From revision 1, `list_models`
    * and `privacy_facts` are found through tool search on a turn that expects
-   * the search router anyway. Omitted is revision 0: they stay in every
-   * request, byte-identical to earlier requests.
+   * the search router anyway. From revision 2, `tool_result_read` is in every
+   * request instead of behind search. Omitted is revision 0: they stay in
+   * every request and the reader stays searchable, byte-identical to earlier
+   * requests.
    */
   firstRequestToolsRevision?: number;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
@@ -4794,6 +4797,7 @@ function maybeInstallLazyToolTransport(
     options.toolRouterExpected !== false,
     harnessControlServer ? catalogConnectCardRequest(harnessControlServer) : undefined,
     rarelyUsedRuntimeToolsSearchable(options.firstRequestToolsRevision ?? 0),
+    toolResultReaderInEveryRequest(options.firstRequestToolsRevision ?? 0),
   );
   const attemptTools = mcpServers.find(
     (server): server is AttemptDefinitionMcpServer => server instanceof AttemptDefinitionMcpServer,

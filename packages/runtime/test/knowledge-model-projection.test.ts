@@ -897,7 +897,10 @@ describe("caller seam", () => {
     // The model reads on through exactly the compact copy it started on.
     expect(stored).toEqual([compact]);
     expect(textOf(projected)).toContain("tool_result_read");
-    expect(compact.startsWith(textOf(projected).slice(0, 50_000))).toBe(true);
+    // The view opens with a line marking it partial, then the compact copy's start.
+    const view = textOf(projected);
+    expect(view.startsWith("[Opengeni: partial result.")).toBe(true);
+    expect(compact.startsWith(view.slice(view.indexOf("\n") + 1).slice(0, 50_000))).toBe(true);
   });
 });
 
