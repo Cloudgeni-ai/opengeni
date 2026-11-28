@@ -180,6 +180,15 @@ describe("Site card preview document", () => {
     ]);
   });
 
+  test("a card never opens a dialog or prints, and the page can't restore them", () => {
+    const dialogs = runPreviewScript(sitePreviewDocument("<p>x</p>"), { text: "x" }).fakeGlobal;
+    expect((dialogs["alert"] as () => unknown)()).toBeUndefined();
+    expect((dialogs["confirm"] as () => unknown)()).toBe(false);
+    expect((dialogs["prompt"] as () => unknown)()).toBeNull();
+    expect((dialogs["print"] as () => unknown)()).toBeUndefined();
+    expect(() => Object.defineProperty(dialogs, "alert", { value: () => "shown" })).toThrow();
+  });
+
   test("the stand-in client never settles, so an app keeps its loading state", async () => {
     const run = runPreviewScript(sitePreviewDocument("<p>x</p>"), { text: "x" });
     const create = run.fakeGlobal["createOpenGeniSiteClient"] as () => Record<string, unknown>;

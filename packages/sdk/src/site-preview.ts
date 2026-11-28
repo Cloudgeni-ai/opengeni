@@ -52,6 +52,9 @@ function previewScript(theme: "light" | "dark" | undefined): string {
     `const p=new Proxy(function(){},h);`,
     // Fixed in place: a real client loaded anyway can't replace the stand-in.
     `Object.defineProperty(globalThis,"createOpenGeniSiteClient",{configurable:false,get:()=>()=>p,set:()=>{}});`,
+    // No dialogs or printing from a card: a mobile web view would show them
+    // over the library (the web frame's sandbox already blocks them).
+    `for(const[k,v]of[["alert",undefined],["confirm",false],["prompt",null],["print",undefined]])try{Object.defineProperty(globalThis,k,{configurable:false,writable:false,value:()=>v});}catch{}`,
     `let done=false;`,
     // Where to report, taken before the page runs, so it can't redirect them.
     `const P=window.parent,N=window.ReactNativeWebView;`,
