@@ -116,7 +116,8 @@ export function SiteConversationsPanel({
     setPageKey(viewKey);
     setPage(null);
   }
-  // A failed load holds nothing: its notice shows, and a retry starts from the skeleton.
+  // A failed load holds nothing new: its notice shows undimmed, and a retry
+  // shows the last list, dimmed, until the new one loads.
   const listed = useHeldWhileLoading(page ?? undefined, viewKey, `${workspaceId}:${siteId}`);
   const shownPage = listed.value ?? null;
   const visibleSessions = shownPage

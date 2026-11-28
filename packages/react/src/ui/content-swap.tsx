@@ -7,6 +7,7 @@
 import { useState, type ReactNode } from "react";
 
 import { cn } from "../lib/cn";
+import { inertProps } from "../lib/inert";
 
 export type HeldValue<T> = {
   /** The value to show: the current one, or while it loads the last one shown. */
@@ -65,7 +66,7 @@ export function ContentSwap({
       data-content-swap=""
       data-stale={stale ? "" : undefined}
       aria-busy={stale || undefined}
-      inert={stale || undefined}
+      {...inertProps(stale)}
       className={cn(
         "min-w-0 transition-opacity duration-150 motion-reduce:transition-none",
         stale && "pointer-events-none opacity-60",
