@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   checkAge,
+  expectedFiles,
   groupRuns,
   parseConfig,
   parseEnvironment,
@@ -14,6 +15,7 @@ import {
   type ResticSnapshot,
   type Run,
 } from "./config";
+import { tablesCheck, tablesScript } from "./tables";
 
 const config: BackupConfig = parseConfig({
   repository: "s3:https://storage.example.internal/backups/database",
@@ -59,6 +61,106 @@ test("config defaults, validation and reserved names", () => {
     expect(() => parseConfig({ ...config, ...patch })).toThrow();
   }
   expect(parseConfig({ ...config, repository: "/srv/backups" }).repository).toBe("/srv/backups");
+});
+test("ordered tables: validation, and a .tables file beside the archive", () => {
+  const ordered = parseConfig({
+    ...config,
+    databases: [
+      {
+        name: "app",
+        service: "app",
+        orderedTables: [{ table: "public.events", key: ["session_id", "sequence"] }],
+      },
+      { name: "workflow", service: "workflow" },
+    ],
+  });
+  expect(ordered.databases[1]!.orderedTables).toEqual([]);
+  expect(expectedFiles(ordered)).toEqual(["app.dump", "app.tables", "workflow.dump", "roles.sql"]);
+  for (const orderedTables of [
+    [{ table: "events", key: ["id"] }],
+    [{ table: "public.Events", key: ["id"] }],
+    [{ table: "public.events; drop", key: ["id"] }],
+    [{ table: "public.events", key: [] }],
+    [{ table: "public.events", key: ["id", "id"] }],
+    [{ table: "public.events", key: ["id desc"] }],
+    [
+      { table: "public.events", key: ["id"] },
+      { table: "public.events", key: ["id"] },
+    ],
+  ])
+    expect(() =>
+      parseConfig({ ...config, databases: [{ name: "app", service: "app", orderedTables }] }),
+    ).toThrow();
+});
+test("a run with ordered tables is complete only with its .tables file tagged; older runs stay complete", () => {
+  const runs = groupRuns(
+    [
+      snapshot("new", "app.dump", "2026-10-06T01:15:00Z"),
+      snapshot("new", "app.tables", "2026-10-06T01:20:00Z"),
+      snapshot("new", "workflow.dump", "2026-10-06T03:00:00Z"),
+      snapshot("new", "roles.sql", "2026-10-06T03:01:00Z"),
+      snapshot("partial", "app.dump", "2026-10-07T01:15:00Z"),
+      snapshot("partial", "app.tables", "2026-10-07T01:20:00Z", false),
+      snapshot("partial", "workflow.dump", "2026-10-07T03:00:00Z"),
+      snapshot("partial", "roles.sql", "2026-10-07T03:01:00Z"),
+      snapshot("old", "app.dump", "2026-10-05T01:15:00Z"),
+      snapshot("old", "workflow.dump", "2026-10-05T03:00:00Z"),
+      snapshot("old", "roles.sql", "2026-10-05T03:01:00Z"),
+    ],
+    config,
+  );
+  expect(runs.map((r) => [r.id, r.complete, r.files.length])).toEqual([
+    ["partial", false, 4],
+    ["new", true, 4],
+    ["old", true, 3],
+  ]);
+  expect(runs[1]!.files.map((f) => f.name)).toEqual([
+    "app.dump",
+    "app.tables",
+    "workflow.dump",
+    "roles.sql",
+  ]);
+});
+test("the ordered tables stream check accepts only whole, well-formed streams", async () => {
+  const check = async (parts: string[], expected?: string[]) => {
+    const sink = tablesCheck(expected);
+    const done = new Promise<void>((resolve, reject) => {
+      sink.on("finish", resolve);
+      sink.on("error", reject);
+    });
+    for (const part of parts) sink.write(Buffer.from(part));
+    sink.end();
+    return done;
+  };
+  const header = "SET client_encoding = 'UTF8';\n";
+  const a = "COPY public.a (id, body) FROM stdin;\n1\tx\\\\.\n2\t\\\\.\n\\.\n";
+  const b = "COPY public.b (id) FROM stdin;\n\\.\n";
+  const whole = header + a + b;
+  await check([whole], ["public.a", "public.b"]);
+  // Every split point, including inside the end-of-data line.
+  for (let i = 1; i < whole.length; i++)
+    await check([whole.slice(0, i), whole.slice(i)], ["public.a", "public.b"]);
+  // A long row is not mistaken for the end, and is not kept in memory.
+  await check([
+    header,
+    "COPY public.a (id) FROM stdin;\n",
+    "x".repeat(5_000_000),
+    "\\.\n",
+    "\n\\.\n",
+  ]);
+  for (const [parts, expected] of [
+    [[header + a], ["public.a", "public.b"]],
+    [[header + b + a], ["public.a", "public.b"]],
+    [[header + a + b + "SELECT 1;\n"], undefined],
+    [[a + b], undefined],
+    [[header + "COPY public.a (id) FROM stdin;\n1\n"], undefined],
+    [[whole.slice(0, -1)], undefined],
+  ] as [string[], string[] | undefined][])
+    await expect(check(parts, expected)).rejects.toThrow();
+  expect(() => tablesScript("not-a-snapshot", [])).toThrow();
+  expect(tablesScript("00000003-0000001B-1", [{ table: "public.a", key: ["k", "id"] }])).toContain(
+    "COPY (SELECT :columns FROM public.a ORDER BY k, id) TO STDOUT;",
+  );
 });
 test("storage environment file is literal and keeps restic settings out", () => {
   expect(parseEnvironment("# comment\nAWS_ACCESS_KEY_ID=id\nAWS_SECRET_ACCESS_KEY=a=b\n")).toEqual({

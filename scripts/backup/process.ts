@@ -1,13 +1,23 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { finished, pipeline } from "node:stream/promises";
 
-export type Command = { binary: string; args: string[]; env?: NodeJS.ProcessEnv };
+export type Command = {
+  binary: string;
+  args: string[];
+  env?: NodeJS.ProcessEnv;
+  /**
+   * In a pipeline: the next command may stop reading once it has what it needs,
+   * so this command ending on a closed output is not a failure. The next
+   * command's own exit status still decides the result.
+   */
+  outputMayClose?: boolean;
+};
 export class CommandError extends Error {
   constructor(
     readonly binary: string,
     readonly exitCode: number | null,
-    signal: string | null,
+    readonly signal: string | null,
   ) {
     super(`${binary} failed (${exitCode ?? signal})`);
   }
@@ -70,7 +80,7 @@ async function settle(children: ChildProcess[], work: Promise<unknown>[]): Promi
  * left while the writer still has data, the writer's output is closed, so it
  * fails on its next write instead of blocking.
  */
-async function distribute(from: Readable, to: Writable[]): Promise<void> {
+async function distribute(from: Readable, to: Writable[], end = true): Promise<void> {
   for (const reader of to) reader.on("error", () => undefined);
   const open = () => to.filter((reader) => !reader.destroyed && !reader.writableEnded);
   const drained = (reader: Writable) =>
@@ -95,7 +105,7 @@ async function distribute(from: Readable, to: Writable[]): Promise<void> {
   } catch {
     // The writer's exit status reports a failed read.
   }
-  for (const reader of open()) reader.end();
+  if (end) for (const reader of open()) reader.end();
 }
 
 /** Run a pipeline of commands; returns the last command's output when collecting. */
@@ -125,8 +135,13 @@ export async function run(
  * Stream one command's output into several consumers at once (backpressure
  * follows the slowest), and return each consumer's output. Any failed process
  * fails the whole group; a consumer that finishes early stops receiving data.
+ * In-process `checks` read the same bytes and fail the group by erroring.
  */
-export async function fanout(source: Command, consumers: Command[]): Promise<string[]> {
+export async function fanout(
+  source: Command,
+  consumers: Command[],
+  checks: Writable[] = [],
+): Promise<string[]> {
   const producer = start(source);
   producer.stdin!.end();
   const children = consumers.map(start);
@@ -135,11 +150,98 @@ export async function fanout(source: Command, consumers: Command[]): Promise<str
     exited(producer, source),
     ...children.map((child, i) => exited(child, consumers[i]!)),
     ...children.map((child, i) => pipeline(child.stdout!, outputs[i]!.sink)),
-    distribute(
-      producer.stdout!,
-      children.map((child) => child.stdin!),
-    ),
+    ...checks.map((check) => finished(check)),
+    distribute(producer.stdout!, [...children.map((child) => child.stdin!), ...checks]),
   ];
   await settle([producer, ...children], work);
   return outputs.map((output) => output.text());
+}
+
+/**
+ * Feed the outputs of several pipelines, one after another, into one consumer's
+ * input, then close it. Any failed process fails the whole group.
+ */
+export async function concatenate(parts: Command[][], consumer: Command): Promise<void> {
+  const sink = start(consumer);
+  const all: ChildProcess[] = [sink];
+  const work: Promise<unknown>[] = [
+    exited(sink, consumer),
+    pipeline(sink.stdout!, new Writable({ write: (_chunk, _encoding, callback) => callback() })),
+  ];
+  const feed = (async () => {
+    for (const part of parts) {
+      if (part.length === 0) throw Error("Empty process pipeline");
+      const children = part.map(start);
+      all.push(...children);
+      children[0]!.stdin!.end();
+      const steps: Promise<unknown>[] = children.map((child, i) =>
+        exited(child, part[i]!).catch((error: unknown) => {
+          if (
+            part[i]!.outputMayClose &&
+            i < children.length - 1 &&
+            error instanceof CommandError &&
+            error.signal === "SIGPIPE"
+          )
+            return;
+          throw error;
+        }),
+      );
+      for (let i = 0; i < children.length - 1; i++)
+        steps.push(distribute(children[i]!.stdout!, [children[i + 1]!.stdin!]));
+      steps.push(distribute(children.at(-1)!.stdout!, [sink.stdin!], false));
+      await Promise.all(steps);
+      if (sink.stdin!.destroyed) throw new CommandError(consumer.binary, null, "input closed");
+    }
+    sink.stdin!.end();
+  })();
+  work.push(feed);
+  await settle(all, work);
+}
+
+/**
+ * Start a long-lived command, send it `input` without closing its input, and
+ * wait for its first output line. `release` sends `closing`, closes the input
+ * and waits for a clean exit. Used to hold a database transaction open.
+ */
+export async function hold(
+  command: Command,
+  input: string,
+  closing: string,
+): Promise<{ line: string; release: () => Promise<void> }> {
+  const child = start(command);
+  child.stdin!.on("error", () => undefined);
+  const exit = exited(child, command);
+  exit.catch(() => undefined);
+  let buffered = "";
+  const line = await new Promise<string>((resolve, reject) => {
+    const onData = (chunk: Buffer) => {
+      buffered += chunk.toString();
+      const end = buffered.indexOf("\n");
+      if (end >= 0) {
+        child.stdout!.off("data", onData);
+        child.stdout!.resume();
+        resolve(buffered.slice(0, end).trim());
+      } else if (buffered.length > 4096) reject(Error(`Unexpected ${command.binary} output`));
+    };
+    child.stdout!.on("data", onData);
+    exit.then(
+      () => reject(Error(`${command.binary} exited early`)),
+      (error: unknown) => reject(error),
+    );
+    child.stdin!.write(input);
+  }).catch(async (error: unknown) => {
+    child.kill("SIGTERM");
+    await exit.catch(() => undefined);
+    throw error;
+  });
+  child.stdout!.on("data", () => undefined);
+  let released: Promise<void> | undefined;
+  return {
+    line,
+    release: () =>
+      (released ??= (async () => {
+        child.stdin!.end(closing);
+        await exit;
+      })()),
+  };
 }

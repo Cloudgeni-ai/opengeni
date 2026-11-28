@@ -1,5 +1,6 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { Writable } from "node:stream";
 import {
   BACKUP_TAG,
   COMPLETE_TAG,
@@ -11,11 +12,14 @@ import {
   newestComplete,
   parseEnvironment,
   retainedRuns,
+  tablesFile,
   type BackupConfig,
+  type DatabaseConfig,
   type ResticSnapshot,
   type Run,
 } from "./config";
-import { CommandError, fanout, run, type Command } from "./process";
+import { CommandError, concatenate, fanout, hold, run, type Command } from "./process";
+import { tablesCheck, tablesScript } from "./tables";
 
 type Summary = { snapshot_id?: string; data_added?: number; data_added_packed?: number };
 export type RunResult = {
@@ -28,6 +32,7 @@ export type RunResult = {
 function pg(binary: string, service: string, args: string[]): Command {
   return { binary, args, env: { ...process.env, PGSERVICE: service, PGCONNECT_TIMEOUT: "15" } };
 }
+const PSQL = ["-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1"];
 
 export class BackupRunner {
   private storageEnvironment: Record<string, string> | null = null;
@@ -88,6 +93,100 @@ export class BackupRunner {
       await this.resticOutput(["forget", ...snapshots.slice(i, i + 100)]);
   }
 
+  /** Stream one file into the repository while `consumers`/`checks` parse the same bytes. */
+  private async store(
+    id: string,
+    name: string,
+    source: Command,
+    consumers: Command[],
+    checks: Writable[] = [],
+  ): Promise<RunResult["files"][number]> {
+    console.log(`Dumping ${name}`);
+    const store = await this.restic([
+      "backup",
+      "--stdin",
+      "--stdin-filename",
+      name,
+      "--host",
+      this.config.host,
+      "--tag",
+      BACKUP_TAG,
+      "--tag",
+      `${RUN_TAG_PREFIX}${id}`,
+      "--json",
+      "--quiet",
+    ]);
+    const [stored] = await fanout(source, [store, ...consumers], checks);
+    const summary = stored!
+      .split("\n")
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line) as Summary & { message_type?: string })
+      .find((message) => message.message_type === "summary");
+    if (!summary?.snapshot_id) throw Error(`No snapshot recorded for ${name}`);
+    return {
+      name,
+      snapshot: summary.snapshot_id,
+      bytes: 0,
+      added: summary.data_added ?? 0,
+      ...(summary.data_added_packed === undefined
+        ? {}
+        : { addedPacked: summary.data_added_packed }),
+    };
+  }
+
+  // Uncompressed, so unchanged data stays byte-identical between nights and
+  // restic stores it once; restic compresses and encrypts. The whole archive is
+  // parsed as it streams in, so a run is complete only when the stored bytes
+  // are a readable archive.
+  private dump(db: DatabaseConfig, extra: string[] = []): Command {
+    return pg("pg_dump", db.service, ["--format=custom", "--compress=0", "--no-owner", ...extra]);
+  }
+
+  /**
+   * A database with ordered tables: its archive without those tables' rows,
+   * then the rows in key order, both read from one exported snapshot that a
+   * held transaction keeps valid (and the tables locked against DDL).
+   */
+  private async storeOrdered(id: string, db: DatabaseConfig): Promise<RunResult["files"]> {
+    const tables = db.orderedTables.map((t) => t.table);
+    const holder = await hold(
+      pg("psql", db.service, PSQL),
+      [
+        "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;",
+        "SELECT set_config(name, '0', true) FROM pg_settings WHERE name IN ('statement_timeout', 'idle_in_transaction_session_timeout', 'transaction_timeout') \\g /dev/null",
+        `LOCK TABLE ${tables.join(", ")} IN ACCESS SHARE MODE;`,
+        "SELECT pg_export_snapshot();",
+        "",
+      ].join("\n"),
+      "COMMIT;\n",
+    );
+    const script = join(this.config.stateDirectory, `ordered-${id}-${db.name}.sql`);
+    try {
+      const archive = await this.store(
+        id,
+        `${db.name}.dump`,
+        this.dump(db, [
+          `--snapshot=${holder.line}`,
+          ...tables.map((table) => `--exclude-table-data=${table}`),
+        ]),
+        [{ binary: "pg_restore", args: ["--file=/dev/null"] }],
+      );
+      await writeFile(script, tablesScript(holder.line, db.orderedTables), { mode: 0o600 });
+      const rows = await this.store(
+        id,
+        tablesFile(db.name),
+        pg("psql", db.service, [...PSQL, "-f", script]),
+        [],
+        [tablesCheck(tables)],
+      );
+      await holder.release();
+      return [archive, rows];
+    } finally {
+      await rm(script, { force: true });
+      await holder.release().catch(() => undefined);
+    }
+  }
+
   async backup(): Promise<RunResult> {
     await this.open();
     // Only stale locks (a killed run) are removed; one writer is enforced by flock.
@@ -95,56 +194,33 @@ export class BackupRunner {
     const id = newRunId();
     const result: RunResult = { status: "COMPLETE", run: id, files: [], forgottenRuns: 0 };
     try {
-      for (const name of expectedFiles(this.config)) {
-        console.log(`Dumping ${name}`);
-        const db = this.config.databases.find((d) => `${d.name}.dump` === name);
-        // Uncompressed, so unchanged data stays byte-identical between nights
-        // and restic stores it once; restic compresses and encrypts.
-        const source = db
-          ? pg("pg_dump", db.service, ["--format=custom", "--compress=0", "--no-owner"])
-          : pg("pg_dumpall", this.config.rolesService!, [
+      for (const db of this.config.databases) {
+        if (db.orderedTables.length > 0) result.files.push(...(await this.storeOrdered(id, db)));
+        else
+          result.files.push(
+            await this.store(id, `${db.name}.dump`, this.dump(db), [
+              { binary: "pg_restore", args: ["--file=/dev/null"] },
+            ]),
+          );
+      }
+      if (this.config.rolesService)
+        result.files.push(
+          await this.store(
+            id,
+            "roles.sql",
+            pg("pg_dumpall", this.config.rolesService, [
               "--roles-only",
               // Unlike pg_dump, pg_dumpall otherwise chooses postgres/template1
               // even when PGSERVICE specifies a different database.
-              `--database=service=${this.config.rolesService!}`,
+              `--database=service=${this.config.rolesService}`,
               "--no-password",
-            ]);
-        const store = await this.restic([
-          "backup",
-          "--stdin",
-          "--stdin-filename",
-          name,
-          "--host",
-          this.config.host,
-          "--tag",
-          BACKUP_TAG,
-          "--tag",
-          `${RUN_TAG_PREFIX}${id}`,
-          "--json",
-          "--quiet",
-        ]);
-        // Parse the whole archive as it streams in, so a run is complete only
-        // when the stored bytes are a readable archive.
-        const consumers = db
-          ? [store, { binary: "pg_restore", args: ["--file=/dev/null"] }]
-          : [store];
-        const [stored] = await fanout(source, consumers);
-        const summary = stored!
-          .split("\n")
-          .filter((line) => line.startsWith("{"))
-          .map((line) => JSON.parse(line) as Summary & { message_type?: string })
-          .find((message) => message.message_type === "summary");
-        if (!summary?.snapshot_id) throw Error(`No snapshot recorded for ${name}`);
-        result.files.push({
-          name,
-          snapshot: summary.snapshot_id,
-          bytes: 0,
-          added: summary.data_added ?? 0,
-          ...(summary.data_added_packed === undefined
-            ? {}
-            : { addedPacked: summary.data_added_packed }),
-        });
-      }
+            ]),
+            [],
+          ),
+        );
+      const expected = expectedFiles(this.config);
+      if (result.files.map((f) => f.name).join() !== expected.join())
+        throw Error("The run did not store the expected files");
       await this.resticOutput([
         "tag",
         "--add",
@@ -195,11 +271,13 @@ export class BackupRunner {
     const latest = await this.check();
     for (const file of latest.files) {
       const dump = await this.restic(["dump", file.snapshot, `/${file.name}`]);
-      await run(
-        file.name.endsWith(".dump")
-          ? [dump, { binary: "pg_restore", args: ["--file=/dev/null"] }]
-          : [dump],
-      );
+      if (file.name.endsWith(".tables")) await run([dump], { output: tablesCheck() });
+      else
+        await run(
+          file.name.endsWith(".dump")
+            ? [dump, { binary: "pg_restore", args: ["--file=/dev/null"] }]
+            : [dump],
+        );
       console.log(`Verified ${file.name}`);
     }
     return latest;
@@ -220,6 +298,7 @@ export class BackupRunner {
     if (!selected) throw Error("No such complete recovery point");
     const file = selected.files.find((f) => f.name === `${name}.dump`);
     if (!file) throw Error("Database not present in selected recovery point");
+    const rows = selected.files.find((f) => f.name === tablesFile(name));
     const empty = await run(
       [
         pg("psql", targetService, [
@@ -236,14 +315,35 @@ export class BackupRunner {
     );
     if (empty.trim() !== "0") throw Error("Restore requires an empty isolated target database");
     // restic verifies every blob it reads; one transaction rolls back on any error.
-    await run([
-      await this.restic(["dump", file.snapshot, `/${file.name}`]),
-      pg("pg_restore", targetService, [
-        "--exit-on-error",
-        "--single-transaction",
-        `--dbname=service=${targetService}`,
-      ]),
-    ]);
+    if (!rows)
+      await run([
+        await this.restic(["dump", file.snapshot, `/${file.name}`]),
+        pg("pg_restore", targetService, [
+          "--exit-on-error",
+          "--single-transaction",
+          `--dbname=service=${targetService}`,
+        ]),
+      ]);
+    else {
+      // The archive's tables and data, then the ordered tables' rows, then its
+      // indexes, constraints, triggers and policies: one psql transaction.
+      const archive = async (sections: string[]) => [
+        // pg_restore stops reading once it has written its sections.
+        { ...(await this.restic(["dump", file.snapshot, `/${file.name}`])), outputMayClose: true },
+        {
+          binary: "pg_restore",
+          args: ["--file=-", ...sections.map((section) => `--section=${section}`)],
+        },
+      ];
+      await concatenate(
+        [
+          await archive(["pre-data", "data"]),
+          [await this.restic(["dump", rows.snapshot, `/${rows.name}`])],
+          await archive(["post-data"]),
+        ],
+        pg("psql", targetService, ["-X", "-q", "-v", "ON_ERROR_STOP=1", "-1", "-f", "-"]),
+      );
+    }
     console.log(
       `Restored ${name} from run ${selected.id}; validate the application before enabling writers`,
     );
