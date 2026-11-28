@@ -101,11 +101,19 @@ function settle(ctx: Fixture, attemptId = crypto.randomUUID()) {
 test("a new session starts undecided and its first attempt records the current revision", async () => {
   const ctx = await newSession();
   expect(await storedRevision(ctx)).toBeNull();
-  expect(CURRENT_FIRST_REQUEST_TOOLS_REVISION).toBe(1);
-  expect(await settle(ctx)).toBe(1);
-  expect(await storedRevision(ctx)).toBe(1);
+  expect(CURRENT_FIRST_REQUEST_TOOLS_REVISION).toBe(2);
+  expect(await settle(ctx)).toBe(2);
+  expect(await storedRevision(ctx)).toBe(2);
   // Every later attempt and turn keeps it.
   await earlierAttempt(ctx);
+  expect(await settle(ctx)).toBe(2);
+  expect(await storedRevision(ctx)).toBe(2);
+});
+
+test("a session that recorded revision 1 keeps it", async () => {
+  const ctx = await newSession();
+  await shared.admin`
+    update sessions set first_request_tools_revision = 1 where id = ${ctx.sessionId}`;
   expect(await settle(ctx)).toBe(1);
   expect(await storedRevision(ctx)).toBe(1);
 });

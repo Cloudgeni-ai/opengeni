@@ -24,12 +24,15 @@ import { MCP_MAX_TOOL_RESULT_BYTES, mcpSerializedSizeBytes } from "./mcp-network
  * One tool result shows at most the model's inline tool-output policy as text
  * (100,000 UTF-8 bytes, about 25,000 tokens, by default). A result over that is
  * never cut: its full model-visible text is stored whole as a workspace File
- * and the model receives a view that fits, with the total size and the exact
- * call that reads the rest by byte offset (`tool_result_read`). Shell output
- * (`exec_command`, `write_stdin`) keeps its head and tail in that view, since
- * the end of a command's output is usually what matters; other results show
- * their start. Only results produced from now on pass through here, so
- * history that a provider already received is never rewritten.
+ * and the model receives a view that fits. The view opens with a line saying
+ * the result is partial (its size, the part shown and the exact call that
+ * reads the rest by byte offset, `tool_result_read`), so a model never takes
+ * the part for the whole, and the same call follows the part shown. Shell
+ * output (`exec_command`, `write_stdin`) keeps its head and tail in that
+ * view, since the end of a command's output is usually what matters; other
+ * results show their start. Only results produced from now on pass through
+ * here, so history that a provider already received is never rewritten: a
+ * view is rendered once, when its result arrives, and stored as it was sent.
  *
  * Images are not text: they count only toward the 1 MiB transport bound on a
  * whole result, and an image past that bound is withheld with a note naming
@@ -51,14 +54,15 @@ const LINE_SNAP_WINDOW_BYTES = 4_096;
 
 /**
  * How the model of this session can read a stored result:
- * - `reader`: `searchable` when the turn's tool search router can load
- *   `tool_result_read` by exact name, `none` when it has no reader. The reader
- *   is never in a first-request tool list, so no session's prompt prefix
- *   changes for it;
+ * - `reader`: `listed` when `tool_result_read` is in every request of the
+ *   session (first-request tools revision 2 and later, frozen per session, so
+ *   the tool list never changes within a chat); `searchable` when the turn's
+ *   tool search router can load it by exact name (earlier sessions, whose
+ *   tool list never carried it); `none` when it has no reader;
  * - `shell`: whether a shell can open a copy saved in the sandbox.
  */
 export type StoredToolResultReaders = {
-  reader: "searchable" | "none";
+  reader: "listed" | "searchable" | "none";
   shell: boolean;
 };
 
@@ -165,6 +169,8 @@ function readInstruction(
       ? ` A copy is at ${stored.sandboxPath} where your shell runs.`
       : "";
   switch (readers.reader) {
+    case "listed":
+      return `Read on with ${readCall(stored.resultId, offset)}.${copy}`;
     case "searchable":
       return `Read on with ${readCall(stored.resultId, offset)}; load ${STORED_TOOL_RESULT_READER_NAME} by that exact name with tool search first.${copy}`;
     case "none":
@@ -176,9 +182,11 @@ function readInstruction(
 
 /**
  * The model's view of a stored result and its receipt. The view is at most
- * `inlineMaxBytes`: the start of the text (or its head and tail for shell
- * output) and one bracketed Opengeni note with the total size, the range left
- * out and the call that reads it.
+ * `inlineMaxBytes`: a first line saying the result is partial, with the total
+ * size, the range left out and the call that reads it; then the start of the
+ * text (or its head and tail for shell output) and a bracketed Opengeni note
+ * after the part shown (between head and tail for shell output) with the same
+ * call.
  */
 export function storedToolResultView(input: {
   text: string;
@@ -189,15 +197,22 @@ export function storedToolResultView(input: {
 }): { text: string; receipt: ToolResultStoredReceiptValue } {
   const bytes = Buffer.from(input.text, "utf8");
   const total = bytes.length;
-  // Size the note with the largest numbers it can hold, so the cut below
-  // always leaves room for it.
+  // Size the notes with the largest numbers they can hold, so the cut below
+  // always leaves room for them.
+  const headerFor = (from: number, to: number): string =>
+    input.shape === "head"
+      ? `[Opengeni: partial result. This tool result is ${total} bytes, more than the ${input.inlineMaxBytes} bytes one result may show, so only bytes 0 to ${from} are shown below; the whole result is stored. Treat what follows as incomplete until you read the rest. ${readInstruction(input.stored, from, input.readers)}]\n`
+      : `[Opengeni: partial output. This output is ${total} bytes, more than the ${input.inlineMaxBytes} bytes one result may show, so bytes ${from} to ${to} are left out where marked below; the whole output is stored. ${readInstruction(input.stored, from, input.readers)}]\n`;
   const noteFor = (from: number, to: number): string =>
     input.shape === "head"
-      ? `\n[Opengeni: this tool result is ${total} bytes, more than the ${input.inlineMaxBytes} bytes one result may show, so it is stored whole. Shown above: bytes 0 to ${from}. ${readInstruction(input.stored, from, input.readers)}]`
+      ? `\n[Opengeni: end of the part shown, bytes 0 to ${from} of this ${total}-byte result. ${readInstruction(input.stored, from, input.readers)}]`
       : `\n[Opengeni: bytes ${from} to ${to} of this ${total}-byte output are not shown; the whole output is stored. ${readInstruction(input.stored, from, input.readers)}]\n`;
   const room = Math.max(
     1_024,
-    input.inlineMaxBytes - utf8Bytes(noteFor(total, total)) - VIEW_FRAMING_RESERVE_BYTES,
+    input.inlineMaxBytes -
+      utf8Bytes(headerFor(total, total)) -
+      utf8Bytes(noteFor(total, total)) -
+      VIEW_FRAMING_RESERVE_BYTES,
   );
   let from: number;
   let to: number;
@@ -205,12 +220,12 @@ export function storedToolResultView(input: {
   if (input.shape === "head") {
     from = Math.max(1, headCut(bytes, room));
     to = total;
-    text = `${bytes.subarray(0, from).toString("utf8")}${noteFor(from, to)}`;
+    text = `${headerFor(from, to)}${bytes.subarray(0, from).toString("utf8")}${noteFor(from, to)}`;
   } else {
     const headRoom = Math.floor(room / 2);
     from = Math.max(1, headCut(bytes, headRoom));
     to = Math.max(from + 1, tailCut(bytes, total - (room - from)));
-    text = `${bytes.subarray(0, from).toString("utf8")}${noteFor(from, to)}${bytes.subarray(to).toString("utf8")}`;
+    text = `${headerFor(from, to)}${bytes.subarray(0, from).toString("utf8")}${noteFor(from, to)}${bytes.subarray(to).toString("utf8")}`;
   }
   const receipt = ToolResultStoredReceipt.parse({
     type: TOOL_RESULT_STORED_TYPE,
@@ -223,17 +238,25 @@ export function storedToolResultView(input: {
   return { text, receipt };
 }
 
-/** A view for a result whose text could not be stored: its start and a plain note. */
+/**
+ * A view for a result whose text could not be stored: a first line saying it
+ * is partial, its start, and a plain note.
+ */
 function unstoredView(text: string, inlineMaxBytes: number): string {
   const bytes = Buffer.from(text, "utf8");
+  const header = (shown: number) =>
+    `[Opengeni: partial result. This tool result is ${bytes.length} bytes, more than the ${inlineMaxBytes} bytes one result may show, and it could not be stored, so only bytes 0 to ${shown} are shown below. Treat what follows as incomplete.]\n`;
   const note = (shown: number) =>
     `\n[Opengeni: this tool result is ${bytes.length} bytes, more than the ${inlineMaxBytes} bytes one result may show, and it could not be stored, so only bytes 0 to ${shown} are shown. If the tool can narrow its result (a filter, a smaller page or fewer fields), call it again so the result fits.]`;
   const room = Math.max(
     1_024,
-    inlineMaxBytes - utf8Bytes(note(bytes.length)) - VIEW_FRAMING_RESERVE_BYTES,
+    inlineMaxBytes -
+      utf8Bytes(header(bytes.length)) -
+      utf8Bytes(note(bytes.length)) -
+      VIEW_FRAMING_RESERVE_BYTES,
   );
   const shown = Math.max(1, headCut(bytes, room));
-  return `${bytes.subarray(0, shown).toString("utf8")}${note(shown)}`;
+  return `${header(shown)}${bytes.subarray(0, shown).toString("utf8")}${note(shown)}`;
 }
 
 /**

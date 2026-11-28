@@ -66,6 +66,7 @@ import {
   sideFeatureRouteRunnable,
   skillInstructionsBody,
   toolFamilyForCatalogIdentity,
+  type StoredToolResultReaders,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
 import {
@@ -142,6 +143,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
   TOOL_RESULT_READ_TOOL_NAME,
+  toolResultReaderInEveryRequest,
   type AgentLearningDefaults,
   type ResourceRef,
   type Permission,
@@ -1507,22 +1509,27 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     toolRouterExpected || !routerInstallable
       ? titleToolPlan.remoteFirstPartyMcpTools
       : titleToolPlan.remoteFirstPartyMcpTools.filter((tool) => tool !== "set_session_title");
-  // `tool_result_read` reads tool results too large to show whole. It is only
-  // needed after such a result, whose note names the exact call, so it is never
-  // in a first-request tool list: it joins as a deferred tool behind the
-  // turn's search router, loaded by exact name, and no session's prompt
-  // prefix changes for it. A turn without a router (tool search turned off, or
-  // an agent whose every tool is eager) has no reader: the shell copy, when a
-  // sandbox runs, is then its reader, otherwise the note says to narrow the
-  // call. The router decision above never counts the reader.
+  // `tool_result_read` reads tool results too large to show whole. A session
+  // of first-request tools revision 2 or later (frozen before its first model
+  // request) carries it in every request, with or without a router, so the
+  // note on a cut result names a call the model can make at once and its tool
+  // list never changes within the chat. Earlier sessions never carried it, so
+  // for them it stays a deferred tool behind the turn's search router, loaded
+  // by exact name; a turn of theirs without a router has no reader: the shell
+  // copy, when a sandbox runs, is then its reader, otherwise the note says to
+  // narrow the call. The router decision above never counts the reader.
   const searchRouterPresent =
     toolRouterExpected &&
     routerInstallable &&
     (lazyToolTransport !== undefined || (Boolean(session.agent) && toolRouterInHistory));
-  const toolResultReader: "searchable" | "none" =
-    searchRouterPresent && attemptToolFamilies.allowsFunctionTool(TOOL_RESULT_READ_TOOL_NAME)
-      ? "searchable"
-      : "none";
+  const readerAllowed = attemptToolFamilies.allowsFunctionTool(TOOL_RESULT_READ_TOOL_NAME);
+  const toolResultReader: StoredToolResultReaders["reader"] = !readerAllowed
+    ? "none"
+    : toolResultReaderInEveryRequest(firstRequestToolsRevision)
+      ? "listed"
+      : searchRouterPresent
+        ? "searchable"
+        : "none";
   toolResultStore.setReaders({
     reader: toolResultReader,
     shell: (activeSandboxBackend ?? groupBoxBackend) !== "none",

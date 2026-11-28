@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { modelToolOutputInlineMaxBytes } from "@opengeni/codex";
 import type { Settings } from "@opengeni/config";
 import type { SkillActor, SkillScope, SkillWriteReceipt } from "@opengeni/contracts";
 import {
@@ -286,6 +287,7 @@ export function createWorkspaceSkillTools(input: {
     createSkillReadAttemptToolDefinition({
       authorize,
       load,
+      inlineMaxBytes: () => modelToolOutputInlineMaxBytes(input.modelToolOutputTruncationTokens()),
       activeHistory: {
         readResults: async () =>
           (

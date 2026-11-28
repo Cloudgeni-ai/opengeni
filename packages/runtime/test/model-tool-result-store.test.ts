@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AttemptToolExecutionContext } from "@opengeni/codemode";
-import { boundModelToolOutputItem } from "@opengeni/codex";
+import { boundModelToolOutputItem, canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import {
   TOOL_RESULT_STORED_META_KEY,
   isModelToolResultStoreView,
@@ -118,11 +118,14 @@ describe("lossless model tool results", () => {
       notShownTo: Buffer.byteLength(full),
       sandboxPath: null,
     });
-    // The view ends on a line, then names the size and the exact next read.
+    // The view says first that it is partial, with the size, the part shown
+    // and the exact next read; the part ends on a line; the same read follows.
     const head = Buffer.from(full).subarray(0, receipt.notShownFrom).toString("utf8");
     expect(head.endsWith("\n")).toBe(true);
+    const read = `tool_result_read {"resultId":"${RESULT_ID}","offset":${receipt.notShownFrom}}; load tool_result_read by that exact name with tool search first.`;
     expect(shown).toBe(
-      `${head}\n[Opengeni: this tool result is ${receipt.byteSize} bytes, more than the ${INLINE_MAX} bytes one result may show, so it is stored whole. Shown above: bytes 0 to ${receipt.notShownFrom}. Read on with tool_result_read {"resultId":"${RESULT_ID}","offset":${receipt.notShownFrom}}; load tool_result_read by that exact name with tool search first.]`,
+      `[Opengeni: partial result. This tool result is ${receipt.byteSize} bytes, more than the ${INLINE_MAX} bytes one result may show, so only bytes 0 to ${receipt.notShownFrom} are shown below; the whole result is stored. Treat what follows as incomplete until you read the rest. Read on with ${read}]\n` +
+        `${head}\n[Opengeni: end of the part shown, bytes 0 to ${receipt.notShownFrom} of this ${receipt.byteSize}-byte result. Read on with ${read}]`,
     );
     // Nothing is lost: the shown start and the read from its offset are the whole.
     expect(head + readFrom(full, receipt.notShownFrom)).toBe(full);
@@ -180,6 +183,10 @@ describe("lossless model tool results", () => {
     );
     const shown = textOf(view);
     expect(Buffer.byteLength(shown)).toBeLessThanOrEqual(INLINE_MAX);
+    expect(shown.startsWith("[Opengeni: partial result. This tool result is ")).toBe(true);
+    expect(shown.slice(0, shown.indexOf("\n"))).toContain(
+      "and it could not be stored, so only bytes 0 to",
+    );
     expect(shown).toContain("it could not be stored, so only bytes 0 to");
     expect(view._meta).toBeUndefined();
   });
@@ -249,6 +256,13 @@ describe("stored result notes", () => {
   };
 
   test("name the reader the session has", () => {
+    // A session whose every request carries the reader is told to call it.
+    expect(note({ reader: "listed", shell: false })).toMatch(
+      new RegExp(
+        `Read on with tool_result_read \\{"resultId":"${RESULT_ID}","offset":\\d+\\}\\.\\]$`,
+      ),
+    );
+    expect(note({ reader: "listed", shell: false })).not.toContain("tool search");
     expect(note({ reader: "searchable", shell: false })).toContain(
       `Read on with tool_result_read {"resultId":"${RESULT_ID}","offset":`,
     );
@@ -264,6 +278,51 @@ describe("stored result notes", () => {
     expect(note({ reader: "none", shell: false })).toContain(
       "This session has no tool that reads it. If the tool can narrow its result",
     );
+  });
+
+  test("the first line names the same read as the note after the part shown", () => {
+    for (const readers of [
+      { reader: "listed", shell: true },
+      { reader: "searchable", shell: false },
+      { reader: "none", shell: true },
+    ] as const) {
+      const view = storedToolResultView({
+        text: lines(300_000),
+        stored: { ...stored, sandboxPath: "/workspace/tool-results/x.txt" },
+        inlineMaxBytes: INLINE_MAX,
+        readers,
+        shape: "head",
+      });
+      const first = view.text.slice(0, view.text.indexOf("\n"));
+      const last = view.text.slice(view.text.lastIndexOf("\n[Opengeni:") + 1);
+      expect(first.startsWith("[Opengeni: partial result.")).toBe(true);
+      const instruction = (text: string) => text.slice(text.indexOf(" Read on "));
+      expect(instruction(first)).toBe(instruction(last));
+      expect(Buffer.byteLength(view.text)).toBeLessThanOrEqual(INLINE_MAX);
+    }
+  });
+
+  // Prompt-cache invariant: a view is rendered once, when its result
+  // arrives, and stored as sent. Replaying history never renders it again,
+  // so a view an earlier request carried, in this format or the one before
+  // it, reaches every later request byte for byte.
+  test("a view in history, earlier format or current, replays byte for byte", () => {
+    const head = lines(39_000);
+    const earlier = `${head}\n[Opengeni: this tool result is 68818 bytes, more than the 40000 bytes one result may show, so it is stored whole. Shown above: bytes 0 to ${Buffer.byteLength(head)}. Read on with tool_result_read {"resultId":"${RESULT_ID}","offset":${Buffer.byteLength(head)}}; load tool_result_read by that exact name with tool search first.]`;
+    const current = storedToolResultView({
+      text: lines(68_818),
+      stored: { ...stored, byteSize: 68_818 },
+      inlineMaxBytes: 40_000,
+      readers: { reader: "listed", shell: false },
+      shape: "head",
+    }).text;
+    for (const output of [earlier, current]) {
+      const item = { type: "function_call_result", callId: "c", output };
+      // The provider seam's bound at the policy the views were made under.
+      expect(boundModelToolOutputItem(item, 10_000)).toBe(item);
+      const persisted = canonicalizePersistedHistoryItem(item as never, 10_000);
+      expect(JSON.stringify(persisted)).toBe(JSON.stringify(item));
+    }
   });
 });
 
@@ -282,14 +341,21 @@ describe("function tool output", () => {
       text: full,
     });
     expect(Buffer.byteLength(view)).toBeLessThanOrEqual(INLINE_MAX);
-    const match = view.match(
+    // The first line says the output is partial and which bytes are left out.
+    const firstLine = view.slice(0, view.indexOf("\n"));
+    expect(firstLine).toMatch(
+      /^\[Opengeni: partial output\. This output is \d+ bytes, more than the 100000 bytes one result may show, so bytes \d+ to \d+ are left out where marked below; the whole output is stored\. Read on with tool_result_read /,
+    );
+    const body = view.slice(firstLine.length + 1);
+    const match = body.match(
       /\n\[Opengeni: bytes (\d+) to (\d+) of this (\d+)-byte output are not shown; the whole output is stored\. Read on with tool_result_read \{"resultId":"[0-9a-f-]+","offset":(\d+)\}; load tool_result_read by that exact name with tool search first\.\]\n/,
     );
     expect(match).not.toBeNull();
     const [note, from, to, total, offset] = match!;
     expect(Number(total)).toBe(Buffer.byteLength(full));
     expect(offset).toBe(from);
-    const [head, tail] = view.split(note);
+    expect(firstLine).toContain(`so bytes ${from} to ${to} are left out`);
+    const [head, tail] = body.split(note);
     expect(full.startsWith(head!)).toBe(true);
     expect(full.endsWith(tail!)).toBe(true);
     expect(tail!.length).toBeGreaterThan(30_000);
@@ -315,8 +381,10 @@ describe("function tool output", () => {
       output: { type: "text", text: full },
       store,
     })) as string;
-    expect(view).toContain("so it is stored whole. Shown above: bytes 0 to");
-    expect(full.startsWith(view.slice(0, view.indexOf("\n[Opengeni:")))).toBe(true);
+    expect(view.startsWith("[Opengeni: partial result. This tool result is ")).toBe(true);
+    const body = view.slice(view.indexOf("\n") + 1);
+    expect(body).toContain("\n[Opengeni: end of the part shown, bytes 0 to");
+    expect(full.startsWith(body.slice(0, body.indexOf("\n[Opengeni:")))).toBe(true);
   });
 
   test("the agent wrapper stores by call id for every function tool, clones included", async () => {

@@ -11,6 +11,7 @@
  * still held to an unchanged system prompt and tool list.
  */
 import { describe, expect, test } from "bun:test";
+import { storedToolResultView } from "@opengeni/runtime";
 import {
   INITIAL_STATE,
   WIRES,
@@ -43,6 +44,28 @@ type Transition = {
 };
 
 const MESSAGE: TurnTrigger = { kind: "message", text: "What is the status?" };
+
+/**
+ * A result too large to show whole reaches history as its view, rendered
+ * once when it arrived. One in the format sessions carried before the partial
+ * marker and listed reader, one in the current format.
+ */
+const CUT_RESULT_ID = "77777777-7777-4777-8777-777777777777";
+const CUT_HEAD = "row ".repeat(9_000);
+const CUT_VIEWS = {
+  "earlier format": `${CUT_HEAD}\n[Opengeni: this tool result is 68818 bytes, more than the 40000 bytes one result may show, so it is stored whole. Shown above: bytes 0 to 36000. Read on with tool_result_read {"resultId":"${CUT_RESULT_ID}","offset":36000}; load tool_result_read by that exact name with tool search first.]`,
+  "current format": storedToolResultView({
+    text: "row ".repeat(17_205),
+    stored: {
+      resultId: CUT_RESULT_ID,
+      byteSize: 68_820,
+      sandboxPath: null,
+    },
+    inlineMaxBytes: 40_000,
+    readers: { reader: "listed", shell: false },
+    shape: "head",
+  }).text,
+} as const;
 
 export const TRANSITIONS: readonly Transition[] = [
   { name: "an ordinary next turn" },
@@ -244,6 +267,26 @@ for (const wire of WIRES) {
       expect(next.prefix.items.join("\n")).toContain(before);
       expect(next.prefix.items.join("\n")).toContain(after);
     }, 60_000);
+    for (const [format, view] of Object.entries(CUT_VIEWS)) {
+      test(`a cut tool result in history (${format}) replays byte for byte; the tools stay`, async () => {
+        const chat = prefixChat(wire);
+        await chat.turn(INITIAL_STATE, { kind: "message", text: "Hello." });
+        await chat.turn(INITIAL_STATE, MESSAGE);
+        chat.addToolResult("call-cut-result", "knowledge_search", view);
+        await chat.turn(INITIAL_STATE, { kind: "message", text: "Use the list." });
+        await chat.turn(INITIAL_STATE, MESSAGE);
+        const [first, second, third] = chat.requests.slice(-3);
+        expect(prefixBreaks(first!, second!)).toEqual([]);
+        expect(prefixBreaks(second!, third!)).toEqual([]);
+        // The view reaches both later requests whole, as it was stored.
+        const marker = JSON.stringify(view).slice(1, -1);
+        for (const request of [second!, third!])
+          expect(request.prefix.items.join("\n")).toContain(marker);
+        expect(third!.prefix.tools).toEqual(first!.prefix.tools);
+        // A new chat carries the reader the view names from its first request.
+        expect(first!.prefix.tools.some((tool) => tool.includes('"tool_result_read"'))).toBe(true);
+      }, 60_000);
+    }
   });
 }
 
