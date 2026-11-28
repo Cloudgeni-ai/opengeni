@@ -314,16 +314,23 @@ export function deleteConfirmation(item: Pick<ArtifactCatalogItem, "kind" | "tit
   };
 }
 
+const safePreviewId = (value: string) => value.replace(/[^A-Za-z0-9_-]/gu, "").slice(0, 80);
+
+/** The start every captured preview of one Site shares, whatever its version. */
+export function sitePreviewFilePrefix(workspaceId: string, siteId: string): string {
+  return `v2-${safePreviewId(workspaceId)}-${safePreviewId(siteId)}-`;
+}
+
 /**
  * The file a Site version's captured preview is kept in on the device: one per
- * workspace, version and theme (a version's page never changes). Ids are
- * reduced to safe characters, so a file name never leaves its folder.
+ * workspace, Site, version and theme (a version's page never changes). Ids
+ * are reduced to safe characters, so a file name never leaves its folder.
  */
 export function sitePreviewFileName(
   workspaceId: string,
+  siteId: string,
   versionId: string,
   scheme: "light" | "dark",
 ): string {
-  const safe = (value: string) => value.replace(/[^A-Za-z0-9_-]/gu, "").slice(0, 80);
-  return `v1-${safe(workspaceId)}-${safe(versionId)}-${scheme}.jpg`;
+  return `${sitePreviewFilePrefix(workspaceId, siteId)}${safePreviewId(versionId)}-${scheme}.jpg`;
 }

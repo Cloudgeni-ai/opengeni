@@ -12,6 +12,7 @@ import {
   fileOpensInline,
   nativeViewPath,
   sitePreviewFileName,
+  sitePreviewFilePrefix,
   viewerKeepsNavigation,
   viewerMode,
   viewerParamsForLink,
@@ -210,7 +211,15 @@ test("Share and Copy link use the web address", () => {
 });
 
 test("a Site's cached preview is keyed by version and scheme, with a safe file name", () => {
-  expect(sitePreviewFileName("work-1", "ver_2", "dark")).toBe("v1-work-1-ver_2-dark.jpg");
-  expect(sitePreviewFileName("../etc", "a/b\\c.d", "light")).toBe("v1-etc-abcd-light.jpg");
-  expect(sitePreviewFileName("w", "v1", "light")).not.toBe(sitePreviewFileName("w", "v2", "light"));
+  expect(sitePreviewFileName("work-1", "site", "ver_2", "dark")).toBe(
+    "v2-work-1-site-ver_2-dark.jpg",
+  );
+  expect(sitePreviewFileName("../etc", "s/..", "a/b\\c.d", "light")).toBe(
+    "v2-etc-s-abcd-light.jpg",
+  );
+  expect(sitePreviewFileName("w", "s", "v1", "light")).not.toBe(
+    sitePreviewFileName("w", "s", "v2", "light"),
+  );
+  // Every version of one Site shares a start, so a new one replaces the old.
+  expect(sitePreviewFileName("w", "s", "v2", "dark")).toStartWith(sitePreviewFilePrefix("w", "s"));
 });

@@ -58,11 +58,11 @@ export const HTML_FRAME_STILL_POLICY =
 /**
  * The policy an artifact card's live preview of a Site writes first into its
  * document (`@opengeni/sdk/site-preview`). The page's own scripts, styles,
- * fonts and images may load, so apps drawn by script and styled from a CDN
- * look as they do when opened, but the page may not call anything
- * (`connect-src 'none'`: no fetch, XHR, WebSocket or beacon), frame other
- * pages or submit forms. It runs with no Site bridge, so it reaches neither
- * the workspace nor the viewer's credentials.
+ * fonts and images may load from public hosts, so apps drawn by script and
+ * styled from a CDN look as they do when opened, but the page may not call
+ * for data (`connect-src 'none'`: no fetch, XHR, WebSocket or beacon), frame
+ * other pages or submit forms. It runs with no Site bridge, so it reaches
+ * neither the workspace nor the viewer's credentials.
  */
 export const HTML_FRAME_PREVIEW_POLICY =
   "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https: data: blob:; style-src 'unsafe-inline' https: data:; img-src https: data: blob:; font-src https: data:; media-src https: data: blob:; worker-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'";

@@ -345,9 +345,24 @@ export type EditableArtifactPreviewPort = Readonly<{
       scope: EditableArtifactRouteScope;
       actor: EditableArtifactRouteActor;
       artifactId: ReturnType<typeof editableArtifactId>;
+      knownTag?: string | undefined;
     }>,
-  ): Promise<Readonly<{ artifact: Readonly<{ stateHash: string }>; svg: string }>>;
+  ): Promise<Readonly<{ tag: string; svg: string | null }>>;
 }>;
+
+/** A card picture is a plain read: a caller that names no replica reads as this one. */
+const EDITABLE_ARTIFACT_PREVIEW_REPLICA_ID = "0000000000000001";
+
+/** The tags an `If-None-Match` header names (weak or strong), unquoted. */
+function requestedPreviewTags(header: string | undefined): string[] {
+  if (!header) return [];
+  return header
+    .split(",")
+    .map((tag) => tag.trim().replace(/^W\//, ""))
+    .filter((tag) => tag.length > 2 && tag.startsWith('"') && tag.endsWith('"'))
+    .map((tag) => tag.slice(1, -1))
+    .slice(0, 8);
+}
 
 /** The picture holds only shapes and text; as a document it may load and run nothing. */
 const EDITABLE_ARTIFACT_PREVIEW_HEADERS = Object.freeze({
@@ -355,6 +370,7 @@ const EDITABLE_ARTIFACT_PREVIEW_HEADERS = Object.freeze({
   "Content-Security-Policy": "default-src 'none'; sandbox",
   "cache-control": "private, max-age=60",
   "content-type": "image/svg+xml; charset=utf-8",
+  vary: "Authorization, Cookie",
 });
 
 export type EditableArtifactApplicationErrorCode =
@@ -579,25 +595,29 @@ export function registerEditableArtifactRoutes(
   });
 
   // The card picture: its first page, slide or sheet. A read like opening it,
-  // revalidated by state (the ETag is the head's state hash).
+  // revalidated by state: the ETag is the head's state hash and the drawing's
+  // version, checked before anything is reconstructed.
   app.get(`${item}/preview`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     const artifactId = editableArtifactId(parseArtifactId(context.req.param("artifactId")));
-    const actor = editableArtifactActorForGrant(grant, context.req.query("replicaId") ?? "");
+    const actor = editableArtifactActorForGrant(
+      grant,
+      context.req.query("replicaId") || EDITABLE_ARTIFACT_PREVIEW_REPLICA_ID,
+    );
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
     if (!deps.editableArtifactAgent)
       throw editableArtifactHttpError(new EditableArtifactApplicationError("unavailable"));
+    // One revalidation per request: the first tag named is the one checked.
+    const knownTag = requestedPreviewTags(context.req.header("if-none-match"))[0];
     let preview: Awaited<ReturnType<EditableArtifactPreviewPort["preview"]>>;
     try {
-      preview = await deps.editableArtifactAgent.preview({ scope, actor, artifactId });
+      preview = await deps.editableArtifactAgent.preview({ scope, actor, artifactId, knownTag });
     } catch (error) {
       throw editableArtifactHttpError(error);
     }
-    const etag = `"${preview.artifact.stateHash}"`;
-    const headers = { ...EDITABLE_ARTIFACT_PREVIEW_HEADERS, etag };
-    if (context.req.header("if-none-match") === etag)
-      return new Response(null, { status: 304, headers });
+    const headers = { ...EDITABLE_ARTIFACT_PREVIEW_HEADERS, etag: `"${preview.tag}"` };
+    if (preview.svg === null) return new Response(null, { status: 304, headers });
     return new Response(preview.svg, { status: 200, headers });
   });
 

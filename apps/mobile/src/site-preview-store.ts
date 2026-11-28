@@ -28,11 +28,59 @@ export function storedSitePreview(name: string): string | null {
   }
 }
 
-export function keepSitePreview(name: string, capturedUri: string): string {
+/*
+ * Sign-out starts a new generation: a capture that finishes afterwards is
+ * thrown away instead of written back, and in-memory caches elsewhere (pages,
+ * pictures) are emptied through `onForgetArtifactPreviews`.
+ */
+let generation = 0;
+const forgetters = new Set<() => void>();
+
+export function sitePreviewGeneration(): number {
+  return generation;
+}
+
+/** Run `forget` whenever previews are forgotten (sign-out). */
+export function onForgetArtifactPreviews(forget: () => void): () => void {
+  forgetters.add(forget);
+  return () => forgetters.delete(forget);
+}
+
+/**
+ * Keep a captured preview under `name`, replacing earlier versions of the same
+ * Site (files starting with `replaces`). Returns null when the capture belongs
+ * to an earlier generation (the account signed out meanwhile).
+ */
+export function keepSitePreview(
+  name: string,
+  capturedUri: string,
+  options: { generation: number; replaces?: string | undefined },
+): string | null {
+  if (options.generation !== generation) {
+    try {
+      new File(capturedUri).delete();
+    } catch {
+      // A temporary file; the system clears it too.
+    }
+    return null;
+  }
   let uri = capturedUri;
   try {
     const folder = previewFolder();
     if (!folder.exists) folder.create({ intermediates: true, idempotent: true });
+    if (options.replaces) {
+      for (const entry of folder.list()) {
+        if (
+          entry instanceof File &&
+          entry.name !== name &&
+          entry.name.startsWith(options.replaces)
+        ) {
+          for (const [known, knownUri] of sitePreviews)
+            if (knownUri === entry.uri) sitePreviews.delete(known);
+          entry.delete();
+        }
+      }
+    }
     const target = new File(folder, name);
     new File(capturedUri).moveSync(target, { overwrite: true });
     uri = target.uri;
@@ -45,8 +93,10 @@ export function keepSitePreview(name: string, capturedUri: string): string {
 
 /** Forget every captured Site preview (sign-out: nothing of an account stays). */
 export function forgetArtifactPreviews(): void {
+  generation += 1;
   sitePreviews.clear();
   blankSitePreviews.clear();
+  for (const forget of forgetters) forget();
   try {
     const folder = previewFolder();
     if (folder.exists) folder.delete();

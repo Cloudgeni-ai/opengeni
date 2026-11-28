@@ -821,6 +821,7 @@ describe("editable artifact card picture route", () => {
   const STATE_HASH = `sha256:${"7".repeat(64)}`;
   const SVG =
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text>Q3 plan</text></svg>';
+  const TAG = `${STATE_HASH}.1`;
   const previewFixture = (fail: Error | null = null) => {
     const calls: Array<Parameters<EditableArtifactPreviewPort["preview"]>[0]> = [];
     const fixture = routeFixture({
@@ -828,13 +829,14 @@ describe("editable artifact card picture route", () => {
         preview: async (input) => {
           calls.push(input);
           if (fail) throw fail;
-          return { artifact: { stateHash: STATE_HASH }, svg: SVG };
+          return { tag: TAG, svg: input.knownTag === TAG ? null : SVG };
         },
       },
     });
     return { ...fixture, previewCalls: calls };
   };
-  const url = `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${ARTIFACT_ID}/preview?replicaId=${REPLICA_ID}`;
+  const plainUrl = `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${ARTIFACT_ID}/preview`;
+  const url = `${plainUrl}?replicaId=${REPLICA_ID}`;
 
   test("returns the picture as an inert SVG, revalidated by the head's state", async () => {
     const fixture = previewFixture();
@@ -847,21 +849,37 @@ describe("editable artifact card picture route", () => {
     expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("cache-control")).toBe("private, max-age=60");
-    expect(response.headers.get("etag")).toBe(`"${STATE_HASH}"`);
+    expect(response.headers.get("vary")).toBe("Authorization, Cookie");
+    expect(response.headers.get("etag")).toBe(`"${TAG}"`);
     expect(fixture.previewCalls[0]).toMatchObject({
       scope: { accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID },
       artifactId: ARTIFACT_ID,
       actor: { kind: "human", replicaId: REPLICA_ID },
     });
+    expect(fixture.previewCalls[0]?.knownTag).toBeUndefined();
 
-    const unchanged = await fixture.app.request(url, {
-      headers: {
-        authorization: await bearer({ permissions: ["artifacts:read"] }),
-        "if-none-match": `"${STATE_HASH}"`,
-      },
+    // A browser revalidates with the tag, weak or in a list.
+    for (const header of [`"${TAG}"`, `W/"${TAG}"`, `"${TAG}", "other"`]) {
+      const unchanged = await fixture.app.request(url, {
+        headers: {
+          authorization: await bearer({ permissions: ["artifacts:read"] }),
+          "if-none-match": header,
+        },
+      });
+      expect(unchanged.status).toBe(304);
+      expect(await unchanged.text()).toBe("");
+      expect(unchanged.headers.get("etag")).toBe(`"${TAG}"`);
+    }
+    expect(fixture.previewCalls.at(-1)?.knownTag).toBe(TAG);
+  });
+
+  test("needs no replica, so the URL stays the same and the browser can revalidate", async () => {
+    const fixture = previewFixture();
+    const response = await fixture.app.request(plainUrl, {
+      headers: { authorization: await bearer({ permissions: ["artifacts:read"] }) },
     });
-    expect(unchanged.status).toBe(304);
-    expect(await unchanged.text()).toBe("");
+    expect(response.status).toBe(200);
+    expect(fixture.previewCalls[0]).toMatchObject({ actor: { kind: "human" } });
   });
 
   test("needs artifact read access and maps denial and absence", async () => {

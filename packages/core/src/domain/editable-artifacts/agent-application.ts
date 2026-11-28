@@ -60,6 +60,7 @@ import {
 import type { EditableArtifactKernelState } from "./ports";
 import {
   EDITABLE_ARTIFACT_PREVIEW_LIMITS,
+  EDITABLE_ARTIFACT_PREVIEW_VERSION,
   documentPreviewSvg,
   presentationPreviewSvg,
   spreadsheetPreviewSvg,
@@ -391,14 +392,36 @@ export class EditableArtifactAgentApplication {
       scope: EditableArtifactScope;
       actor: EditableArtifactActor;
       artifactId: EditableArtifactId;
+      /** The tag of a picture the caller already has; when still current, no picture is drawn. */
+      knownTag?: string | undefined;
     }>,
-  ): Promise<Readonly<{ artifact: EditableArtifactAgentMetadata; svg: string }>> {
+  ): Promise<
+    Readonly<{ artifact: EditableArtifactAgentMetadata; tag: string; svg: string | null }>
+  > {
     const scope = editableArtifactScope(input.scope);
     validateEditableArtifactActor(input.actor);
+    const artifactId = editableArtifactId(input.artifactId);
+    const tagOf = (stateHash: string) => `${stateHash}.${EDITABLE_ARTIFACT_PREVIEW_VERSION}`;
+    // A picture the caller has is checked against the head's metadata alone
+    // (a read like any other), before anything is reconstructed.
+    if (input.knownTag) {
+      const artifact = await this.dependencies.domain.getArtifact({
+        scope,
+        actor: input.actor,
+        artifactId,
+      });
+      requireActive(artifact);
+      if (tagOf(artifact.stateHash) === input.knownTag)
+        return Object.freeze({
+          artifact: projectArtifact(artifact),
+          tag: input.knownTag,
+          svg: null,
+        });
+    }
     const state = await this.dependencies.domain.readCurrentKernelState({
       scope,
       actor: input.actor,
-      artifactId: editableArtifactId(input.artifactId),
+      artifactId,
     });
     requireActive(state.artifact);
     const query = async (request: EditableArtifactAgentQuery): Promise<unknown> =>
@@ -488,7 +511,11 @@ export class EditableArtifactAgentApplication {
         : null;
       svg = spreadsheetPreviewSvg(sheet, viewport);
     }
-    return Object.freeze({ artifact: projectArtifact(state.artifact), svg });
+    return Object.freeze({
+      artifact: projectArtifact(state.artifact),
+      tag: tagOf(state.artifact.stateHash),
+      svg,
+    });
   }
 
   async apply(

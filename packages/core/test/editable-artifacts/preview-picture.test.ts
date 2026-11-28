@@ -116,6 +116,30 @@ describe("artifact card pictures", () => {
     expect(svg).toContain('viewBox="0 0 2000 792"');
   });
 
+  test("a zero or negative font size is drawn at a readable size, top to bottom", () => {
+    const svg = documentPicture([
+      paragraph("First", {}, { fontSizePt: 0 }),
+      paragraph("Second", {}, { fontSizePt: -40 }),
+    ]);
+    expectInert(svg);
+    const ys = [...svg.matchAll(/<text[^>]*\sy="([\d.]+)"[^>]*font-size="([\d.]+)"/g)];
+    expect(ys).toHaveLength(2);
+    expect(Number(ys[0]![2])).toBe(6);
+    expect(Number(ys[1]![1])).toBeGreaterThan(Number(ys[0]![1]));
+  });
+
+  test("a picture's markup stays bounded however much the content draws", () => {
+    const svg = documentPicture(
+      Array.from({ length: 2_000 }, (_, index) =>
+        paragraph(`Line ${index}`, {}, { fontSizePt: 6 }),
+      ),
+      { widthMillipoints: 612_000n, heightMillipoints: 10n ** 9n },
+    );
+    expectInert(svg);
+    expect(texts(svg).length).toBeLessThanOrEqual(400);
+    expect(svg.length).toBeLessThan(220_000);
+  });
+
   test("a slide shows its background, shapes and text in slide units", () => {
     const emu = (pixels: number) => pixels * 9_525;
     const node = (id: string, content: unknown, extra: Record<string, unknown> = {}) => ({

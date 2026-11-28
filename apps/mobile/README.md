@@ -78,8 +78,8 @@ see [Sidebar layout](../../docs/sidebar-layout.md#clients).
 **Artifacts** lists the workspace's Sites, documents, presentations,
 spreadsheets, images and files, newest change first, as large cards with a
 preview: a Site's page drawn once per version at a desktop width with its own
-scripts (in an incognito web view that can call nothing), captured and cached
-on the device; a picture of a document's, spreadsheet's or presentation's first
+scripts (in an incognito web view with no bridge that can't call for data),
+captured and cached on the device; a picture of a document's, spreadsheet's or presentation's first
 page, sheet or slide; an image's own pixels; the type glyph otherwise, and for a
 page that draws nothing. Search and type chips filter it; pull down to refresh.
 

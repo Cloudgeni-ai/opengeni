@@ -39,6 +39,16 @@ export const EDITABLE_ARTIFACT_PREVIEW_LIMITS = Object.freeze({
 
 const FONT = "Inter, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 const MAX_TEXT_ELEMENTS = 400;
+/** Drawn parts one slide shape (a table, a long text box) may contribute. */
+const MAX_NODE_PARTS = 200;
+/** The picture's markup stops growing here, whatever the content. */
+const MAX_BODY_CHARS = 200_000;
+
+/**
+ * The drawing's version. It is part of a picture's cache tag, so pictures
+ * drawn by an older renderer are redrawn after a deploy that changes it.
+ */
+export const EDITABLE_ARTIFACT_PREVIEW_VERSION = 1;
 
 /** XML 1.0 text: escaped, without characters XML cannot carry. */
 export function xmlText(value: string, maxLength = 400): string {
@@ -132,11 +142,18 @@ function svg(
   body: string[],
   align: "xMidYMin" | "xMinYMin" = "xMidYMin",
 ): string {
+  let length = 0;
+  let kept = 0;
+  for (const part of body) {
+    if (kept >= MAX_TEXT_ELEMENTS || length + part.length > MAX_BODY_CHARS) break;
+    length += part.length;
+    kept += 1;
+  }
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${num(width)} ${num(height)}" ` +
     `width="${num(width)}" height="${num(height)}" preserveAspectRatio="${align} slice">` +
     `<rect width="${num(width)}" height="${num(height)}" fill="${background}"/>` +
-    body.join("") +
+    body.slice(0, kept).join("") +
     `</svg>`
   );
 }
@@ -202,7 +219,9 @@ export function documentPreviewSvg(
       const text = runsText(item.runs).trim();
       const first = item.runs.find((run) => run.text.trim())?.style ?? {};
       const level = item.style.headingLevel;
-      const size = level ? (HEADING_SIZE[level] ?? 11) : Math.min(36, first.fontSizePt ?? 11);
+      const size = level
+        ? (HEADING_SIZE[level] ?? 11)
+        : Math.min(36, Math.max(6, Number.isFinite(first.fontSizePt) ? first.fontSizePt! : 11));
       const weight = level || first.bold ? 650 : 400;
       const color = hexColor(first.color, level ? "#111111" : "#2a2a2a");
       const list = item.style.list;
@@ -505,8 +524,8 @@ function presentationNode(
     );
   out.push(
     transforms.length
-      ? `<g transform="${transforms.join(" ")}">${parts.join("")}</g>`
-      : parts.join(""),
+      ? `<g transform="${transforms.join(" ")}">${parts.slice(0, MAX_NODE_PARTS).join("")}</g>`
+      : parts.slice(0, MAX_NODE_PARTS).join(""),
   );
 }
 

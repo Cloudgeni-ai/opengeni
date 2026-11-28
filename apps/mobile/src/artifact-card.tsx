@@ -14,18 +14,24 @@ import {
 } from "@opengeni/sdk/site-preview";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Image, Platform, Pressable, Text, View } from "react-native";
-import { SvgXml } from "react-native-svg";
+import { parse, SvgXml } from "react-native-svg";
 import { captureRef } from "react-native-view-shot";
 import { WebView } from "react-native-webview";
-import { newReplicaId } from "@/artifact-library";
 import {
   ARTIFACT_KIND_ICON,
   ARTIFACT_KIND_LABEL,
   editedLabel,
   isEditableKind,
   sitePreviewFileName,
+  sitePreviewFilePrefix,
 } from "@/artifacts";
-import { blankSitePreviews, keepSitePreview, storedSitePreview } from "@/site-preview-store";
+import {
+  blankSitePreviews,
+  keepSitePreview,
+  onForgetArtifactPreviews,
+  sitePreviewGeneration,
+  storedSitePreview,
+} from "@/site-preview-store";
 
 export type ArtifactThumbnailClient = Pick<
   ChatClient<OpenGeniClient>,
@@ -37,6 +43,15 @@ const siteHtml = new Map<string, Promise<string>>();
 const imageUrls = new Map<string, Promise<string>>();
 const editablePictures = new Map<string, Promise<string>>();
 const CACHE_LIMIT = 48;
+// Nothing of a signed-out account stays in memory either.
+onForgetArtifactPreviews(() => {
+  siteHtml.clear();
+  imageUrls.clear();
+  editablePictures.clear();
+  failedPictures.clear();
+});
+/* Pictures that couldn't be drawn keep their card's glyph. */
+const failedPictures = new Set<string>();
 
 function cached<T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>) {
   let request = cache.get(key);
@@ -116,6 +131,7 @@ function useSitePreviewSlot(): { granted: boolean; release: () => void } {
 function SiteRender({
   html,
   name,
+  replaces,
   scheme,
   onCaptured,
   onBlank,
@@ -123,6 +139,8 @@ function SiteRender({
 }: {
   html: string;
   name: string;
+  /** The start of this Site's earlier previews, replaced by this one. */
+  replaces: string;
   scheme: "light" | "dark";
   onCaptured: (uri: string) => void;
   onBlank: () => void;
@@ -132,6 +150,7 @@ function SiteRender({
   const [box, setBox] = useState<{ width: number; height: number } | null>(null);
   const { granted: slotGranted, release: releaseSlot } = useSitePreviewSlot();
   const settledRef = useRef(false);
+  const generation = useMemo(() => sitePreviewGeneration(), []);
   const document = useMemo(() => sitePreviewDocument(html, { theme: scheme }), [html, scheme]);
   const settle = useCallback(
     (painted: boolean) => {
@@ -148,7 +167,8 @@ function SiteRender({
         captureRef(shotRef, { format: "jpg", quality: 0.85, result: "tmpfile" }).then(
           (uri) => {
             releaseSlot();
-            onCaptured(keepSitePreview(name, uri));
+            const kept = keepSitePreview(name, uri, { generation, replaces });
+            if (kept) onCaptured(kept);
           },
           () => {
             releaseSlot();
@@ -157,13 +177,15 @@ function SiteRender({
         );
       }, 120);
     },
-    [name, onBlank, onCaptured, onLive, releaseSlot],
+    [generation, name, onBlank, onCaptured, onLive, releaseSlot, replaces],
   );
+  // The page's time runs from when its web view is laid out and mounted.
+  const mounted = slotGranted && box !== null;
   useEffect(() => {
-    if (!slotGranted) return;
+    if (!mounted) return;
     const timer = setTimeout(() => settle(false), SITE_PREVIEW_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [settle, slotGranted]);
+  }, [settle, mounted]);
   const scale = box ? box.width / SITE_PREVIEW_WIDTH : 0;
   return (
     <View
@@ -262,7 +284,7 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
   const theme = useNativeTimelineTheme();
   const previewName =
     item.kind === "site" && item.versionId
-      ? sitePreviewFileName(workspaceId, item.versionId, theme.scheme)
+      ? sitePreviewFileName(workspaceId, item.id, item.versionId, theme.scheme)
       : null;
   const stored = useMemo(
     () => (previewName ? storedSitePreview(previewName) : null),
@@ -295,9 +317,16 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
     : null;
   const picture = useLoaded(pictureKey, () =>
     cached(editablePictures, pictureKey!, () =>
-      client.getEditableArtifactPreview(workspaceId, item.id, { replicaId: newReplicaId() }),
+      client.getEditableArtifactPreview(workspaceId, item.id),
     ),
   );
+  const [pictureFailed, setPictureFailed] = useState<string | null>(null);
+  const onPictureFailed = useCallback(() => {
+    if (!pictureKey) return;
+    failedPictures.add(pictureKey);
+    setPictureFailed(pictureKey);
+  }, [pictureKey]);
+  const pictureShown = useCallback(() => setPainted(true), []);
   const [painted, setPainted] = useState(false);
   const onCaptured = useCallback(
     (uri: string) => previewName && setSite({ name: previewName, uri }),
@@ -326,6 +355,7 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
       <SiteRender
         html={html}
         name={previewName}
+        replaces={sitePreviewFilePrefix(workspaceId, item.id)}
         scheme={theme.scheme}
         onCaptured={onCaptured}
         onBlank={onBlank}
@@ -341,8 +371,13 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
         style={{ flex: 1, opacity: painted ? 1 : 0 }}
       />
     );
-  } else if (picture) {
-    still = <EditablePicture svg={picture} onShown={() => setPainted(true)} />;
+  } else if (
+    picture &&
+    pictureKey &&
+    pictureFailed !== pictureKey &&
+    !failedPictures.has(pictureKey)
+  ) {
+    still = <EditablePicture svg={picture} onShown={pictureShown} onFailed={onPictureFailed} />;
   }
   return (
     <View
@@ -360,9 +395,28 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
   );
 });
 
-/** A document's, presentation's or spreadsheet's first page as the server drew it. */
-function EditablePicture({ svg, onShown }: { svg: string; onShown: () => void }) {
-  useEffect(() => onShown(), [onShown]);
+/**
+ * A document's, presentation's or spreadsheet's first page as the server drew
+ * it. A picture that doesn't parse leaves the glyph in place.
+ */
+function EditablePicture({
+  svg,
+  onShown,
+  onFailed,
+}: {
+  svg: string;
+  onShown: () => void;
+  onFailed: () => void;
+}) {
+  const drawable = useMemo(() => {
+    try {
+      return parse(svg) !== null;
+    } catch {
+      return false;
+    }
+  }, [svg]);
+  useEffect(() => (drawable ? onShown() : onFailed()), [drawable, onFailed, onShown]);
+  if (!drawable) return null;
   return (
     <View style={{ flex: 1, backgroundColor: "#ffffff" }}>
       <SvgXml xml={svg} width="100%" height="100%" />

@@ -10682,16 +10682,17 @@ export class OpenGeniClient {
   }
 
   /** A static SVG picture of the artifact's current head (first page, slide or
-   * sheet), for library thumbnails. Shapes and text only; no scripts. */
+   * sheet), for library thumbnails. Shapes and text only; no scripts. The URL
+   * is stable, so a browser revalidates it by ETag (a 304 is a cheap read). */
   async getEditableArtifactPreview(
     workspaceId: string,
     artifactId: string,
-    options: OpenGeniRequestOptions & Readonly<{ replicaId: string }>,
+    options: OpenGeniRequestOptions = {},
   ): Promise<string> {
     const response = await this.requestResponse(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/preview`,
-      { replicaId: options.replicaId },
+      undefined,
       { ...options, accept: "image/svg+xml" },
     );
     return await response.text();

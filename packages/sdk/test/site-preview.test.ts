@@ -17,7 +17,7 @@ const scriptOf = (document: string) => {
 /** Runs the preview script against a stand-in window and returns what it posts. */
 function runPreviewScript(
   document: string,
-  page: { text: string; media?: boolean; background?: string },
+  page: { text: string; media?: boolean; background?: string; box?: string },
 ) {
   const posted: unknown[] = [];
   const timers: Array<() => void> = [];
@@ -27,11 +27,14 @@ function runPreviewScript(
     style: {} as Record<string, string>,
     setAttribute: (name: string, value: string) => (fakeGlobal[name] = value),
   };
+  const body = { innerText: page.text };
+  const box = { box: page.box };
   const fakeDocument = {
     readyState: "loading",
     documentElement: root,
-    body: { innerText: page.text },
+    body,
     querySelector: () => (page.media ? {} : null),
+    elementsFromPoint: () => (page.box ? [box, body, root] : [body, root]),
   };
   new Function(
     "globalThis",
@@ -41,6 +44,8 @@ function runPreviewScript(
     "getComputedStyle",
     "window",
     "parent",
+    "innerWidth",
+    "innerHeight",
     scriptOf(document),
   )(
     fakeGlobal,
@@ -51,10 +56,16 @@ function runPreviewScript(
       backgroundColor:
         element === root
           ? (root.style["backgroundColor"] ?? "rgba(0, 0, 0, 0)")
-          : (page.background ?? "rgba(0, 0, 0, 0)"),
+          : element === box
+            ? page.box
+            : (page.background ?? "rgba(0, 0, 0, 0)"),
+      backgroundImage: "none",
+      borderTopWidth: "0px",
     }),
     {},
     { postMessage: (message: unknown) => posted.push(message) },
+    1024,
+    768,
   );
   return {
     fakeGlobal,
@@ -112,6 +123,23 @@ describe("Site card preview document", () => {
     expect(document).toContain('<h1 class="og-title">Issue tracker</h1>');
   });
 
+  test("drops the Site client however it is tagged, and any refresh", () => {
+    const document = sitePreviewDocument(
+      [
+        '<meta http-equiv="refresh" content="0;url=https://example.com/">',
+        "<META HTTP-EQUIV=Refresh CONTENT=5>",
+        '<script defer type="module" src="https://site.example/__opengeni/site-tools/client.js?v=2"></script>',
+        "<script src=/__opengeni/site-tools/client.js></script>",
+        '<script src="/app.js"></script>',
+        '<meta name="viewport" content="width=device-width">',
+      ].join(""),
+    );
+    expect(document).not.toContain("site-tools/client.js");
+    expect(document).not.toMatch(/refresh/i);
+    expect(document).toContain('<script src="/app.js"></script>');
+    expect(document).toContain('<meta name="viewport"');
+  });
+
   test("sets the viewer's theme for the Opengeni look", () => {
     const run = runPreviewScript(sitePreviewDocument("<p>x</p>", { theme: "dark" }), { text: "x" });
     expect(run.fakeGlobal["data-og-theme"]).toBe("dark");
@@ -129,9 +157,13 @@ describe("Site card preview document", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(settled).toBe(false);
-    // A Site that defines its own client may replace the stand-in.
-    const descriptor = Object.getOwnPropertyDescriptor(run.fakeGlobal, "createOpenGeniSiteClient");
-    expect(descriptor).toMatchObject({ configurable: true, writable: true });
+    // The real client, loaded anyway, can't replace the stand-in.
+    (run.fakeGlobal as { createOpenGeniSiteClient: unknown }).createOpenGeniSiteClient = () =>
+      "real";
+    expect(() =>
+      Object.defineProperty(run.fakeGlobal, "createOpenGeniSiteClient", { value: () => "real" }),
+    ).toThrow();
+    expect((run.fakeGlobal["createOpenGeniSiteClient"] as () => unknown)()).not.toBe("real");
   });
 
   test.each([
@@ -140,6 +172,12 @@ describe("Site card preview document", () => {
     [{ text: "", background: "rgb(17, 17, 17)" }, true],
     [{ text: "" }, false],
     [{ text: "", background: "rgb(255, 255, 255)" }, false],
+    // Cards and panels drawn with CSS alone, on a white page.
+    [{ text: "", box: "rgb(37, 99, 235)" }, true],
+    [{ text: "", box: "rgba(0, 0, 0, 0)" }, false],
+    // An app still waiting on the stand-in client isn't a picture.
+    [{ text: "Loading…", background: "rgb(17, 17, 17)" }, false],
+    [{ text: "Loading issues: 12 open" }, true],
   ])("reports once whether the page painted: %o", async (page, painted) => {
     const run = runPreviewScript(sitePreviewDocument("<div id=app></div>"), page);
     await run.settle();

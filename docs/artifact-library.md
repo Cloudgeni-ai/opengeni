@@ -216,31 +216,41 @@ focus. Images show their own pixels. A Site's card renders its published HTML
 (`getWorkspaceArtifactHtml`) as it looks when opened: laid out 1024 px wide and
 scaled into the card, from the preview document of `@opengeni/sdk/site-preview`.
 The page's own scripts run, so apps drawn by script and styled from a CDN show
-up, but only in the HTML frame host's opaque-origin frame with
+up (public scripts, styles, fonts and images may load), but only in the HTML
+frame host's opaque-origin frame with
 `sandbox="allow-scripts"` (no same-origin, forms, popups or navigation), and the
 document's first element is `HTML_FRAME_PREVIEW_POLICY`: `connect-src 'none'`
 (no fetch, XHR, WebSocket or beacon), `frame-src 'none'`, `form-action 'none'`.
-There is no Site bridge: the Site client script is removed and
+A `<meta>` refresh is removed, and a page that navigates itself away after
+reporting is dropped for the glyph. There is no Site bridge: the Site client
+script is removed (however it is tagged) and
 `createOpenGeniSiteClient` is a stand-in whose calls never settle, so a card
 reaches no workspace data, tools, AI or credentials and an app shows its loading
 state. The Opengeni look (`/__opengeni/ui.css`) and charts are inlined. Once
 loaded and settled the page reports whether it painted anything
 (`opengeni.site-preview.painted`); until then, and for a page that stays blank
-or never reports (10 s), the card keeps its type glyph. At most three previews
-load at a time. Without a frame host the card falls back to a script-free
-`srcdoc` still (`HTML_FRAME_STILL_POLICY`, empty sandbox).
+or never reports (10 s from when the frame mounts), the card keeps its type
+glyph. At most three previews load at a time, and a frame is unmounted when its
+card leaves the viewport (a page found blank isn't run again). Without a frame
+host the same preview document runs in a `srcdoc` frame with the same
+`sandbox="allow-scripts"`, as a Site's own viewer does.
 
 Documents, spreadsheets and presentations show a picture of their first page,
-sheet or slide: `GET /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/preview?replicaId=`
+sheet or slide: `GET /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/preview`
 (`artifacts:read`, authorized like opening it) returns an SVG the API draws from
 bounded kernel queries of the current head (`preview-picture.ts` in core). It
 holds only shapes and escaped text, is shown as an `<img>`, and is served with
 `Content-Security-Policy: default-src 'none'; sandbox`, `nosniff`, a 60 s
-private cache and the head's state hash as its `ETag`. A card that cannot get
-one keeps its glyph. Other types show their type glyph (and a file's extension).
+private cache and `Vary: Authorization, Cookie`. Its `ETag` is the head's state
+hash and the drawing's version; a matching `If-None-Match` (weak or in a list)
+is answered 304 from the artifact's metadata, before anything is reconstructed.
+The URL is stable, so browsers revalidate it, and the web library requests at
+most four pictures at a time. A card that cannot get one, or gets one that
+doesn't draw, keeps its glyph. Other types show their type glyph (and a file's extension).
 The iOS app draws Site previews the same way in an incognito web view, captures
-each once per version and theme, and caches the image on the device (cleared at
-sign-out).
+each once per version and theme, and caches the image on the device, replacing
+the Site's earlier versions. Sign-out deletes the images, empties the in-memory
+page and picture caches, and discards captures still in flight.
 Previews load only near the viewport. A Gallery | List toggle in the toolbar
 switches to flat rows and is remembered in the browser
 (`opengeni:artifact-library:view:v1`). Both views keep the type tabs, title

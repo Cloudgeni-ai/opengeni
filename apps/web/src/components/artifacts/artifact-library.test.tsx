@@ -16,7 +16,10 @@ import {
   filterArtifactCatalog,
 } from "@opengeni/react/app/lib/artifact-catalog";
 import { configureContentHosting } from "@opengeni/react/app/lib/content-hosting";
-import { SITE_PREVIEW_PAINTED_MESSAGE } from "@opengeni/sdk/site-preview";
+import {
+  HTML_FRAME_PREVIEW_POLICY,
+  SITE_PREVIEW_PAINTED_MESSAGE,
+} from "@opengeni/sdk/site-preview";
 
 // The client the cards read through; a test sets the calls it needs.
 const testClient: Record<string, unknown> = {};
@@ -32,7 +35,6 @@ mock.module("@opengeni/react/app/app-context", () => ({
 }));
 let ArtifactLibrary: typeof import("@opengeni/react/app/components/artifacts/artifact-library").ArtifactLibrary;
 let ArtifactThumbnail: typeof import("@opengeni/react/app/components/artifacts/artifact-library").ArtifactThumbnail;
-let siteStillDocument: typeof import("@opengeni/react/app/components/artifacts/artifact-library").siteStillDocument;
 
 let ownsDom = false;
 let previousActEnvironment: PropertyDescriptor | undefined;
@@ -43,7 +45,7 @@ beforeAll(async () => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
-  ({ ArtifactLibrary, ArtifactThumbnail, siteStillDocument } =
+  ({ ArtifactLibrary, ArtifactThumbnail } =
     await import("@opengeni/react/app/components/artifacts/artifact-library"));
 });
 
@@ -177,15 +179,16 @@ async function renderInRouter(root: ReturnType<typeof createRoot>, node: () => R
   });
 }
 
-test("an app still blocks scripts and the network before any of the app's markup", () => {
-  const still = siteStillDocument(
-    "<html><head><script>alert(1)</script></head><body>Hi</body></html>",
-  );
-  expect(still.startsWith('<!doctype html><meta http-equiv="Content-Security-Policy"')).toBe(true);
-  expect(still).toContain("default-src 'none'");
-  expect(still).not.toContain("script-src");
-  expect(still.indexOf("Content-Security-Policy")).toBeLessThan(still.indexOf("<script>"));
-});
+/** Observers of the cards in view, so a test can scroll them away. */
+const cardObservers: Array<{ callback: IntersectionObserverCallback; observer: unknown }> = [];
+const scrollCardsAway = () =>
+  act(async () => {
+    for (const { callback, observer } of cardObservers.splice(0))
+      callback(
+        [{ isIntersecting: false } as IntersectionObserverEntry],
+        observer as IntersectionObserver,
+      );
+  });
 
 /** Cards in view at once, with a measurable box, for the length of `run`. */
 async function withVisibleCards(run: () => Promise<void>) {
@@ -197,12 +200,16 @@ async function withVisibleCards(run: () => Promise<void>) {
     value: class {
       constructor(private readonly callback: IntersectionObserverCallback) {}
       observe() {
+        cardObservers.push({ callback: this.callback, observer: this });
         this.callback(
           [{ isIntersecting: true } as IntersectionObserverEntry],
           this as unknown as IntersectionObserver,
         );
       }
-      disconnect() {}
+      disconnect() {
+        const index = cardObservers.findIndex((entry) => entry.observer === this);
+        if (index >= 0) cardObservers.splice(index, 1);
+      }
     },
   });
   Object.defineProperty(HTMLElement.prototype, "clientWidth", {
@@ -291,6 +298,76 @@ test("an app's card runs the page in a scripts-only frame and shows it once it p
       await report("Deployments", false);
       expect(frame("Deployments")).toBeNull();
       expect(card("Deployments").querySelector("svg")).not.toBeNull();
+      // A painted page that later navigates itself away is dropped for the glyph.
+      await act(async () => {
+        frame("Issue tracker")!.dispatchEvent(new Event("load"));
+      });
+      expect(frame("Issue tracker")).toBeNull();
+      expect(card("Issue tracker").querySelector("svg")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});
+
+test("a Site's live frame runs only while its card is near the viewport", async () => {
+  await withVisibleCards(async () => {
+    configureContentHosting({ htmlFrameHost: "https://og.example.site" });
+    testClient["getWorkspaceArtifactHtml"] = async () => "<h1>Dashboard</h1>";
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await renderInRouter(root, () => (
+        <ArtifactLibrary
+          workspaceId="workspace"
+          items={[{ ...items[0]!, id: "dash", title: "Dashboard", versionId: "d1" }]}
+          filters={defaultArtifactFilters}
+          onFiltersChange={() => {}}
+          loading={false}
+          onRetry={() => {}}
+        />
+      ));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(container.querySelector('iframe[title="Preview of Dashboard"]')).not.toBeNull();
+      await scrollCardsAway();
+      expect(container.querySelector('iframe[title="Preview of Dashboard"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});
+
+test("without a frame host, a Site's card runs the same reporting preview in a scripts-only srcdoc frame", async () => {
+  await withVisibleCards(async () => {
+    testClient["getWorkspaceArtifactHtml"] = async () =>
+      '<div id="app"></div><script>app.textContent="Open issues"</script>';
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await renderInRouter(root, () => (
+        <ArtifactLibrary
+          workspaceId="workspace"
+          items={[{ ...items[0]!, id: "issues", title: "Issue tracker", versionId: "i1" }]}
+          filters={defaultArtifactFilters}
+          onFiltersChange={() => {}}
+          loading={false}
+          onRetry={() => {}}
+        />
+      ));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      const frame = container.querySelector<HTMLIFrameElement>(
+        'iframe[title="Preview of Issue tracker"]',
+      )!;
+      expect(frame.getAttribute("sandbox")).toBe("allow-scripts");
+      const srcdoc = frame.getAttribute("srcdoc")!;
+      expect(srcdoc).toStartWith(
+        `<!doctype html><meta http-equiv="Content-Security-Policy" content="${HTML_FRAME_PREVIEW_POLICY}">`,
+      );
+      expect(srcdoc).toContain(SITE_PREVIEW_PAINTED_MESSAGE);
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -300,13 +377,13 @@ test("an app's card runs the page in a scripts-only frame and shows it once it p
 
 test("a document's card shows a picture of its first page, and its glyph if there is none", async () => {
   await withVisibleCards(async () => {
-    const requested: Array<{ id: string; replicaId: string }> = [];
+    const requested: Array<{ id: string; options: unknown }> = [];
     testClient["getEditableArtifactPreview"] = async (
       _workspaceId: string,
       id: string,
-      options: { replicaId: string },
+      options?: unknown,
     ) => {
-      requested.push({ id, replicaId: options.replicaId });
+      requested.push({ id, options });
       if (id === "broken") throw new Error("unavailable");
       return '<svg xmlns="http://www.w3.org/2000/svg"><text>Project brief</text></svg>';
     };
@@ -330,7 +407,8 @@ test("a document's card shows a picture of its first page, and its glyph if ther
       ));
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
       expect(requested.map((request) => request.id).sort()).toEqual(["brief", "broken"]);
-      for (const request of requested) expect(request.replicaId).toMatch(/^[0-9a-f]{16}$/);
+      // A stable address (no per-request replica), so the browser revalidates by ETag.
+      for (const request of requested) expect(request.options).toBeUndefined();
       const pictures = container.querySelectorAll<HTMLImageElement>("img");
       expect(pictures).toHaveLength(1);
       const src = pictures[0]!.getAttribute("src")!;

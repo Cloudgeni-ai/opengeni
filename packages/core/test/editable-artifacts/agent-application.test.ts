@@ -285,11 +285,30 @@ describe("editable artifact agent application", () => {
       artifactId: document.id as never,
     });
     expect(picture.artifact).toMatchObject({ id: document.id, stateHash: document.stateHash });
+    expect(picture.tag).toBe(`${document.stateHash}.1`);
     expect(picture.svg).toContain(">Launch plan &lt;draft&gt;</text>");
     // A summary for the page, then one bounded body read.
     expect(queries).toHaveLength(2);
     expect(recorded).toBe(0);
     expect(touched).toBe(0);
+    // A caller holding the current picture gets no new one, and nothing is reconstructed.
+    const unchanged = await application.preview({
+      scope,
+      actor: humanActor,
+      artifactId: document.id as never,
+      knownTag: picture.tag,
+    });
+    expect(unchanged).toMatchObject({ tag: picture.tag, svg: null });
+    expect(queries).toHaveLength(2);
+    // A picture from another state or drawing version is drawn again.
+    const stale = await application.preview({
+      scope,
+      actor: humanActor,
+      artifactId: document.id as never,
+      knownTag: `${document.stateHash}.0`,
+    });
+    expect(stale.svg).toContain("Launch plan");
+    expect(queries).toHaveLength(4);
   });
   test("routes direct commands through the authoritative domain and recovers a lost response", async () => {
     const fixture = await artifactFixture();

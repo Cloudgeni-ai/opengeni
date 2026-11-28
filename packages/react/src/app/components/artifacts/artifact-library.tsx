@@ -57,15 +57,12 @@ import {
   type ToolbarFilterValue,
 } from "../../../ui/toolbar";
 import { useAppContext } from "../../app-context";
-import { HTML_FRAME_STILL_POLICY } from "@opengeni/contracts/html-frame-host";
 import {
   SITE_PREVIEW_TIMEOUT_MS,
   SITE_PREVIEW_WIDTH,
   sitePreviewDocument,
   sitePreviewPainted,
 } from "@opengeni/sdk/site-preview";
-import { createEditableArtifactReplicaId } from "@opengeni/sdk/editable-artifacts";
-import { resolveSiteUiStylesheet } from "@opengeni/sdk/site-ui";
 import { useContentHosting } from "../../../lib/content-hosting";
 import { htmlFrameHostSrc, useHtmlFrameHost } from "../../../components/artifacts/html-frame-host";
 import { hasWorkspacePermission } from "../../lib/permissions";
@@ -201,9 +198,12 @@ function useLibraryFileAudience(workspaceId: string, item: ArtifactCatalogItem) 
 export function ArtifactThumbnail({
   children,
   placeholder = IMAGE_GLYPH,
+  whileInView = false,
 }: {
   children: ReactNode;
   placeholder?: ReactNode | undefined;
+  /** Unmount the children again once they leave the viewport (live Site frames). */
+  whileInView?: boolean | undefined;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
@@ -216,16 +216,18 @@ export function ArtifactThumbnail({
     }
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
+        const entry = entries.at(-1);
+        if (!entry) return;
+        if (entry.isIntersecting) {
           setVisible(true);
-          observer.disconnect();
-        }
+          if (!whileInView) observer.disconnect();
+        } else if (whileInView) setVisible(false);
       },
       { rootMargin: "200px 0px" },
     );
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [whileInView]);
   return (
     <div ref={host} className="flex h-full w-full items-center justify-center">
       {visible ? children : placeholder}
@@ -623,22 +625,11 @@ export function ArtifactRow({
  * painted anything; until it does the card keeps its type glyph, and a page
  * that stays blank (or never reports) leaves the glyph in place.
  *
- * Without a frame host, a srcdoc frame shows a still instead: an empty
- * sandbox (no scripts, forms, popups or same-origin) and a policy that blocks
- * every network request. The first element of the document is the policy, so
- * it always lands in <head> whatever the Site's own markup. The frame also
- * requires the same policy from outside (the `csp` attribute, CSP Embedded
- * Enforcement), so browsers that support it enforce the policy on the srcdoc
- * document before any of its markup is parsed or speculatively preloaded.
+ * Without a frame host, the same preview document runs in a srcdoc frame
+ * with the same sandbox (scripts only, opaque origin), as a Site's own
+ * viewer does. A page that navigates itself away is dropped back to the
+ * glyph. Live frames run only while their card is near the viewport.
  */
-const SITE_STILL_POLICY = HTML_FRAME_STILL_POLICY;
-// `csp` is a standard iframe attribute React passes through but doesn't type.
-const SITE_STILL_FRAME_POLICY = { csp: SITE_STILL_POLICY };
-export function siteStillDocument(html: string) {
-  // The opt-in Opengeni look is inlined (the policy allows inline styles), so
-  // a still is styled like the page instead of falling back to bare serif text.
-  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${SITE_STILL_POLICY}"><meta name="color-scheme" content="light">${resolveSiteUiStylesheet(html)}`;
-}
 
 // Display HTML per published version, shared across remounts (tabs, search).
 const siteHtmlCache = new Map<string, Promise<string>>();
@@ -690,6 +681,26 @@ function releaseSitePreviewSlot() {
   else sitePreviewsLoading = Math.max(0, sitePreviewsLoading - 1);
 }
 
+/* Pictures are drawn by the API a few at a time too. */
+const PICTURE_REQUEST_SLOTS = 4;
+let pictureRequestsRunning = 0;
+const pictureRequestQueue: Array<() => void> = [];
+
+function limitPictureRequest<T>(request: () => Promise<T>): Promise<T> {
+  return new Promise<void>((resolve) => {
+    if (pictureRequestsRunning < PICTURE_REQUEST_SLOTS) {
+      pictureRequestsRunning += 1;
+      resolve();
+    } else pictureRequestQueue.push(resolve);
+  })
+    .then(request)
+    .finally(() => {
+      const next = pictureRequestQueue.shift();
+      if (next) next();
+      else pictureRequestsRunning -= 1;
+    });
+}
+
 function useSitePreviewSlot(enabled: boolean): { granted: boolean; release: () => void } {
   const [granted, setGranted] = useState(false);
   const heldRef = useRef(false);
@@ -721,6 +732,7 @@ function useSitePreviewSlot(enabled: boolean): { granted: boolean; release: () =
 }
 
 type SitePreviewState = "loading" | "painted" | "blank";
+const blankSitePreviews = new Set<string>();
 
 function SiteStill({
   workspaceId,
@@ -734,7 +746,17 @@ function SiteStill({
   const html = useSiteHtml(workspaceId, item);
   const [preview, setPreview] = useState<{ html: string; state: SitePreviewState } | null>(null);
   if (!html) return placeholder;
-  const state = preview?.html === html ? preview.state : "loading";
+  // A page found blank isn't run again when its card scrolls back into view.
+  const state =
+    preview?.html === html ? preview.state : blankSitePreviews.has(html) ? "blank" : "loading";
+  const finish = (next: SitePreviewState, remember = true) => {
+    if (next === "blank" && remember) {
+      blankSitePreviews.add(html);
+      if (blankSitePreviews.size > SITE_HTML_CACHE_LIMIT)
+        blankSitePreviews.delete(blankSitePreviews.values().next().value!);
+    }
+    setPreview({ html, state: next });
+  };
   return (
     <>
       {state === "painted" ? null : placeholder}
@@ -751,7 +773,8 @@ function SiteStill({
             key={html}
             title={`Preview of ${item.title}`}
             html={html}
-            onSettled={(painted) => setPreview({ html, state: painted ? "painted" : "blank" })}
+            onSettled={(painted, reported) => finish(painted ? "painted" : "blank", reported)}
+            onLeft={() => finish("blank")}
           />
         </div>
       )}
@@ -790,10 +813,14 @@ function SiteStillFrame({
   title,
   html,
   onSettled,
+  onLeft,
 }: {
   title: string;
   html: string;
-  onSettled: (painted: boolean) => void;
+  /** `reported` is false when the page never said, so it may be tried again later. */
+  onSettled: (painted: boolean, reported: boolean) => void;
+  /** The page navigated itself away: drop it. */
+  onLeft: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
@@ -804,45 +831,54 @@ function SiteStillFrame({
   const [theme, setTheme] = useState<"light" | "dark" | null>(null);
   useEffect(() => setTheme(surroundingTheme(hostRef.current)), []);
   const documentHtml = useMemo(
-    () => (live && theme ? sitePreviewDocument(html, { theme }) : html),
-    [html, live, theme],
+    () => (theme ? sitePreviewDocument(html, { theme }) : html),
+    [html, theme],
   );
   const { granted: slotGranted, release: releaseSlot } = useSitePreviewSlot(true);
   const fit = useSitePreviewScale(hostRef);
   const onSettledRef = useRef(onSettled);
   onSettledRef.current = onSettled;
+  const onLeftRef = useRef(onLeft);
+  onLeftRef.current = onLeft;
   const settledRef = useRef(false);
   const settle = useCallback(
-    (painted: boolean) => {
+    (painted: boolean, reported: boolean) => {
       if (settledRef.current) return;
       settledRef.current = true;
       releaseSlot();
-      onSettledRef.current(painted);
+      onSettledRef.current(painted, reported);
     },
     [releaseSlot],
   );
-  const frameHost = useHtmlFrameHost({
+  useHtmlFrameHost({
     frameRef,
     enabled: live && slotGranted && theme !== null,
     html: documentHtml,
     mode: "interactive",
   });
+  // The page reports a while after its own load, so a load after the report
+  // is the page navigating itself away.
+  const onFrameLoad = () => {
+    if (settledRef.current) onLeftRef.current();
+  };
+  // The frame is mounted once its box is measured; its time runs from then.
+  const mounted = fit !== null && slotGranted && theme !== null;
   useEffect(() => {
-    if (!live || !slotGranted) return;
+    if (!mounted) return;
     const receive = (event: MessageEvent) => {
       // Only this card's own opaque-origin frame can report.
       const frameWindow = frameRef.current?.contentWindow;
       if (!frameWindow || event.source !== frameWindow || event.origin !== "null") return;
       const painted = sitePreviewPainted(event.data);
-      if (painted !== null) settle(painted);
+      if (painted !== null) settle(painted, true);
     };
     window.addEventListener("message", receive);
-    const timer = setTimeout(() => settle(false), SITE_PREVIEW_TIMEOUT_MS);
+    const timer = setTimeout(() => settle(false, false), SITE_PREVIEW_TIMEOUT_MS);
     return () => {
       window.removeEventListener("message", receive);
       clearTimeout(timer);
     };
-  }, [live, slotGranted, settle]);
+  }, [mounted, settle]);
   const frameStyle = fit
     ? {
         width: `${SITE_PREVIEW_WIDTH}px`,
@@ -859,7 +895,7 @@ function SiteStillFrame({
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
           src={frameHostSrc}
-          onLoad={frameHost.onFrameLoad}
+          onLoad={onFrameLoad}
           tabIndex={-1}
           aria-hidden
           className={SITE_STILL_FRAME_CLASS}
@@ -868,15 +904,16 @@ function SiteStillFrame({
         />
       ) : (
         <iframe
+          ref={frameRef}
           title={title}
-          sandbox=""
-          {...SITE_STILL_FRAME_POLICY}
-          srcDoc={siteStillDocument(html)}
-          onLoad={() => settle(true)}
+          sandbox="allow-scripts"
+          referrerPolicy="no-referrer"
+          srcDoc={documentHtml}
+          onLoad={onFrameLoad}
           tabIndex={-1}
           aria-hidden
           className={SITE_STILL_FRAME_CLASS}
-          style={frameStyle}
+          style={{ ...frameStyle, colorScheme: theme }}
         />
       )}
     </div>
@@ -911,13 +948,9 @@ function useEditablePicture(workspaceId: string, item: ArtifactCatalogItem) {
     let active = true;
     let request = editablePictureCache.get(key);
     if (!request) {
-      request = Promise.resolve()
-        .then(() =>
-          client.getEditableArtifactPreview(workspaceId, item.id, {
-            replicaId: createEditableArtifactReplicaId(),
-          }),
-        )
-        .then((svg) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+      request = limitPictureRequest(() =>
+        client.getEditableArtifactPreview(workspaceId, item.id),
+      ).then((svg) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
       editablePictureCache.set(key, request);
       if (editablePictureCache.size > EDITABLE_PICTURE_CACHE_LIMIT)
         editablePictureCache.delete(editablePictureCache.keys().next().value!);
@@ -1003,7 +1036,7 @@ function ArtifactPreview({
   if (item.kind === "site" && item.versionId)
     return (
       <div className="absolute inset-0">
-        <ArtifactThumbnail placeholder={placeholder}>
+        <ArtifactThumbnail placeholder={placeholder} whileInView>
           <SiteStill workspaceId={workspaceId} item={item} placeholder={placeholder} />
         </ArtifactThumbnail>
       </div>

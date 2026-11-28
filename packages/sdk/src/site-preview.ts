@@ -5,9 +5,11 @@
  * The page's own scripts run, so apps drawn by script and styled from a CDN
  * show up, but nothing else does:
  *
- * - The document starts with `HTML_FRAME_PREVIEW_POLICY`, which blocks every
- *   call the page could make (fetch, XHR, WebSocket, beacons), frames and
- *   form submissions.
+ * - The document starts with `HTML_FRAME_PREVIEW_POLICY`, which blocks the
+ *   calls a page makes for data (fetch, XHR, WebSocket, beacons), frames and
+ *   form submissions. Public scripts, styles, fonts and images still load, as
+ *   they do when the Site is opened, and a `<meta>` refresh is removed. A
+ *   page that navigates itself away is dropped by its host.
  * - There is no Site bridge. The Opengeni client (`createOpenGeniSiteClient`)
  *   is a stand-in whose calls never settle, so an app shows its loading state
  *   instead of an error, and reaches no workspace data, tools or AI.
@@ -48,13 +50,20 @@ function previewScript(theme: "light" | "dark" | undefined): string {
     theme ? `document.documentElement.setAttribute("data-og-theme",${JSON.stringify(theme)});` : "",
     `const h={get:(t,k)=>k==="then"?()=>{}:k===Symbol.toPrimitive?()=>"":k===Symbol.iterator?function*(){}:p,apply:()=>p,construct:()=>p};`,
     `const p=new Proxy(function(){},h);`,
-    `Object.defineProperty(globalThis,"createOpenGeniSiteClient",{configurable:true,writable:true,value:()=>p});`,
+    // Fixed in place: a real client loaded anyway can't replace the stand-in.
+    `Object.defineProperty(globalThis,"createOpenGeniSiteClient",{configurable:false,get:()=>()=>p,set:()=>{}});`,
     `let done=false;`,
     `const blank=/^(transparent|rgba\\(0, 0, 0, 0\\)|rgb\\(255, 255, 255\\))$/;`,
     `const painted=()=>{try{const b=document.body;if(!b)return false;`,
-    `if((b.innerText||"").trim())return true;`,
+    // Only a loading message (an app waiting on the stand-in) isn't a picture.
+    `const t=(b.innerText||"").trim();if(t)return !/^(loading|please wait)\\W*$/i.test(t);`,
     `if(document.querySelector("img,svg,canvas,video,picture,object,embed"))return true;`,
-    `return [document.documentElement,b].some((e)=>!blank.test(getComputedStyle(e).backgroundColor));}catch{return false;}};`,
+    `if([document.documentElement,b].some((e)=>!blank.test(getComputedStyle(e).backgroundColor)))return true;`,
+    // Boxes drawn with CSS alone: sample a grid for any element with a fill.
+    `const w=innerWidth,v=innerHeight;for(let i=1;i<6;i++)for(let j=1;j<6;j++)for(const e of document.elementsFromPoint(w*i/6,v*j/6)){`,
+    `if(e===b||e===document.documentElement)break;const s=getComputedStyle(e);`,
+    `if(!blank.test(s.backgroundColor)||s.backgroundImage!=="none"||parseFloat(s.borderTopWidth)>0)return true;}`,
+    `return false;}catch{return false;}};`,
     // A page with no background of its own gets its canvas color (white, or
     // dark for a page that follows a dark theme), so its text never lands on
     // the card's backdrop. Set only now: a background on <html> would stop the
@@ -71,9 +80,12 @@ function previewScript(theme: "light" | "dark" | undefined): string {
   ].join("");
 }
 
-/** The optional `<script src="/__opengeni/site-tools/client.js"></script>` tag. */
+/** The optional `<script src="/__opengeni/site-tools/client.js"></script>` tag, with any attributes. */
 const SITE_CLIENT_SCRIPT_TAG =
-  /^<script\s+src\s*=\s*(["'])\/__opengeni\/site-tools\/client\.js\1\s*>\s*<\/script\s*>$/i;
+  /^<script\b[^>]*\bsrc\s*=\s*(["']?)[^"'\s>]*\/__opengeni\/site-tools\/client\.js(?:[?#][^"'\s>]*)?\1[\s>][\s\S]*$/i;
+
+/** A `<meta http-equiv="refresh">`, which would take the preview elsewhere. */
+const META_REFRESH = /<meta\b[^>]*\bhttp-equiv\s*=\s*(["']?)refresh\1[^>]*>/gi;
 
 /**
  * The document an artifact card renders for a Site's published HTML. The
@@ -87,10 +99,11 @@ export function sitePreviewDocument(
   // The real client would wait for a bridge that never comes; the stand-in
   // defined ahead of the page takes its place. Comments and scripts are
   // consumed whole, so examples inside them stay literal.
-  const page = resolveSiteUiStylesheet(html).replace(
-    /<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script\s*>/gi,
-    (tag) => (SITE_CLIENT_SCRIPT_TAG.test(tag) ? "" : tag),
-  );
+  const page = resolveSiteUiStylesheet(html)
+    .replace(/<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, (tag) =>
+      SITE_CLIENT_SCRIPT_TAG.test(tag) ? "" : tag,
+    )
+    .replace(META_REFRESH, "");
   return (
     `<!doctype html><meta http-equiv="Content-Security-Policy" content="${HTML_FRAME_PREVIEW_POLICY}">` +
     `<script>${previewScript(options.theme)}</script>` +
