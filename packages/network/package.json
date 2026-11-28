@@ -31,6 +31,10 @@
       "types": "./src/responses-websocket.ts",
       "default": "./src/responses-websocket.ts"
     },
+    "./stream-progress": {
+      "types": "./src/stream-progress.ts",
+      "default": "./src/stream-progress.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

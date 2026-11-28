@@ -43,13 +43,26 @@ export type CodexReportedUsage = {
   checkedAt: Date;
 };
 
-export type CodexResponseTimeoutClass = "connect" | "headers" | "idle_stream" | "whole_request";
+export type CodexResponseTimeoutClass =
+  | "connect"
+  | "headers"
+  | "idle_stream"
+  | "progress_stream"
+  | "whole_request";
 
 export type CodexResponseTimeoutPolicy = {
   /** Maximum wait for response headers, including DNS/TCP/TLS establishment. */
   headersTimeoutMs: number;
   /** Maximum silence between response-body chunks after headers arrive. */
   streamIdleTimeoutMs: number;
+  /**
+   * Maximum wait on a WebSocket response, after its first event, for the next
+   * model-progress event. Status-only events (`response.in_progress`) reset
+   * only the silence bound above, not this one. HTTP SSE responses carry their
+   * keepalive in band and keep only the silence bound. Never shorter than
+   * `streamIdleTimeoutMs`.
+   */
+  streamProgressTimeoutMs: number;
   /** Maximum wall time for one logical Responses request. */
   wholeRequestTimeoutMs: number;
   /**
