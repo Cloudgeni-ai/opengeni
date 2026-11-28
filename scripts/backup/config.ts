@@ -1,5 +1,15 @@
 import { resolve } from "node:path";
 
+/**
+ * A table whose rows are stored in key order, beside the database archive.
+ * pg_dump writes rows in physical order, which moves whenever deleted rows'
+ * space is reused, so a table with heavy insert/delete churn looks mostly new
+ * to restic every night. In key order, unchanged rows stay byte-identical.
+ * The key should lead with the columns of an existing btree index, so the rows
+ * stream from the index without sorting the whole table.
+ */
+export type OrderedTable = { table: string; key: string[] };
+export type DatabaseConfig = { name: string; service: string; orderedTables: OrderedTable[] };
 export type BackupConfig = {
   /** Restic repository, for example `s3:https://host/bucket/prefix` or `/srv/backups`. */
   repository: string;
@@ -10,7 +20,7 @@ export type BackupConfig = {
   stateDirectory: string;
   /** Snapshot host name; separates deployments that share one repository. */
   host: string;
-  databases: { name: string; service: string }[];
+  databases: DatabaseConfig[];
   rolesService?: string | undefined;
   timeZone: string;
   retention: { daily: number; weekly: number };
@@ -54,6 +64,29 @@ function count(value: unknown, fallback: number, field: string): number {
   return value;
 }
 const identifier = /^[a-zA-Z][a-zA-Z0-9_-]{0,62}$/;
+// Lower-case SQL identifiers only, so they need no quoting anywhere.
+const sqlName = /^[a-z_][a-z0-9_]{0,62}$/;
+
+function orderedTables(value: unknown): OrderedTable[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw Error("orderedTables must be a list");
+  const tables = value.map((entry: unknown) => {
+    const item = record(entry);
+    const table = text(item.table, "ordered table");
+    const parts = table.split(".");
+    if (parts.length !== 2 || !parts.every((part) => sqlName.test(part)))
+      throw Error("An ordered table must be schema.table in lower-case identifiers");
+    if (!Array.isArray(item.key) || item.key.length === 0)
+      throw Error(`Ordered table ${table} needs a key`);
+    const key = item.key.map((column: unknown) => text(column, "key column"));
+    if (!key.every((column) => sqlName.test(column)) || new Set(key).size !== key.length)
+      throw Error(`Invalid key for ${table}`);
+    return { table, key };
+  });
+  if (new Set(tables.map((t) => t.table)).size !== tables.length)
+    throw Error("Duplicate ordered table");
+  return tables;
+}
 
 export function parseConfig(value: unknown): BackupConfig {
   const input = record(value);
@@ -76,7 +109,7 @@ export function parseConfig(value: unknown): BackupConfig {
     if (!identifier.test(name) || !identifier.test(service))
       throw Error("Database and libpq service names must be simple identifiers");
     if (name === "roles") throw Error("'roles' is reserved for the roles script");
-    return { name, service };
+    return { name, service, orderedTables: orderedTables(db.orderedTables) };
   });
   if (new Set(databases.map((db) => db.name)).size !== databases.length)
     throw Error("Duplicate database name");
@@ -114,7 +147,27 @@ export function parseConfig(value: unknown): BackupConfig {
 /** The files one complete run stores, by snapshot path name. */
 export function expectedFiles(config: BackupConfig): string[] {
   return [
-    ...config.databases.map((db) => `${db.name}.dump`),
+    ...config.databases.flatMap((db) => [
+      `${db.name}.dump`,
+      ...(db.orderedTables.length > 0 ? [tablesFile(db.name)] : []),
+    ]),
+    ...(config.rolesService ? ["roles.sql"] : []),
+  ];
+}
+
+/** The key-ordered rows of a database's ordered tables, stored beside its archive. */
+export function tablesFile(database: string): string {
+  return `${database}.tables`;
+}
+
+/**
+ * Files a run may hold. A database's `.tables` file belongs to its run whenever
+ * present, even when the current config orders no tables (or did not yet when
+ * the run was stored): its archive then lacks those rows.
+ */
+function knownFiles(config: BackupConfig): string[] {
+  return [
+    ...config.databases.flatMap((db) => [`${db.name}.dump`, tablesFile(db.name)]),
     ...(config.rolesService ? ["roles.sql"] : []),
   ];
 }
@@ -136,9 +189,15 @@ export function parseEnvironment(content: string): Record<string, string> {
   return result;
 }
 
-/** Group this host's snapshots into runs. A run is complete only when every expected file carries the complete tag. */
+/**
+ * Group this host's snapshots into runs. A run is complete when every archive
+ * (and the roles script) and every other file it holds carry the complete tag.
+ * A run is tagged only after all its files are stored, so a run stored before
+ * a table was ordered stays a complete recovery point without a `.tables` file.
+ */
 export function groupRuns(snapshots: ResticSnapshot[], config: BackupConfig): Run[] {
-  const expected = expectedFiles(config);
+  const known = knownFiles(config);
+  const required = known.filter((name) => !name.endsWith(".tables"));
   const runs = new Map<string, { time: string; files: Map<string, ResticSnapshot> }>();
   for (const snapshot of snapshots) {
     if (snapshot.hostname !== config.host || !snapshot.tags?.includes(BACKUP_TAG)) continue;
@@ -146,7 +205,7 @@ export function groupRuns(snapshots: ResticSnapshot[], config: BackupConfig): Ru
       .find((tag) => tag.startsWith(RUN_TAG_PREFIX))
       ?.slice(RUN_TAG_PREFIX.length);
     const name = snapshot.paths.length === 1 ? snapshot.paths[0]!.replace(/^\//, "") : "";
-    if (!id || !expected.includes(name)) continue;
+    if (!id || !known.includes(name)) continue;
     const run = runs.get(id) ?? { time: snapshot.time, files: new Map() };
     if (Date.parse(snapshot.time) < Date.parse(run.time)) run.time = snapshot.time;
     const previous = run.files.get(name);
@@ -158,9 +217,11 @@ export function groupRuns(snapshots: ResticSnapshot[], config: BackupConfig): Ru
     .map(([id, run]) => ({
       id,
       time: run.time,
-      complete: expected.every((name) => run.files.get(name)?.tags?.includes(COMPLETE_TAG)),
+      complete:
+        required.every((name) => run.files.has(name)) &&
+        [...run.files.values()].every((snapshot) => snapshot.tags?.includes(COMPLETE_TAG)),
       files: [...run.files.entries()]
-        .sort(([a], [b]) => expected.indexOf(a) - expected.indexOf(b))
+        .sort(([a], [b]) => known.indexOf(a) - known.indexOf(b))
         .map(([name, snapshot]) => ({
           name,
           snapshot: snapshot.id,

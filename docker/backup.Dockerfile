@@ -36,7 +36,7 @@ RUN apt-get update \
 COPY --from=bun /out/bun /usr/local/bin/bun
 WORKDIR /app
 COPY scripts/backup.ts scripts/backup.ts
-COPY scripts/backup/config.ts scripts/backup/process.ts scripts/backup/runner.ts scripts/backup/
+COPY scripts/backup/config.ts scripts/backup/process.ts scripts/backup/runner.ts scripts/backup/tables.ts scripts/backup/
 RUN install -d -m 0700 -o 1000 -g 1000 /var/lib/opengeni-backup
 USER 1000:1000
 ENTRYPOINT ["bun", "/app/scripts/backup.ts"]

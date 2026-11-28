@@ -21,6 +21,16 @@ did not change since the last run are not stored or uploaded again. restic then
 compresses and encrypts what is new. How much a night adds depends on how much the
 database changed and how much its row order moved, not on its total size.
 
+`pg_dump` writes each table's rows in physical order. In a table where many rows
+are deleted and new ones reuse the freed space, that order moves throughout the
+table every day, so restic stores most of it again even when little of it is new.
+For such tables, set `orderedTables` on the database: the runner then stores the
+archive without those tables' rows, and the rows in key order in a second file,
+`<database>.tables`. Both come from one exported snapshot, held open (with the
+tables locked against schema changes) for the whole database. In key order,
+unchanged rows stay byte-identical between nights, and a night stores roughly what
+changed plus about a chunk around each place it changed.
+
 Every file of a run is a restic snapshot tagged `opengeni-backup` and
 `run=<run id>`. Once all of a run's files are stored, they are tagged `complete`
 together. Only complete runs are recovery points; a failed run removes what it
@@ -120,6 +130,38 @@ Example `config.json` (secret-free):
 `environmentFile` is optional. `host` (default `opengeni`) names this installation's
 snapshots; give each installation its own value if several share one repository.
 
+### Ordered tables
+
+```json
+{
+  "name": "opengeni",
+  "service": "application",
+  "orderedTables": [
+    {
+      "table": "public.session_content_blobs",
+      "key": ["workspace_id", "session_id", "created_at", "digest"]
+    },
+    { "table": "public.session_events", "key": ["workspace_id", "session_id", "sequence"] },
+    {
+      "table": "public.session_history_items",
+      "key": ["workspace_id", "session_id", "position"]
+    }
+  ]
+}
+```
+
+These are Opengeni's largest tables, and the ones whose rows are added per session
+and deleted a whole session at a time when its content is archived. Order a table
+only by a key that leads with the columns of an existing btree index and identifies
+each row: the rows then stream from the index, sorting at most the rows that share
+the index's leading columns. Without such an index PostgreSQL has to sort the
+whole table, which spills it to the database server's temporary disk. Names are
+`schema.table` in lower-case identifiers. Reading in index order costs the
+database more random reads than a sequential dump, so a run can take longer.
+
+Changing `orderedTables` needs no migration: each run records what it stored. Runs
+stored before a table was ordered keep their full archive and stay restorable.
+
 Set `PGSERVICEFILE` to the private service file. Create the repository once, then
 schedule `run`:
 
@@ -136,7 +178,8 @@ with a clear message. It prints one JSON line per run with each file's size and
 how many new bytes it added. `check` fails when the newest complete run is older
 than 36 hours, or when `restic check` finds the repository structure damaged.
 `verify` also reads every file of the newest run back in full and parses each
-archive with `pg_restore`; restic authenticates every chunk it reads. Monitor
+archive with `pg_restore` (and checks the structure of each `.tables` file); restic
+authenticates every chunk it reads. Monitor
 command/Job failures; the runner does not add a notification receiver or public API
 endpoint. `list` works even when a backup is stale. None of these commands require
 the application to be up.
@@ -208,7 +251,10 @@ bun run deployment:backup restore --config /etc/opengeni-backup/config.json \
 `--run` takes `latest` (the default) or a run id from `list`. Restore rejects
 configured source-service names and nonempty targets, streams the archive out of
 restic (which authenticates every chunk) and restores it in a single transaction
-with `--exit-on-error`. Object ownership, grants, RLS policies and security-definer
+with `--exit-on-error`. When the run has a `.tables` file, restore feeds one `psql`
+transaction the archive's tables and data, then the ordered rows, then the
+archive's indexes, constraints, triggers and policies; this reads the archive out
+of restic twice. Object ownership, grants, RLS policies and security-definer
 function owners are preserved; the recovery login needs permission to restore
 objects to the original roles. Missing roles fail the transaction rather than
 silently transferring ownership to that login. Let the archive create extensions in
