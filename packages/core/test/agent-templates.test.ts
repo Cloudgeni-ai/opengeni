@@ -30,6 +30,56 @@ describe("ready-made agents", () => {
     }
   });
 
+  // What each ready-made agent suggests turning on fits its job: only agents
+  // that work on pull requests start from one (their page adds no common
+  // triggers on top, see agentTriggerOffers).
+  const SUGGESTED: Record<string, { names: string[]; pullRequests: boolean }> = {
+    triage: {
+      names: [
+        "When a GitHub issue opens",
+        "When someone posts in a Slack channel",
+        "When a Linear issue is created",
+      ],
+      pullRequests: false,
+    },
+    "bug-fixer": { names: ["When an issue is labelled bug"], pullRequests: false },
+    "pr-reviewer": {
+      names: ["When a pull request opens", "Review when mentioned on a PR"],
+      pullRequests: true,
+    },
+    "cve-scanner": {
+      names: ["Every Monday morning", "When a pull request opens"],
+      pullRequests: true,
+    },
+    "incident-responder": {
+      names: ["When an alert arrives", "When someone posts in a Slack channel"],
+      pullRequests: false,
+    },
+    "dependency-updater": { names: ["Every Monday morning"], pullRequests: false },
+    "product-analyst": { names: ["Every Monday morning"], pullRequests: false },
+  };
+  const PULL_REQUEST_EVENTS = /^pull_request|^issue_comment\.created$/u;
+  for (const [key, expected] of Object.entries(SUGGESTED)) {
+    test(`${key} suggests triggers that fit its job`, () => {
+      const template = agentTemplateByKey(key);
+      expect(template?.suggestedTriggers.map((suggestion) => suggestion.name)).toEqual(
+        expected.names,
+      );
+      const events = (template?.suggestedTriggers ?? []).flatMap((suggestion) =>
+        suggestion.triggers.flatMap((trigger) => trigger.eventTypes),
+      );
+      expect(events.some((event) => PULL_REQUEST_EVENTS.test(event))).toBe(expected.pullRequests);
+    });
+  }
+
+  test("every ready-made agent has a suggested-trigger check above", () => {
+    expect(
+      agentTemplates()
+        .map((template) => template.key)
+        .sort(),
+    ).toEqual(Object.keys(SUGGESTED).sort());
+  });
+
   test("each has instructions, a merge Block and at least one suggested trigger", () => {
     for (const template of agentTemplates()) {
       expect(template.instructions.length).toBeGreaterThan(200);

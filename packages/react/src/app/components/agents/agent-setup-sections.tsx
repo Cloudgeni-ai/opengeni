@@ -291,10 +291,11 @@ export function AgentWhenItWorks({
     }
   };
   const githubConnected = githubConnectedOf(context.githubStatus?.status);
-  // Its template's suggestions and the common triggers it can use, each
-  // offered until it is set up.
+  // A ready-made agent's own suggestions; otherwise the common triggers it
+  // can use. Each is offered until it is set up.
   const offers = agentTriggerOffers({
     templateSuggestions: template?.suggestedTriggers ?? [],
+    fromTemplate: Boolean(agent.templateKey),
     usesGitHub: agentUsesGitHub(agent.toolPermissions, githubConnected),
     agentName: agent.name,
     tasks,
@@ -306,6 +307,9 @@ export function AgentWhenItWorks({
     <Section
       title="When it works"
       variant="group"
+      // The page body's rhythm (DetailSection's py-8), so the heading and Add
+      // trigger keep clear of the header above and Recent work below.
+      className="py-8"
       data-agent-when-it-works=""
       action={
         canAdd ? (
@@ -595,9 +599,29 @@ function MemoryEntryRow({
 }
 
 /** What the agent's Memory holds: each entry, editable and removable. */
+/** Memory entries shown inline; the rest are one link away in Knowledge. */
+export const AGENT_MEMORY_PREVIEW = 5;
+const AGENT_MEMORY_FETCH = 50;
+
+export function agentMemoryHref(agent: Agent, workspaceId: string): string | null {
+  const collectionId = agent.memory.collectionId;
+  return collectionId
+    ? `/workspaces/${encodeURIComponent(workspaceId)}/state?entry=${encodeURIComponent(collectionId)}&agent=${encodeURIComponent(agent.id)}`
+    : null;
+}
+
+/** The link's label: "See all N" only when the list hides some. */
+export function agentMemoryLinkText(total: number, more: boolean): string {
+  return total > AGENT_MEMORY_PREVIEW || more
+    ? `See all ${total}${more ? "+" : ""} in Knowledge`
+    : "Open in Knowledge";
+}
+
 export function AgentMemoryEntries({ agent, workspaceId }: { agent: Agent; workspaceId: string }) {
   const { client } = useAppContext();
+  const navigate = useNavigate();
   const [entries, setEntries] = useState<KnowledgeEntrySummary[] | null>(null);
+  const [more, setMore] = useState(false);
   const collectionId = agent.memory.enabled ? agent.memory.collectionId : null;
   useEffect(() => {
     if (!collectionId) {
@@ -605,23 +629,45 @@ export function AgentMemoryEntries({ agent, workspaceId }: { agent: Agent; works
       return;
     }
     let live = true;
-    client.listKnowledgeEntries(workspaceId, { groupId: collectionId, limit: 50 }).then(
-      (response) =>
-        live && setEntries(response.entries.filter((entry) => entry.id !== collectionId)),
-      () => live && setEntries([]),
-    );
+    // Lists come newest first, so the preview is the most recent Memory.
+    client
+      .listKnowledgeEntries(workspaceId, { groupId: collectionId, limit: AGENT_MEMORY_FETCH })
+      .then(
+        (response) => {
+          if (!live) return;
+          setEntries(response.entries.filter((entry) => entry.id !== collectionId));
+          setMore(Boolean(response.nextCursor));
+        },
+        () => live && setEntries([]),
+      );
     return () => {
       live = false;
     };
   }, [client, collectionId, workspaceId]);
   if (!collectionId) return null;
   if (entries === null) return <SettingRowSkeleton />;
+  const href = agentMemoryHref(agent, workspaceId);
+  const link = href ? (
+    <a
+      href={href}
+      onClick={inAppClick(() => void navigate({ href }))}
+      className="w-fit rounded-[4px] text-xs text-fg underline decoration-fg/25 underline-offset-2 hover:decoration-fg"
+      data-agent-memory=""
+    >
+      {agentMemoryLinkText(entries.length, more)}
+    </a>
+  ) : null;
   if (entries.length === 0) {
-    return <p className="m-0 text-sm text-fg-muted">Nothing remembered yet.</p>;
+    return (
+      <>
+        <p className="m-0 text-sm text-fg-muted">Nothing remembered yet.</p>
+        {link}
+      </>
+    );
   }
   return (
     <>
-      {entries.map((entry) => (
+      {entries.slice(0, AGENT_MEMORY_PREVIEW).map((entry) => (
         <MemoryEntryRow
           key={entry.id}
           entry={entry}
@@ -630,6 +676,7 @@ export function AgentMemoryEntries({ agent, workspaceId }: { agent: Agent; works
           onRemoved={(id) => setEntries((list) => list?.filter((row) => row.id !== id) ?? null)}
         />
       ))}
+      {link}
     </>
   );
 }

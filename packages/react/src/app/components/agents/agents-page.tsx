@@ -43,6 +43,7 @@ import { RelativeTime } from "../../../ui/relative-time";
 import { Section } from "../../../ui/section";
 import { SegmentedControl } from "../../../ui/segmented-control";
 import { StatusBadge } from "../../../ui/status-badge";
+import { ContentSwap, useHeldWhileLoading } from "../../../ui/content-swap";
 import { useAppContext } from "../../app-context";
 import { agentAvatar } from "../../lib/agent-avatar";
 import { duplicateAgentNames, parseAgentFile, useAgents } from "../../lib/agents";
@@ -112,6 +113,9 @@ export function AgentsPage({
   const templatesNotice = useDismissedNotice("agents.botTemplatesMoved");
   const slackNotice = useDismissedNotice("agents.slackAgentsMoved");
   const agents = state.agents;
+  // Switching All and Yours keeps the old list, dimmed, until the new one is in.
+  const listed = useHeldWhileLoading(agents, filter);
+  const listedFilter = listed.key as AgentListFilter;
 
   const open = (agent: Pick<AgentSummary, "id">) =>
     void navigate({
@@ -234,7 +238,7 @@ export function AgentsPage({
         <Notice className="mt-6">This server doesn't have agents yet.</Notice>
       ) : (
         <Section
-          title={filter === "yours" ? "Yours" : "Your agents"}
+          title={listedFilter === "yours" ? "Yours" : "Your agents"}
           variant="group"
           data-agents-list=""
           action={
@@ -247,92 +251,94 @@ export function AgentsPage({
             />
           }
         >
-          {agents === undefined ? (
-            <RowList label="Agents" variant="catalog" busy>
-              <ListRowSkeleton count={4} />
-            </RowList>
-          ) : state.error && agents.length === 0 ? (
-            <ErrorMessage
-              variant="inline"
-              title="Couldn't load agents"
-              {...apiErrorDetails(state.error)}
-              action={
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={state.reload}
-                  className="pointer-coarse:h-11"
-                >
-                  Try again
-                </Button>
-              }
-            >
-              Check your connection, then try again.
-            </ErrorMessage>
-          ) : agents.length === 0 ? (
-            filter === "yours" ? (
-              <p className="text-sm text-fg-muted">You haven't made an agent here yet.</p>
-            ) : (
-              <EmptyState
-                icon={<BotIcon />}
-                title="No agents yet"
-                description="Make one here, or from a chat with Make this an agent."
+          <ContentSwap swapKey={listed.key} stale={listed.stale}>
+            {listed.value === undefined ? (
+              <RowList label="Agents" variant="catalog" busy>
+                <ListRowSkeleton count={4} />
+              </RowList>
+            ) : state.error && listed.value.length === 0 ? (
+              <ErrorMessage
+                variant="inline"
+                title="Couldn't load agents"
+                {...apiErrorDetails(state.error)}
                 action={
-                  <Button type="button" size="sm" onClick={create}>
-                    <PlusIcon />
-                    New agent
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={state.reload}
+                    className="pointer-coarse:h-11"
+                  >
+                    Try again
                   </Button>
                 }
-              />
-            )
-          ) : (
-            <RowList label="Agents" variant="resource">
-              {agents.map((agent) => {
-                const row = agentRowFacts(agent, facts, readinessFor(agent.id));
-                return (
-                  <ListRow
-                    key={agent.id}
-                    leading={
-                      <SessionAvatar
-                        avatar={agentAvatar(agent)}
-                        name={agent.name}
-                        workspaceId={workspaceId}
-                        seed={agent.id}
-                        size="md"
-                      />
-                    }
-                    title={agent.name}
-                    // Every shared agent is in Slack, so only Only me (app only) is marked.
-                    titleAddon={
-                      agent.visibility === "private" ? (
-                        <MetaChip variant="soft">Only me</MetaChip>
-                      ) : undefined
-                    }
-                    status={
-                      row.status ? (
-                        <span data-agent-row-status={row.status.key} className="inline-flex">
-                          <StatusBadge variant="dot" tone={row.status.tone}>
-                            {row.status.label}
-                          </StatusBadge>
-                        </span>
-                      ) : undefined
-                    }
-                    meta={[
-                      <span key="starts" data-agent-row-starts="">
-                        {row.starts}
-                      </span>,
-                      ...(row.lastRun
-                        ? [<RelativeTime key="last" date={row.lastRun} prefix="Last ran" />]
-                        : []),
-                    ]}
-                    indicator="open"
-                    onOpen={() => open(agent)}
-                  />
-                );
-              })}
-            </RowList>
-          )}
+              >
+                Check your connection, then try again.
+              </ErrorMessage>
+            ) : listed.value.length === 0 ? (
+              listedFilter === "yours" ? (
+                <p className="text-sm text-fg-muted">You haven't made an agent here yet.</p>
+              ) : (
+                <EmptyState
+                  icon={<BotIcon />}
+                  title="No agents yet"
+                  description="Make one here, or from a chat with Make this an agent."
+                  action={
+                    <Button type="button" size="sm" onClick={create}>
+                      <PlusIcon />
+                      New agent
+                    </Button>
+                  }
+                />
+              )
+            ) : (
+              <RowList label="Agents" variant="resource">
+                {listed.value.map((agent) => {
+                  const row = agentRowFacts(agent, facts, readinessFor(agent.id));
+                  return (
+                    <ListRow
+                      key={agent.id}
+                      leading={
+                        <SessionAvatar
+                          avatar={agentAvatar(agent)}
+                          name={agent.name}
+                          workspaceId={workspaceId}
+                          seed={agent.id}
+                          size="md"
+                        />
+                      }
+                      title={agent.name}
+                      // Every shared agent is in Slack, so only Only me (app only) is marked.
+                      titleAddon={
+                        agent.visibility === "private" ? (
+                          <MetaChip variant="soft">Only me</MetaChip>
+                        ) : undefined
+                      }
+                      status={
+                        row.status ? (
+                          <span data-agent-row-status={row.status.key} className="inline-flex">
+                            <StatusBadge variant="dot" tone={row.status.tone}>
+                              {row.status.label}
+                            </StatusBadge>
+                          </span>
+                        ) : undefined
+                      }
+                      meta={[
+                        <span key="starts" data-agent-row-starts="">
+                          {row.starts}
+                        </span>,
+                        ...(row.lastRun
+                          ? [<RelativeTime key="last" date={row.lastRun} prefix="Last ran" />]
+                          : []),
+                      ]}
+                      indicator="open"
+                      onOpen={() => open(agent)}
+                    />
+                  );
+                })}
+              </RowList>
+            )}
+          </ContentSwap>
         </Section>
       )}
       {readyMadeSection ? (

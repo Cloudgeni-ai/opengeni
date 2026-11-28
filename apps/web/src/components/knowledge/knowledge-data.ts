@@ -53,6 +53,16 @@ export function useKnowledgeList(
     useState<KnowledgeEntryListResponse["fallbackReason"]>();
   const [retry, setRetry] = useState(0);
   const generation = useRef(0);
+  // Another request never returns the previous one's entries, so a caller
+  // holding them while the new ones load knows which request they belong to.
+  const [shownKey, setShownKey] = useState(requestKey);
+  if (shownKey !== requestKey) {
+    setShownKey(requestKey);
+    setEntries([]);
+    setCursor(null);
+    setError(null);
+    setLoading(requestKey !== null);
+  }
 
   useEffect(() => {
     const current = ++generation.current;

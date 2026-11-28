@@ -12,6 +12,7 @@ import { ListRow, ListRowSkeleton, RowList } from "../../../ui/list-row";
 import { LogoTile } from "../../../ui/logo-tile";
 import { Notice } from "../../../ui/notice";
 import { SegmentedControl } from "../../../ui/segmented-control";
+import { ContentSwap, useHeldWhileLoading } from "../../../ui/content-swap";
 import { Toolbar, ToolbarGroup, ToolbarSearch } from "../../../ui/toolbar";
 import { sessionDisplayTitle } from "../../lib/session-rename";
 import { sessionStateLabel } from "../../lib/session-rail";
@@ -106,8 +107,19 @@ export function SiteConversationsPanel({
     void load();
     return () => request.current?.abort();
   }, [load]);
-  const visibleSessions = page
-    ? [...new Map([...page.pinned, ...page.sessions].map((s) => [s.id, s])).values()]
+  // Switching Active and Archived (or the chats to allow) keeps the old list,
+  // dimmed, until the new one is in. The old page is dropped as the view
+  // changes, so it is never taken for the new view's.
+  const viewKey = `${archivedOnly ? "archived" : "active"}:${adding ? "adding" : "allowed"}`;
+  const [pageKey, setPageKey] = useState(viewKey);
+  if (pageKey !== viewKey) {
+    setPageKey(viewKey);
+    setPage(null);
+  }
+  const listed = useHeldWhileLoading(page ?? (error ? null : undefined), viewKey);
+  const shownPage = listed.value ?? null;
+  const visibleSessions = shownPage
+    ? [...new Map([...shownPage.pinned, ...shownPage.sessions].map((s) => [s.id, s])).values()]
     : [];
   const sessions = adding
     ? visibleSessions.filter(
@@ -188,66 +200,69 @@ export function SiteConversationsPanel({
           </Button>
         </ToolbarGroup>
       </Toolbar>
-      {error ? (
-        <Notice tone="failed" live="assertive">
-          Couldn’t load conversations. Try refreshing.
-        </Notice>
-      ) : busy && !page ? (
-        <RowList label="Conversations" busy>
-          <ListRowSkeleton count={3} />
-        </RowList>
-      ) : sessions.length === 0 ? (
-        <EmptyState
-          variant="inline"
-          title={
-            search
-              ? "No matching conversations."
-              : adding
-                ? "No chats you own on this page."
-                : "No conversations yet."
-          }
-        />
-      ) : (
-        <RowList label="Conversations" busy={busy}>
-          {sessions.map((session) => (
-            <ListRow
-              key={session.id}
-              leading={<LogoTile icon={<MessageSquareIcon />} name="Conversation" />}
-              title={sessionDisplayTitle(session)}
-              meta={[sessionStateLabel(session)]}
-              control={
-                canManageAccess && (adding || allowed.includes(session.id)) ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="pointer-coarse:h-11"
-                    disabled={changing !== null || (adding && allowed.includes(session.id))}
-                    aria-label={`${adding ? (allowed.includes(session.id) ? "Already allowed:" : "Allow") : "Remove access to"} ${sessionDisplayTitle(session)}`}
-                    onClick={() => void changeAccess(session.id, adding)}
-                  >
-                    {changing === session.id
-                      ? "Saving…"
-                      : adding
-                        ? allowed.includes(session.id)
-                          ? "Allowed"
-                          : "Allow chat"
-                        : "Remove access"}
-                  </Button>
-                ) : undefined
-              }
-              href={`/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(session.id)}`}
-              onOpen={(event) => {
-                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
-                event.preventDefault();
-                void navigate({
-                  to: "/workspaces/$workspaceId/sessions/$sessionId",
-                  params: { workspaceId, sessionId: session.id },
-                });
-              }}
-            />
-          ))}
-        </RowList>
-      )}
+      <ContentSwap swapKey={listed.key} stale={listed.stale}>
+        {error ? (
+          <Notice tone="failed" live="assertive">
+            Couldn’t load conversations. Try refreshing.
+          </Notice>
+        ) : listed.value === undefined ? (
+          <RowList label="Conversations" busy>
+            <ListRowSkeleton count={3} />
+          </RowList>
+        ) : sessions.length === 0 ? (
+          <EmptyState
+            variant="inline"
+            title={
+              search
+                ? "No matching conversations."
+                : adding
+                  ? "No chats you own on this page."
+                  : "No conversations yet."
+            }
+          />
+        ) : (
+          <RowList label="Conversations" busy={busy}>
+            {sessions.map((session) => (
+              <ListRow
+                key={session.id}
+                leading={<LogoTile icon={<MessageSquareIcon />} name="Conversation" />}
+                title={sessionDisplayTitle(session)}
+                meta={[sessionStateLabel(session)]}
+                control={
+                  canManageAccess && (adding || allowed.includes(session.id)) ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="pointer-coarse:h-11"
+                      disabled={changing !== null || (adding && allowed.includes(session.id))}
+                      aria-label={`${adding ? (allowed.includes(session.id) ? "Already allowed:" : "Allow") : "Remove access to"} ${sessionDisplayTitle(session)}`}
+                      onClick={() => void changeAccess(session.id, adding)}
+                    >
+                      {changing === session.id
+                        ? "Saving…"
+                        : adding
+                          ? allowed.includes(session.id)
+                            ? "Allowed"
+                            : "Allow chat"
+                          : "Remove access"}
+                    </Button>
+                  ) : undefined
+                }
+                href={`/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(session.id)}`}
+                onOpen={(event) => {
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey)
+                    return;
+                  event.preventDefault();
+                  void navigate({
+                    to: "/workspaces/$workspaceId/sessions/$sessionId",
+                    params: { workspaceId, sessionId: session.id },
+                  });
+                }}
+              />
+            ))}
+          </RowList>
+        )}
+      </ContentSwap>
       {page?.nextCursor && !error ? (
         <Button
           type="button"

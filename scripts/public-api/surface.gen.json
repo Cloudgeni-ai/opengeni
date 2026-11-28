@@ -45859,6 +45859,11 @@
       "FormField": "value",
       "FormGrid": "value"
     },
+    "@opengeni/react/ui/content-swap": {
+      "ContentSwap": "value",
+      "HeldValue": "type",
+      "useHeldWhileLoading": "value"
+    },
     "@opengeni/react/ui/context-menu": {
       "ContextMenu": "value",
       "ContextMenuContent": "value",
