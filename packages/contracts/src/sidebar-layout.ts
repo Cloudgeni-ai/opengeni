@@ -128,7 +128,7 @@ export type SidebarNavEntry = (typeof SIDEBAR_NAV_ENTRIES)[number];
 /**
  * The rail's built-in entries a person can reorder (`navOrder`, `navSetup`):
  * the hideable ones, "New session", and the folded group itself (`setup`,
- * "Setup" or "Advanced"). A newer version may add more.
+ * "More" or "Advanced"). A newer version may add more.
  */
 export const SIDEBAR_NAV_ORDER_MAX = 40;
 const NavOrderKey = /* @__PURE__ */ defineSchema(() =>

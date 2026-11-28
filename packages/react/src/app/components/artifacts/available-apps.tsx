@@ -130,7 +130,7 @@ export function AvailableApps({
     }
   };
   return (
-    <DetailSection title="Available" className="pb-0">
+    <DetailSection title="Available" className="py-0">
       <div className="og-connection-catalog" data-columns="2">
         {shown.map((template) => (
           <CapabilityCatalogRow

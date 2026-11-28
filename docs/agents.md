@@ -751,7 +751,7 @@ name no internal Skills. Each names the `team` it is for ("Engineering"); Capabi
 ### Guided setups
 
 The workspace's **Get started** page (`/workspaces/<id>/get-started`, under
-the rail's Setup group) is the front door into [Enable](#enable): an example
+the rail's More group) is the front door into [Enable](#enable): an example
 of what the selected setup produces (labelled **Example**), the three setups
 beside it, and one button that opens the selected setup on Enable, with what
 it needs underneath ("Needs GitHub"). Hovering or selecting a setup swaps the

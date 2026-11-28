@@ -1,5 +1,5 @@
 import { useRouterState } from "@tanstack/react-router";
-import { ChevronDownIcon, SlidersHorizontalIcon } from "lucide-react";
+import { ChevronDownIcon, EllipsisIcon } from "lucide-react";
 import { Fragment, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -33,7 +33,10 @@ import { useSimplifiedInterface } from "@opengeni/react/app/lib/simplified-inter
 import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
 
-/** Whether the rail's group is open, kept per interface: "Advanced" and "Setup". */
+/**
+ * Whether the rail's group is open, kept per interface: "Advanced" and "More"
+ * (still stored under its first name, setup, so saved choices carry over).
+ */
 const GROUP_EXPANDED_KEYS = {
   simplified: "opengeni.rail.advanced",
   full: "opengeni.rail.setup",
@@ -225,7 +228,7 @@ export function WorkspaceShortcutLinks({
             onClick={() => setGroupExpanded(!groupOpen)}
             className="h-8 w-full justify-start gap-2.5 rounded-md px-2.5 font-normal text-fg-label hover:text-fg pointer-coarse:h-10"
           >
-            <SlidersHorizontalIcon aria-hidden="true" className="size-4 shrink-0" />
+            <EllipsisIcon aria-hidden="true" className="size-4 shrink-0" />
             <span className="min-w-0 flex-1 truncate text-left">{group.label}</span>
             <ChevronDownIcon
               aria-hidden="true"
@@ -418,7 +421,7 @@ export function PrimaryNavExtras() {
     new_session: <RailNewSessionLink />,
     inbox: <InboxLink hiddenUnlessNeeded={hiddenEntries.inbox} />,
   };
-  // A few entries up front and the rest under Setup, so no short-screen fold.
+  // A few entries up front and the rest under More, so no short-screen fold.
   return rail.isMobile ? (
     <>
       {entries.new_session}

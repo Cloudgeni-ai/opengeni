@@ -76,6 +76,13 @@ describe("New artifact chat", () => {
     await startSession()(d, "workspace-1", { kind: "image" });
     expect(d.readyNewChat.mock.calls[0]?.[2]).toBe("Create a workspace image: ");
   });
+
+  test("calls a new Site an app, as the Apps page does", async () => {
+    const d = deps();
+    await startSession()(d, "workspace-1", { kind: "site" });
+    expect(d.readyNewChat.mock.calls[0]?.[2]).toBe("Create an app: ");
+    expect(newArtifactPrompt("site")).not.toMatch(/site/i);
+  });
 });
 
 describe("Edit with Opengeni", () => {

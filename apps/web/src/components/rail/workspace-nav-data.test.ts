@@ -75,11 +75,11 @@ describe("workspace rail destinations", () => {
 });
 
 describe("simplified interface navigation", () => {
-  test("without it every destination is listed: Agents and Apps up front, the rest under Setup", () => {
+  test("without it every destination is listed: Agents and Apps up front, the rest under More", () => {
     expect(primaryWorkspaceItems(false).map((item) => item.label)).toEqual(["Agents", "Apps"]);
-    const setup = groupedWorkspaceItems(false);
-    expect(setup.label).toBe("Setup");
-    expect(setup.items.map((item) => item.label)).toEqual([
+    const more = groupedWorkspaceItems(false);
+    expect(more.label).toBe("More");
+    expect(more.items.map((item) => item.label)).toEqual([
       "Get started",
       "Capabilities",
       "Automations",
@@ -87,8 +87,8 @@ describe("simplified interface navigation", () => {
       "Artifacts",
       "Meetings",
     ]);
-    // Nothing is left out: every destination is up front or under Setup.
-    const listed = new Set([...primaryWorkspaceItems(false), ...setup.items].map(navItemKey));
+    // Nothing is left out: every destination is up front or under More.
+    const listed = new Set([...primaryWorkspaceItems(false), ...more.items].map(navItemKey));
     for (const item of PRIMARY_WORKSPACE_ITEMS) expect(listed.has(navItemKey(item))).toBe(true);
     for (const item of WORKSPACE_CONFIG_GROUPS.flatMap((group) => group.items)) {
       expect(interfaceListsDestination(false, item.to)).toBe(true);

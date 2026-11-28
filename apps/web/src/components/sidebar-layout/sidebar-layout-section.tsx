@@ -856,7 +856,7 @@ export function SidebarLayoutSection() {
       archive,
     };
     return (
-      <nav aria-label="Workspace links" className="mt-2 grid gap-0.5 px-2" data-sidebar-layout>
+      <nav aria-label="Workspace links" className="mt-0.5 grid gap-0.5 px-2" data-sidebar-layout>
         {items.map((item) => (
           <ChildRows
             key={item.id}
@@ -900,7 +900,7 @@ export function SidebarLayoutSection() {
   return (
     <nav
       aria-label="Workspace links"
-      className="group/layout mt-2 grid gap-0.5 px-2"
+      className="group/layout mt-0.5 grid gap-0.5 px-2"
       data-sidebar-layout
     >
       {shownItems.map((item) => {

@@ -4,5 +4,7 @@ import type { ArtifactKind } from "./artifact-catalog";
 export function newArtifactPrompt(kind: ArtifactKind | "all"): string {
   return kind === "all" || kind === "file"
     ? "Create a workspace artifact: "
-    : `Create a workspace ${kind}: `;
+    : kind === "site"
+      ? "Create an app: "
+      : `Create a workspace ${kind}: `;
 }

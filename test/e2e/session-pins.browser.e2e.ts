@@ -689,7 +689,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
-  test("keeps rail shortcuts and the Setup group usable at every viewport height", async () => {
+  test("keeps rail shortcuts and the More group usable at every viewport height", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 900 },
       extraHTTPHeaders: ownerHeaders,
@@ -699,10 +699,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.goto(webBaseUrl);
       await workspaceFromPage(page);
       await page.getByRole("link", { name: "Agents", exact: true }).waitFor();
-      expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
       expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
-      // Setup is closed by default and opens only when asked.
-      const setup = page.getByRole("button", { name: "Setup", exact: true });
+      expect(await page.getByRole("button", { name: "Setup", exact: true }).count()).toBe(0);
+      // More is closed by default and opens only when asked.
+      const setup = page
+        .locator("[data-rail-scroll-viewport]")
+        .getByRole("button", { name: "More", exact: true });
       expect(await setup.getAttribute("aria-expanded")).toBe("false");
       expect(await page.getByRole("link", { name: "Capabilities", exact: true }).count()).toBe(0);
       await page.setViewportSize({ width: 1280, height: 600 });

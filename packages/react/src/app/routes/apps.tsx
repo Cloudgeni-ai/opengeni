@@ -194,6 +194,14 @@ function AppsPage({
         }
       />
       <div className="flex min-w-0 flex-col gap-8 pt-6">
+        {/* Ready-made apps first: a short list that stays in view however many apps are here. */}
+        {showAvailable ? (
+          <AvailableApps
+            workspaceId={workspaceId}
+            installed={[...status.apps.values()]}
+            onChoose={onChooseReadyMade}
+          />
+        ) : null}
         <ArtifactLibrary
           workspaceId={workspaceId}
           sessionId={fromSession}
@@ -208,7 +216,7 @@ function AppsPage({
           onLoadMore={catalog.loadMore}
           empty={{
             title: "No apps yet",
-            description: "Install a ready-made app below, or ask an agent to make one.",
+            description: "Add a ready-made app, or ask an agent to make one.",
           }}
           itemExtras={extras}
           onPin={
@@ -221,13 +229,6 @@ function AppsPage({
               : undefined
           }
         />
-        {showAvailable ? (
-          <AvailableApps
-            workspaceId={workspaceId}
-            installed={[...status.apps.values()]}
-            onChoose={onChooseReadyMade}
-          />
-        ) : null}
       </div>
       {packageActions?.element}
     </ContentPage>
