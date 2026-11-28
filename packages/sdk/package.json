@@ -244,7 +244,7 @@
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/deployment": "workspace:*",
-    "fake-indexeddb": "^6.2.5",
+    "fake-indexeddb": "^6.2.8",
     "happy-dom": "21.0.4",
     "openai": "6.47.0",
     "tsup": "^8.5.0",
