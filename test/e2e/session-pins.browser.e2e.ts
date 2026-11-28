@@ -702,15 +702,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
       expect(await page.getByRole("button", { name: "Setup", exact: true }).count()).toBe(0);
       // More is closed by default and opens only when asked.
-      const setup = page
+      const more = page
         .locator("[data-rail-scroll-viewport]")
         .getByRole("button", { name: "More", exact: true });
-      expect(await setup.getAttribute("aria-expanded")).toBe("false");
+      expect(await more.getAttribute("aria-expanded")).toBe("false");
       expect(await page.getByRole("link", { name: "Capabilities", exact: true }).count()).toBe(0);
       await page.setViewportSize({ width: 1280, height: 600 });
-      await setup.click();
+      await more.click();
       await page.getByRole("link", { name: "Capabilities", exact: true }).waitFor();
-      await setup.click();
+      await more.click();
       expect(await page.getByRole("link", { name: "Capabilities", exact: true }).count()).toBe(0);
       for (const height of [400, 300]) {
         await page.setViewportSize({ width: 1280, height });

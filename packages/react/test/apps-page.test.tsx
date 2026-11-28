@@ -51,13 +51,3 @@ describe("an installed app on the Apps page", () => {
     expect(badges(update, false)).not.toContain("Update available");
   });
 });
-
-describe("the Apps page layout", () => {
-  test("lists ready-made apps above the installed ones, so they stay in view", async () => {
-    const source = await Bun.file(new URL("../src/app/routes/apps.tsx", import.meta.url)).text();
-    const available = source.indexOf("<AvailableApps");
-    const library = source.indexOf("<ArtifactLibrary");
-    expect(available).toBeGreaterThan(-1);
-    expect(library).toBeGreaterThan(available);
-  });
-});

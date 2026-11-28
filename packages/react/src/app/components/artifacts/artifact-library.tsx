@@ -43,6 +43,7 @@ import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "../../../
 import { MetaChip } from "../../../ui/meta-chip";
 import { Notice } from "../../../ui/notice";
 import { RelativeTime } from "../../../ui/relative-time";
+import { SECTION_TITLE_CLASS } from "../../../ui/section";
 import { SegmentedControl } from "../../../ui/segmented-control";
 import { Skeleton } from "../../../ui/skeleton";
 import { StatusBadge } from "../../../ui/status-badge";
@@ -963,6 +964,8 @@ export function ArtifactLibrary({
   viewer = false,
   itemExtras,
   empty,
+  lead,
+  listTitle,
 }: {
   workspaceId: string;
   sessionId?: string | undefined;
@@ -1003,6 +1006,12 @@ export function ArtifactLibrary({
   itemExtras?: ((item: ArtifactCatalogItem) => ArtifactItemExtras | undefined) | undefined;
   /** The first-run empty state's words, when the page lists some kinds only. */
   empty?: { title: string; description: string } | undefined;
+  /**
+   * Shown under the search bar, above the list (the Apps page's Ready-made
+   * apps), so the search bar heads both. The list then gets `listTitle`.
+   */
+  lead?: ReactNode | undefined;
+  listTitle?: string | undefined;
 }) {
   const { productName } = useSimplifiedInterface();
   const [view, setView] = useState<ArtifactView>(readArtifactView);
@@ -1092,7 +1101,7 @@ export function ArtifactLibrary({
   } else if (nothingAtAll) {
     body = (
       <EmptyState
-        variant={compact ? "inline" : "page"}
+        variant={compact || lead ? "inline" : "page"}
         icon={<PanelsTopLeftIcon />}
         title={empty?.title ?? "No artifacts yet"}
         description={
@@ -1241,6 +1250,17 @@ export function ArtifactLibrary({
       </div>
       {hiddenKindsNotice ? (
         <Notice title="Apps and documents are hidden">{ARTIFACT_ACCESS_REQUIRED}</Notice>
+      ) : null}
+      {lead ? (
+        // Shown only when the lead draws something (it may have nothing to offer).
+        <div className="hidden min-w-0 flex-col gap-4 has-[>[data-library-lead]>*]:flex">
+          <div data-library-lead="" className="contents">
+            {lead}
+          </div>
+          {listTitle && !nothingAtAll ? (
+            <h2 className={cn(SECTION_TITLE_CLASS, "pt-4")}>{listTitle}</h2>
+          ) : null}
+        </div>
       ) : null}
       <div className="min-w-0">{body}</div>
       {viewing ? (
