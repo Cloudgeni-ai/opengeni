@@ -32,6 +32,8 @@ const SAFE_TYPE = /^[A-Za-z_$][\w$.]{0,99}$/u;
 // `async Promise.all`, `new Foo`, `Foo.bar [as baz]`, Firefox's `foo/bar<`.
 // No other spaces: a space-separated name is message text parsed as a frame.
 const SAFE_FUNCTION = /^(?:async |new )?[\w$.<>/-]{1,200}(?: \[as [\w$]{1,100}\])?$/u;
+// What the SDK's parser names an anonymous or top-level function.
+const UNKNOWN_FUNCTION = "?";
 const SAFE_TOKEN = /^[\w.:-]{1,100}$/u;
 // SDK mechanism names: `generic`, `onerror`, `onunhandledrejection`.
 const MECHANISM_TYPE = /^[a-z][a-z_]{0,39}$/u;
@@ -40,6 +42,15 @@ const MECHANISM_TYPE = /^[a-z][a-z_]{0,39}$/u;
 const SCRIPT_PATH = /\.(?:m?js|cjs|jsx|tsx?|wasm)$/iu;
 // Location strings that are not URLs, as engines render them.
 const PSEUDO_LOCATIONS = new Set(["<anonymous>", "native", "[native code]"]);
+// Browser extension and engine schemes; any other scheme is not a script the
+// browser ran, and its host and path may be text a message quoted.
+const SCRIPT_SCHEMES = new Set([
+  "chrome-extension",
+  "moz-extension",
+  "safari-extension",
+  "safari-web-extension",
+  "webkit-masked-url",
+]);
 /** A frame on another web origin: real third-party code, or a URL a message quoted. */
 export const EXTERNAL_LOCATION = "<external>";
 
@@ -78,9 +89,8 @@ export function safeScriptLocation(value: unknown, pageOrigin: string): string |
     if (url.origin !== pageOrigin) return EXTERNAL_LOCATION;
     return SCRIPT_PATH.test(url.pathname) ? `${url.origin}${url.pathname}` : `${url.origin}/<page>`;
   }
-  // Extension and engine schemes (`chrome-extension:`, `webkit-masked-url:`).
   const scheme = url.protocol.replace(/:$/u, "");
-  if (!/^[a-z][a-z0-9+.-]{0,40}$/u.test(scheme)) return undefined;
+  if (!SCRIPT_SCHEMES.has(scheme)) return undefined;
   const host = /^[\w.-]{0,100}$/u.test(url.host) ? url.host : "";
   return SCRIPT_PATH.test(url.pathname) && /^[\w./-]{1,300}$/u.test(url.pathname)
     ? `${scheme}://${host}${url.pathname}`
@@ -92,7 +102,13 @@ function scrubFrame(frame: unknown, pageOrigin: string): Json | null {
   // Anything that does not look engine-rendered may be message text: drop
   // the whole frame rather than keep a part of it.
   const fn = frame.function;
-  if (fn !== undefined && fn !== null && matching(fn, SAFE_FUNCTION) === undefined) return null;
+  if (
+    fn !== undefined &&
+    fn !== null &&
+    fn !== UNKNOWN_FUNCTION &&
+    matching(fn, SAFE_FUNCTION) === undefined
+  )
+    return null;
   const lineno = safeInteger(frame.lineno);
   const filename = safeScriptLocation(frame.filename, pageOrigin);
   if (lineno === undefined || filename === undefined) return null;

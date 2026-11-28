@@ -152,6 +152,14 @@ describe("PostHog exception scrubbing", () => {
                   filename: `https://${SECRET}.example/a.js`,
                   lineno: 9,
                 },
+                // Any scheme but a browser extension's is quoted text too.
+                {
+                  platform: "web:javascript",
+                  function: "?",
+                  filename: `foo://${SECRET}.example/a.js`,
+                  lineno: 1,
+                  colno: 1,
+                },
                 { platform: "web:javascript", function: "JSON.parse", filename: "<anonymous>" },
                 {
                   platform: "web:javascript",
@@ -196,6 +204,39 @@ describe("PostHog exception scrubbing", () => {
         },
       ],
     });
+  });
+
+  test("keeps anonymous frames, which the SDK names `?`", () => {
+    // Chrome `at https://…/index-a.js:1:200` and Safari `@https://…` frames:
+    // minified bundles are mostly anonymous functions, including the throw site.
+    const anonymous = [
+      {
+        platform: "web:javascript",
+        function: "?",
+        filename: `${ORIGIN}/assets/vendor-b.js`,
+        lineno: 2,
+        colno: 10,
+        in_app: true,
+      },
+      {
+        platform: "web:javascript",
+        function: "?",
+        filename: `${ORIGIN}/assets/index-a.js`,
+        lineno: 1,
+        colno: 200,
+        in_app: true,
+      },
+    ];
+    const scrubbed = scrubPosthogExceptionProperties(
+      {
+        $exception_list: [
+          { type: "TypeError", value: SECRET, stacktrace: { type: "raw", frames: anonymous } },
+        ],
+      },
+      context,
+    );
+    const list = scrubbed?.$exception_list as { stacktrace: { frames: unknown[] } }[];
+    expect(list[0]!.stacktrace.frames).toEqual(anonymous);
   });
 
   test("drops an event without a usable exception", () => {
@@ -253,6 +294,8 @@ describe("PostHog exception scrubbing", () => {
     expect(location("chrome-extension://abcdef/content.js?x=1")).toBe(
       "chrome-extension://abcdef/content.js",
     );
+    expect(location("webkit-masked-url://hidden/")).toBe("webkit-masked-url://hidden");
+    expect(location(`foo://${SECRET}/a.js`)).toBeUndefined();
     expect(location("<anonymous>")).toBe("<anonymous>");
     expect(location("native")).toBe("native");
     expect(location(SECRET)).toBeUndefined();

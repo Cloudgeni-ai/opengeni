@@ -423,13 +423,15 @@ message (`value` becomes `[redacted]`; `$exception_message` and
 exception steps, client fingerprints and any other exception property the SDK
 adds. Chrome puts the whole message into the stack and the SDK parses its
 second and later lines as frames, so a frame is kept only when it looks
-engine-rendered: an identifier-like function name or none (a name with other
-spaces drops the frame), a line number, and a recognized location. Locations on
+engine-rendered: an identifier-like function name, the SDK's `?` for an
+anonymous function, or none (a name with other spaces drops the frame), a line
+number, and a recognized location. Locations on
 the page's own origin keep the path of a script file, never a query or
 fragment; any other path, such as the page an inline script ran on, becomes
 `<origin>/<page>`. Another web origin becomes `<external>`, `data:` and `blob:`
-URLs keep only their scheme, and the only non-URL locations kept are
-`<anonymous>`, `native` and `[native code]`. PostHog groups issues from the
+URLs keep only their scheme, browser-extension schemes keep their extension ID
+and script path, any other scheme drops the frame, and the only non-URL
+locations kept are `<anonymous>`, `native` and `[native code]`. PostHog groups issues from the
 kept type and frames. A
 projection that fails drops the event. Stale lazy-chunk failures, and every
 exception after one in the same document, are left to the first-party beacon.
