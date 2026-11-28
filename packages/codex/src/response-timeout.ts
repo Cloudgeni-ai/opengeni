@@ -3,6 +3,7 @@ import {
   CODEX_RESPONSE_NO_BYTE_RETRIES,
   CODEX_RESPONSE_RETRY_BACKOFF_MS,
   CODEX_RESPONSE_STREAM_IDLE_TIMEOUT_MS,
+  CODEX_RESPONSE_STREAM_PROGRESS_TIMEOUT_MS,
   CODEX_RESPONSE_WHOLE_TIMEOUT_MS,
 } from "./constants";
 import type { CodexResponseTimeoutClass, CodexResponseTimeoutPolicy } from "./request-context";
@@ -12,6 +13,7 @@ export const CODEX_RESPONSE_TIMEOUT_ERROR_TYPE = "opengeni_codex_response_timeou
 export const DEFAULT_CODEX_RESPONSE_TIMEOUT_POLICY: CodexResponseTimeoutPolicy = Object.freeze({
   headersTimeoutMs: CODEX_RESPONSE_HEADERS_TIMEOUT_MS,
   streamIdleTimeoutMs: CODEX_RESPONSE_STREAM_IDLE_TIMEOUT_MS,
+  streamProgressTimeoutMs: CODEX_RESPONSE_STREAM_PROGRESS_TIMEOUT_MS,
   wholeRequestTimeoutMs: CODEX_RESPONSE_WHOLE_TIMEOUT_MS,
   noByteRetries: CODEX_RESPONSE_NO_BYTE_RETRIES,
   retryBackoffMs: CODEX_RESPONSE_RETRY_BACKOFF_MS,
@@ -24,14 +26,23 @@ function positiveFinite(value: number | undefined, fallback: number): number {
 export function resolveCodexResponseTimeoutPolicy(
   override: Partial<CodexResponseTimeoutPolicy> | undefined,
 ): CodexResponseTimeoutPolicy {
+  const streamIdleTimeoutMs = positiveFinite(
+    override?.streamIdleTimeoutMs,
+    DEFAULT_CODEX_RESPONSE_TIMEOUT_POLICY.streamIdleTimeoutMs,
+  );
   return {
     headersTimeoutMs: positiveFinite(
       override?.headersTimeoutMs,
       DEFAULT_CODEX_RESPONSE_TIMEOUT_POLICY.headersTimeoutMs,
     ),
-    streamIdleTimeoutMs: positiveFinite(
-      override?.streamIdleTimeoutMs,
-      DEFAULT_CODEX_RESPONSE_TIMEOUT_POLICY.streamIdleTimeoutMs,
+    streamIdleTimeoutMs,
+    // Bytes are a subset of progress: the progress bound is never shorter.
+    streamProgressTimeoutMs: Math.max(
+      streamIdleTimeoutMs,
+      positiveFinite(
+        override?.streamProgressTimeoutMs,
+        DEFAULT_CODEX_RESPONSE_TIMEOUT_POLICY.streamProgressTimeoutMs,
+      ),
     ),
     wholeRequestTimeoutMs: positiveFinite(
       override?.wholeRequestTimeoutMs,
@@ -76,6 +87,7 @@ function parseTimeoutClass(value: unknown): CodexResponseTimeoutClass | null {
   return value === "connect" ||
     value === "headers" ||
     value === "idle_stream" ||
+    value === "progress_stream" ||
     value === "whole_request"
     ? value
     : null;

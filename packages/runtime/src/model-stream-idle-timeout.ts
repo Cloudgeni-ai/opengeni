@@ -5,6 +5,7 @@ import {
   parseModelRequestTransport,
   markModelSocketFailure,
 } from "@opengeni/network/responses-websocket";
+import { SseProgressScanner } from "@opengeni/network/stream-progress";
 
 export const MODEL_STREAM_IDLE_TIMEOUT_ERROR_CODE = "opengeni_model_stream_idle_timeout";
 
@@ -83,50 +84,6 @@ export type ModelStreamIdlePolicy = {
   /** Maximum wait across keepalive-only traffic for the next model-progress event. */
   progressTimeoutMs: number;
 };
-
-const KEEPALIVE_EVENT_TYPE =
-  /^(?:keepalive|keep_alive|keep-alive|ping|heartbeat|response\.in_progress|response\.queued)$/i;
-const MAX_PENDING_LINE_CHARS = 64 * 1024;
-
-/**
- * Incremental SSE classifier: does this chunk complete at least one
- * model-progress `data:` line? SSE comments, `event:` lines, and keepalive
- * event types are not progress. Unknown JSON shapes (e.g. chat completion
- * chunks without a top-level `type`) are progress.
- */
-class SseProgressScanner {
-  private readonly decoder = new TextDecoder();
-  private pending = "";
-
-  push(chunk: Uint8Array): boolean {
-    // Linear in the chunk: split once and keep only the incomplete tail. A
-    // "\r\n" split across chunks yields one extra empty (non-progress) line.
-    const lines = (this.pending + this.decoder.decode(chunk, { stream: true })).split(/\r\n|\r|\n/);
-    this.pending = lines.pop() ?? "";
-    let progress = false;
-    for (const line of lines) {
-      if (isProgressLine(line)) {
-        progress = true;
-        break;
-      }
-    }
-    if (this.pending.length > MAX_PENDING_LINE_CHARS) {
-      // A very long single data line (large output item) is itself progress.
-      if (this.pending.startsWith("data:")) progress = true;
-      this.pending = this.pending.startsWith("data:") ? "data:" : "";
-    }
-    return progress;
-  }
-}
-
-function isProgressLine(line: string): boolean {
-  if (!line.startsWith("data:")) return false;
-  const data = line.slice(5).trim();
-  if (data.length === 0) return false;
-  if (data === "[DONE]") return true;
-  const type = /^\{\s*"type"\s*:\s*"([^"\\]{1,128})"/.exec(data)?.[1];
-  return type === undefined || !KEEPALIVE_EVENT_TYPE.test(type);
-}
 
 function withBodyIdleTimeout(
   response: Response,

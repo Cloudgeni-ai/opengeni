@@ -90,6 +90,16 @@ export const CODEX_REFRESH_FALLBACK_MS = 8 * 24 * 60 * 60 * 1000; // 8 days when
 // blind request replay.
 export const CODEX_RESPONSE_HEADERS_TIMEOUT_MS = 4 * 60_000;
 export const CODEX_RESPONSE_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+// A WebSocket response that keeps sending only status events is wedged: the
+// socket's keepalive is protocol pings, and a model that reasons silently sends
+// no messages at all. In completed WebSocket requests (late October to late
+// November 2026, every model and reasoning effort, about 289,000 requests) the
+// longest gap between model-progress events was 380 seconds (about 6.3
+// minutes), so 10 minutes leaves headroom for legitimate reasoning and still
+// recovers a wedged response long before the whole-request deadline. HTTP SSE
+// does not use this bound: its in-band keepalive during silent reasoning looks
+// like status events, and real HTTP requests have gone almost 15 minutes so.
+export const CODEX_RESPONSE_STREAM_PROGRESS_TIMEOUT_MS = 10 * 60_000;
 export const CODEX_RESPONSE_WHOLE_TIMEOUT_MS = 30 * 60_000;
 // Kept as a compatibility-shaped policy field, but automatic replay is disabled
 // until a provider-specific operation receipt can prove non-acceptance or resume

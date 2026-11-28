@@ -5,6 +5,7 @@ export default defineConfig({
     "src/index.ts",
     "src/responses-websocket.ts",
     "src/responses-replay.ts",
+    "src/stream-progress.ts",
     "src/azure-entra.ts",
   ],
   format: ["esm"],

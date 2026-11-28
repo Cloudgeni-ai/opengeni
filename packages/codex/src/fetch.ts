@@ -23,6 +23,7 @@ import {
   MODEL_SOCKET_FAILURE_HEADER,
   type ModelRequestTransport,
 } from "@opengeni/network/responses-websocket";
+import { SseProgressScanner } from "@opengeni/network/stream-progress";
 import { hasMeaningfulCodexOutput } from "./meaningful-output";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
@@ -41,6 +42,7 @@ import {
   type CodexRequestPreparationPhase,
   type CodexRequestContext,
   type CodexReportedUsage,
+  type CodexResponseTimeoutClass,
   type CodexResponseTimeoutPolicy,
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
@@ -682,32 +684,40 @@ async function observedResponse(
   }
 
   const reader = res.body.getReader();
+  const overSocket =
+    parseCodexRequestTransport(res.headers.get(CODEX_TRANSPORT_HEADER))?.kind === "websocket";
+  // A socket keeps itself alive with protocol pings, so every message on it is
+  // a response event, and status-only messages without model progress mean a
+  // wedged response. HTTP SSE must carry its keepalive in band through
+  // proxies, and long silent reasoning legitimately looks like that, so HTTP
+  // keeps only the silence bound.
+  const progress = overSocket ? new SseProgressScanner() : null;
   let terminal = false;
   let firstByte = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let progressTimer: ReturnType<typeof setTimeout> | undefined;
   let wholeTimer: ReturnType<typeof setTimeout> | undefined;
   let armIdle: () => void = () => undefined;
+  let armProgress: () => void = () => undefined;
   let abortFromOutside: (() => void) | undefined;
 
   const clearTimers = () => {
     if (idleTimer) clearTimeout(idleTimer);
+    if (progressTimer) clearTimeout(progressTimer);
     if (wholeTimer) clearTimeout(wholeTimer);
     if (abortFromOutside) externalSignal?.removeEventListener("abort", abortFromOutside);
   };
 
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      const timeOut = (klass: "idle_stream" | "whole_request") => {
+      const timeOut = (klass: "idle_stream" | "progress_stream" | "whole_request") => {
         if (terminal) return;
         terminal = true;
         clearTimers();
         const semanticPhase = semanticTerminal?.phase;
         const phase = semanticPhase ?? "timed_out";
         const error = new CodexResponseTimeoutError(klass, audit.requestId, true);
-        if (
-          parseCodexRequestTransport(res.headers.get(CODEX_TRANSPORT_HEADER))?.kind === "websocket"
-        )
-          markModelSocketFailure(error);
+        if (overSocket) markModelSocketFailure(error);
         void reader.cancel(error).catch(() => undefined);
         void emitRequestEvent(audit, {
           phase,
@@ -724,6 +734,18 @@ async function observedResponse(
       armIdle = () => {
         if (idleTimer) clearTimeout(idleTimer);
         idleTimer = setTimeout(() => timeOut("idle_stream"), audit.policy.streamIdleTimeoutMs);
+      };
+      // Every chunk proves the connection is alive; only model progress proves
+      // the generation is. A socket that keeps delivering status frames
+      // (`response.in_progress`) behind a wedged generation resets the idle
+      // bound forever, so it is bounded by progress separately.
+      armProgress = () => {
+        if (!progress) return;
+        if (progressTimer) clearTimeout(progressTimer);
+        progressTimer = setTimeout(
+          () => timeOut("progress_stream"),
+          audit.policy.streamProgressTimeoutMs,
+        );
       };
       armIdle();
       const wholeRemaining = Math.max(
@@ -783,6 +805,7 @@ async function observedResponse(
         }
         if (!firstByte) {
           firstByte = true;
+          progress?.push(chunk.value);
           // Deliver the provider byte before durable audit I/O. Audit latency
           // is not provider silence and must not manufacture an idle timeout.
           if (idleTimer) clearTimeout(idleTimer);
@@ -793,10 +816,15 @@ async function observedResponse(
             status: res.status,
             ...(requestId ? { providerRequestId: requestId } : {}),
           });
-          if (!terminal) armIdle();
+          if (!terminal) {
+            armIdle();
+            // The progress window opens with the response itself.
+            armProgress();
+          }
           return;
         }
         armIdle();
+        if (progress?.push(chunk.value)) armProgress();
         controller.enqueue(chunk.value);
       } catch (error) {
         // EOF sets terminal before awaiting the durable observer. If that
@@ -859,7 +887,7 @@ async function observedResponse(
 }
 
 function timeoutErrorResponse(info: {
-  timeoutClass: "connect" | "headers" | "idle_stream" | "whole_request";
+  timeoutClass: CodexResponseTimeoutClass;
   requestId: string;
   responseObserved: boolean;
   message: string;
