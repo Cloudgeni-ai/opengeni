@@ -337,15 +337,13 @@ export async function runSteps(
 
 /** CUA's own explanation of a refused or unconfirmed action (why it refused,
  * what to do instead), so the failure says more than that it failed. The text
- * is kept exactly as CUA wrote it: the computer driver redacts typed secrets
- * from it first and only then bounds its length. */
+ * is kept exactly as CUA wrote it. */
 function cuaFailureReason(result: ToolResult, data: Record<string, unknown>): string | null {
   const message = (entry: unknown): unknown =>
     entry !== null && typeof entry === "object"
       ? ((entry as Record<string, unknown>).message ?? (entry as Record<string, unknown>).detail)
       : undefined;
-  // Raw text, never trimmed: a typed secret can end in whitespace, and the
-  // driver can only recognize it unchanged.
+  // Raw text, kept exactly as CUA wrote it.
   const rawText = (entry: unknown): string =>
     typeof entry === "string" && entry.trim().length > 0 ? entry : "";
   const reason =

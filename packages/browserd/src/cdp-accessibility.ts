@@ -688,8 +688,9 @@ function safeValue(
   // Chromium exposes a password field's value as one mask character per
   // character typed. Report it as redacted rather than as dots. Other form
   // field values are shown, as on screen: the agent needs them to read drafts
-  // and prefilled forms and to check what it typed. Secret values the
-  // controller typed are redacted from the whole observation by the driver.
+  // and prefilled forms and to check what it typed, including values it typed
+  // from a secret reference. Only fields that standard markup marks private
+  // (see page-protection.ts) are withheld.
   if (EDITABLE_VALUE_ROLES.has(role) && /^[\u2022\u25CF*]+$/u.test(value)) {
     return { value: { redacted: true, reason: "password" } };
   }
