@@ -168,6 +168,24 @@ describe("Codex stream progress deadline", () => {
     expect(sockets[0]!.closed).toBe(true);
   });
 
+  test("status frames whose type is not their first property still do not count as progress", async () => {
+    const { error, elapsedMs } = await run((socket) =>
+      play(socket, [
+        { type: "response.created", response: { id: "resp_1", status: "in_progress" } },
+        reasoningDelta("Checking"),
+        ...Array.from({ length: 1_000 }, (_, index) => ({
+          sequence_number: index + 2,
+          response: { id: "resp_1", status: "in_progress" },
+          type: "response.in_progress",
+        })),
+      ]),
+    );
+    expect(classifyCodexResponseTimeoutError(error)).toMatchObject({
+      timeoutClass: "progress_stream",
+    });
+    expect(elapsedMs).toBeLessThan(1_000);
+  });
+
   test("true silence still fails as an idle-stream timeout", async () => {
     const { error, events, elapsedMs } = await run((socket) =>
       play(socket, [
