@@ -841,6 +841,13 @@ function SiteStillFrame({
   const onLeftRef = useRef(onLeft);
   onLeftRef.current = onLeft;
   const settledRef = useRef(false);
+  // Loads of the frame: a srcdoc page loads once, so a second load is it
+  // navigating away; a frame host frame counts only loads after its page's
+  // own (the first of those may be the page itself, so leaving is a second).
+  const loadsRef = useRef(0);
+  const onFrameLoad = (afterPage: boolean) => {
+    if (afterPage && ++loadsRef.current > 1) onLeftRef.current();
+  };
   const settle = useCallback(
     (painted: boolean, reported: boolean) => {
       if (settledRef.current) return;
@@ -850,7 +857,7 @@ function SiteStillFrame({
     },
     [releaseSlot],
   );
-  useHtmlFrameHost({
+  const frameHost = useHtmlFrameHost({
     frameRef,
     enabled: live && slotGranted && theme !== null,
     html: documentHtml,
@@ -895,6 +902,7 @@ function SiteStillFrame({
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
           src={frameHostSrc}
+          onLoad={() => onFrameLoad(frameHost.onFrameLoad())}
           tabIndex={-1}
           aria-hidden
           className={SITE_STILL_FRAME_CLASS}
@@ -908,6 +916,7 @@ function SiteStillFrame({
           sandbox="allow-scripts"
           referrerPolicy="no-referrer"
           srcDoc={documentHtml}
+          onLoad={() => onFrameLoad(true)}
           tabIndex={-1}
           aria-hidden
           className={SITE_STILL_FRAME_CLASS}

@@ -322,7 +322,8 @@ export const ArtifactThumbnail = memo(function ArtifactThumbnail({
   const capturedUri = stored ?? siteState?.uri ?? null;
   const blank = previewName !== null && blankSitePreviews.has(previewName);
   const siteKey =
-    previewName && !capturedUri && !blank && !siteState
+    // A capture that failed keeps its live page, so its page stays loaded.
+    previewName && !capturedUri && !blank && (!siteState || siteState.live)
       ? `${workspaceId}:${item.id}:${item.versionId}`
       : null;
   const html = useLoaded(siteKey, () =>

@@ -66,8 +66,8 @@ function runPreviewScript(
       backgroundImage: "none",
       borderTopWidth: "0px",
     }),
-    {},
-    { postMessage: (message: unknown) => posted.push(message) },
+    { parent: { postMessage: (message: unknown) => posted.push(message) } },
+    { postMessage: () => posted.push("replaced parent") },
     1024,
     768,
   );

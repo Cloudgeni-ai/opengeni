@@ -479,6 +479,8 @@ export class EditableArtifactAgentApplication {
         : null;
       svg = presentationPreviewSvg(metadata.slideSize, slide);
     } else {
+      // The catalog is never cut short: a workbook beyond the preview's
+      // bounds draws as an empty grid rather than failing every time.
       const workbook = (await query({
         modality: "spreadsheet",
         query: {
@@ -488,8 +490,11 @@ export class EditableArtifactAgentApplication {
             maxBytes: limits.spreadsheetMetadataBytes,
           },
         },
-      })) as Extract<SpreadsheetArtifactKernelProjection, { kind: "workbook-metadata" }>;
-      const sheet = workbook.projection.sheets[0] ?? null;
+      }).catch(() => null)) as Extract<
+        SpreadsheetArtifactKernelProjection,
+        { kind: "workbook-metadata" }
+      > | null;
+      const sheet = workbook?.projection.sheets[0] ?? null;
       const viewport = sheet
         ? (
             (await query({

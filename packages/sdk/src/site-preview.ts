@@ -53,7 +53,9 @@ function previewScript(theme: "light" | "dark" | undefined): string {
     // Fixed in place: a real client loaded anyway can't replace the stand-in.
     `Object.defineProperty(globalThis,"createOpenGeniSiteClient",{configurable:false,get:()=>()=>p,set:()=>{}});`,
     `let done=false;`,
-    `const post=(m)=>{try{const n=window.ReactNativeWebView;if(n)n.postMessage(JSON.stringify(m));else parent.postMessage(m,"*");}catch{}};`,
+    // Where to report, taken before the page runs, so it can't redirect them.
+    `const P=window.parent,N=window.ReactNativeWebView;`,
+    `const post=(m)=>{try{if(N)N.postMessage(JSON.stringify(m));else P.postMessage(m,"*");}catch{}};`,
     `const blank=/^(transparent|rgba\\(0, 0, 0, 0\\)|rgb\\(255, 255, 255\\))$/;`,
     `const painted=()=>{try{const b=document.body;if(!b)return false;`,
     // Only a loading message (an app waiting on the stand-in) isn't a picture.

@@ -371,6 +371,22 @@ test("without a frame host, a Site's card runs the same reporting preview in a s
         `<!doctype html><meta http-equiv="Content-Security-Policy" content="${HTML_FRAME_PREVIEW_POLICY}">`,
       );
       expect(srcdoc).toContain(SITE_PREVIEW_PAINTED_MESSAGE);
+      // Its own load, then a report: shown. A second load is the page navigating away.
+      Object.defineProperty(frame, "contentWindow", { value: { title: "issues" } });
+      await act(async () => {
+        frame.dispatchEvent(new Event("load"));
+        const event = new MessageEvent("message", {
+          data: { type: SITE_PREVIEW_PAINTED_MESSAGE, painted: true },
+          origin: "null",
+        });
+        Object.defineProperty(event, "source", { value: frame.contentWindow });
+        window.dispatchEvent(event);
+      });
+      expect(frame.closest(".opacity-100")).not.toBeNull();
+      await act(async () => {
+        frame.dispatchEvent(new Event("load"));
+      });
+      expect(container.querySelector('iframe[title="Preview of Issue tracker"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();
