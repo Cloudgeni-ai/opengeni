@@ -310,48 +310,52 @@ describe("editable artifact agent application", () => {
     expect(stale.svg).toContain("Launch plan");
     expect(queries).toHaveLength(4);
   });
-  test("a workbook beyond the picture's bounds draws an empty grid instead of failing", async () => {
-    const fixture = await artifactFixture({ seed: false });
-    let queries = 0;
-    const application = new EditableArtifactAgentApplication({
-      domain: fixture.service,
-      associations: { listArtifactIds: async () => [], touch: async () => {} },
-      exports: {} as EditableArtifactDurableExportService,
-      officeImports: {
-        prepare: async () => {
-          throw new Error("unused");
+  for (const bound of [
+    new RangeError("Spreadsheet workbook metadata exceeds maxSheets"),
+    new Error("[ARTIFACT_LIMIT] spreadsheet query response exceeds a safety bound"),
+  ])
+    test(`a workbook beyond the picture's bounds draws an empty grid instead of failing (${bound.name})`, async () => {
+      const fixture = await artifactFixture({ seed: false });
+      let queries = 0;
+      const application = new EditableArtifactAgentApplication({
+        domain: fixture.service,
+        associations: { listArtifactIds: async () => [], touch: async () => {} },
+        exports: {} as EditableArtifactDurableExportService,
+        officeImports: {
+          prepare: async () => {
+            throw new Error("unused");
+          },
         },
-      },
-      workspaceFiles: {
-        ensureMaterializationFile: async () => {
-          throw new Error("unused");
+        workspaceFiles: {
+          ensureMaterializationFile: async () => {
+            throw new Error("unused");
+          },
         },
-      },
-      inspector: {
-        query: async () => {
-          queries += 1;
-          throw new RangeError("Spreadsheet workbook metadata exceeds maxSheets");
+        inspector: {
+          query: async () => {
+            queries += 1;
+            throw bound;
+          },
         },
-      },
-      recordInspection: async () => "11111111-1111-4111-8111-111111111111",
+        recordInspection: async () => "11111111-1111-4111-8111-111111111111",
+      });
+      const workbook = await application.create({
+        scope,
+        actor: agentActor,
+        sessionId,
+        idempotencyKey: editableArtifactClientTransactionId("wide-workbook"),
+        modality: "spreadsheet",
+        title: "Ledger",
+      });
+      const picture = await application.preview({
+        scope,
+        actor: agentActor,
+        artifactId: workbook.id as never,
+      });
+      expect(picture.svg).toStartWith("<svg");
+      expect(picture.tag).toBe(`${workbook.stateHash}.1`);
+      expect(queries).toBe(1);
     });
-    const workbook = await application.create({
-      scope,
-      actor: agentActor,
-      sessionId,
-      idempotencyKey: editableArtifactClientTransactionId("wide-workbook"),
-      modality: "spreadsheet",
-      title: "Ledger",
-    });
-    const picture = await application.preview({
-      scope,
-      actor: agentActor,
-      artifactId: workbook.id as never,
-    });
-    expect(picture.svg).toStartWith("<svg");
-    expect(picture.tag).toBe(`${workbook.stateHash}.1`);
-    expect(queries).toBe(1);
-  });
   test("a workbook the inspector fails to read fails the picture instead of caching an empty grid", async () => {
     const fixture = await artifactFixture({ seed: false });
     const application = new EditableArtifactAgentApplication({

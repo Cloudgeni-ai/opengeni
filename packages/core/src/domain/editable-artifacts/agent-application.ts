@@ -211,20 +211,24 @@ export type EditableArtifactAgentApplicationDependencies = Readonly<{
   workspaceFiles: EditableArtifactAgentWorkspaceFilePort;
 }>;
 
-/**
- * Attempt-neutral use cases shared by direct model tools and Codemode. This is
- * not another artifact engine: every mutation terminates at EditableArtifactService.
+/*
+ * A query too large for the picture's bounds draws nothing; anything else
+ * fails. The kernel reports its bounds as `[ARTIFACT_LIMIT] …` (any error
+ * class); the contract decoders as a TypeError or RangeError that "exceeds".
  */
-/* A query too large for the picture's bounds draws nothing; anything else fails. */
 function previewBeyondBounds(error: unknown): null {
-  if (
-    (error instanceof RangeError || error instanceof TypeError) &&
-    /exceed|limit|too (large|many|big)/i.test(error.message)
-  )
+  if (!(error instanceof Error)) throw error;
+  const code = (error as Error & { code?: unknown }).code;
+  if (code === "ARTIFACT_LIMIT" || /\[ARTIFACT_LIMIT\]/.test(error.message)) return null;
+  if ((error instanceof RangeError || error instanceof TypeError) && /exceed/i.test(error.message))
     return null;
   throw error;
 }
 
+/**
+ * Attempt-neutral use cases shared by direct model tools and Codemode. This is
+ * not another artifact engine: every mutation terminates at EditableArtifactService.
+ */
 export class EditableArtifactAgentApplication {
   describeExportFormats(): string {
     return this.dependencies.exports.describeFormats();

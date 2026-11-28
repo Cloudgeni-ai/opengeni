@@ -446,8 +446,23 @@ test("a document's card shows a picture of its first page, and its glyph if ther
       )!;
       expect(broken.querySelector("img")).toBeNull();
       expect(broken.querySelector("svg")).not.toBeNull();
-    } finally {
+      // Remounting the cards doesn't redraw a picture that just failed (or one already drawn).
       await act(async () => root.unmount());
+      const again = createRoot(container);
+      await renderInRouter(again, () => (
+        <ArtifactLibrary
+          workspaceId="workspace"
+          items={documents}
+          filters={defaultArtifactFilters}
+          onFiltersChange={() => {}}
+          loading={false}
+          onRetry={() => {}}
+        />
+      ));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(requested).toHaveLength(2);
+      await act(async () => again.unmount());
+    } finally {
       container.remove();
     }
   });

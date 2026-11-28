@@ -73,13 +73,21 @@ function limitPictureRequest<T>(request: () => Promise<T>): Promise<T> {
     });
 }
 
+/* A failed load is remembered for a minute, so remounting cards doesn't redo it. */
+const FAILED_LOAD_RETRY_MS = 60_000;
+
 function cached<T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>) {
   let request = cache.get(key);
   if (!request) {
-    request = load();
-    cache.set(key, request);
+    const loading = load();
+    request = loading;
+    cache.set(key, loading);
     if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
-    request.catch(() => cache.delete(key));
+    loading.catch(() =>
+      setTimeout(() => {
+        if (cache.get(key) === loading) cache.delete(key);
+      }, FAILED_LOAD_RETRY_MS),
+    );
   }
   return request;
 }

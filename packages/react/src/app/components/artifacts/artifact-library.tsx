@@ -1006,6 +1006,8 @@ const SITE_STILL_FRAME_CLASS = "absolute top-0 left-0 origin-top-left border-0 b
  */
 const editablePictureCache = new Map<string, Promise<string>>();
 const EDITABLE_PICTURE_CACHE_LIMIT = 48;
+/* A failed picture is remembered for a minute, so remounting cards doesn't redo it. */
+const EDITABLE_PICTURE_RETRY_MS = 60_000;
 
 function useEditablePicture(workspaceId: string, item: ArtifactCatalogItem) {
   const { client, accessKeyVersion } = useAppContext();
@@ -1015,13 +1017,18 @@ function useEditablePicture(workspaceId: string, item: ArtifactCatalogItem) {
     let active = true;
     let request = editablePictureCache.get(key);
     if (!request) {
-      request = limitPictureRequest(() =>
+      const loading = limitPictureRequest(() =>
         client.getEditableArtifactPreview(workspaceId, item.id),
       ).then((svg) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
-      editablePictureCache.set(key, request);
+      request = loading;
+      editablePictureCache.set(key, loading);
       if (editablePictureCache.size > EDITABLE_PICTURE_CACHE_LIMIT)
         editablePictureCache.delete(editablePictureCache.keys().next().value!);
-      request.catch(() => editablePictureCache.delete(key));
+      loading.catch(() =>
+        setTimeout(() => {
+          if (editablePictureCache.get(key) === loading) editablePictureCache.delete(key);
+        }, EDITABLE_PICTURE_RETRY_MS),
+      );
     }
     request.then(
       (src) => active && setState({ key, src }),
