@@ -753,7 +753,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       }
       await page.setViewportSize({ width: 1280, height: 900 });
       await page.getByRole("link", { name: "Agents", exact: true }).waitFor();
-      expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
+      // The rail's one More is the group: no overflow More/Less toggle.
+      expect(
+        await page
+          .locator("[data-rail-scroll-viewport]")
+          .getByRole("button", { name: "More", exact: true })
+          .count(),
+      ).toBe(1);
       expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
     } finally {
       await context.close();
