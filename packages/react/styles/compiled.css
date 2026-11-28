@@ -16055,6 +16055,7 @@
   }
 }
 :where(.og-root).og-connection-catalog[data-layout="row"],:where(.og-root) .og-connection-catalog[data-layout="row"] {
+  position: relative;
   display: flex;
   gap: 8px;
   overflow-x: auto;

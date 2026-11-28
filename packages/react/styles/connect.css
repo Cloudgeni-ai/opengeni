@@ -163,7 +163,7 @@
 @media (min-width: 720px) { .og-connection-catalog[data-columns="2"] { grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:8px; align-items:start; } }
 /* One row that scrolls sideways (the Apps page's Ready-made): a phone shows one
    tile and the edge of the next, a wider page three and an edge. One-line descriptions. */
-.og-connection-catalog[data-layout="row"] { display:flex; gap:8px; overflow-x:auto; overscroll-behavior-x:contain; scroll-snap-type:x mandatory; scroll-padding-inline:8px; scrollbar-width:none; }
+.og-connection-catalog[data-layout="row"] { position:relative; display:flex; gap:8px; overflow-x:auto; overscroll-behavior-x:contain; scroll-snap-type:x mandatory; scroll-padding-inline:8px; scrollbar-width:none; }
 .og-connection-catalog[data-layout="row"]::-webkit-scrollbar { display:none; }
 .og-connection-catalog[data-layout="row"] > * { flex:0 0 85%; scroll-snap-align:start; }
 .og-connection-catalog[data-layout="row"] .og-capability-catalog-copy > span { -webkit-line-clamp:1; }

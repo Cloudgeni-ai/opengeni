@@ -90,7 +90,15 @@ export function useAgents(
       setAgents((current) => update(current ?? [])),
     [],
   );
-  return { agents, supported, error, reload, replace };
+  // The render that sees a new key still holds the old list: never hand it over.
+  const shownNow = shownKey === listKey;
+  return {
+    agents: shownNow ? agents : undefined,
+    supported,
+    error: shownNow ? error : null,
+    reload,
+    replace,
+  };
 }
 
 export type AgentState = {
@@ -220,7 +228,14 @@ export function useAgentChats(
             });
         }
       : null;
-  return { chats, error, loadMore, loadingMore, reload };
+  const shownNow = shownKey === listKey;
+  return {
+    chats: shownNow ? chats : undefined,
+    error: shownNow ? error : null,
+    loadMore: shownNow ? loadMore : null,
+    loadingMore,
+    reload,
+  };
 }
 
 export type AgentSlackInstallsState = {

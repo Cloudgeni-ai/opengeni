@@ -123,6 +123,19 @@ export function useKnowledgeList(
   }, [context, cursor, loading, requestKey, workspaceId]);
 
   const reload = useCallback(() => setRetry((value) => value + 1), []);
+  // The render that sees a new request still holds the old entries: never hand them over.
+  if (shownKey !== requestKey) {
+    return {
+      entries: [],
+      cursor: null,
+      loading: requestKey !== null,
+      error: null,
+      errorCause,
+      fallbackReason,
+      loadMore,
+      reload,
+    };
+  }
   return { entries, cursor, loading, error, errorCause, fallbackReason, loadMore, reload };
 }
 
