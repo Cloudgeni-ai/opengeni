@@ -1,5 +1,5 @@
 import { Writable } from "node:stream";
-import type { OrderedTable } from "./config";
+import { quoted, type OrderedTable } from "./config";
 
 /**
  * The `.tables` file is psql input: for each ordered table, a `COPY ... FROM
@@ -33,11 +33,14 @@ export function tablesScript(snapshot: string, tables: OrderedTable[]): string {
     "SELECT 'SET client_encoding = ' || quote_literal(:'encoding') || ';';",
   ];
   for (const { table, key } of tables) {
+    const name = quoted(table);
     lines.push(
       // Generated columns are not stored, as in pg_dump.
-      `SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) AS columns FROM pg_attribute WHERE attrelid = '${table}'::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = '' \\gset`,
-      `SELECT 'COPY ${table} (' || :'columns' || ') FROM stdin;';`,
-      `COPY (SELECT :columns FROM ${table} ORDER BY ${key.join(", ")}) TO STDOUT;`,
+      `SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) AS columns FROM pg_attribute WHERE attrelid = '${name}'::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = '' \\gset`,
+      `SELECT 'COPY ${name} (' || :'columns' || ') FROM stdin;';`,
+      // Only the table's own rows: inheritance children and partitions are
+      // tables of their own, whose rows stay in the archive.
+      `COPY (SELECT :columns FROM ONLY ${name} ORDER BY ${key.map(quoted).join(", ")}) TO STDOUT;`,
       "SELECT '\\.';",
     );
   }
@@ -67,11 +70,12 @@ export function tablesCheck(expected?: string[]): Writable {
       state = "between";
       return;
     }
-    const copy = /^COPY ([a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*) \(.+\) FROM stdin;$/.exec(line);
+    const copy = /^COPY "([a-z_][a-z0-9_]*)"\."([a-z_][a-z0-9_]*)" \(.+\) FROM stdin;$/.exec(line);
     if (!copy) throw Error("Unexpected line in the ordered tables stream");
-    if (expected && expected[seen.length] !== copy[1])
-      throw Error(`Unexpected ordered table ${copy[1]}`);
-    seen.push(copy[1]!);
+    const table = `${copy[1]}.${copy[2]}`;
+    if (expected && expected[seen.length] !== table)
+      throw Error(`Unexpected ordered table ${table}`);
+    seen.push(table);
     state = "rows";
   };
   const consume = (final: boolean) => {

@@ -12,6 +12,7 @@ import {
   newestComplete,
   parseEnvironment,
   retainedRuns,
+  quoted,
   tablesFile,
   type BackupConfig,
   type DatabaseConfig,
@@ -154,7 +155,7 @@ export class BackupRunner {
       [
         "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;",
         "SELECT set_config(name, '0', true) FROM pg_settings WHERE name IN ('statement_timeout', 'idle_in_transaction_session_timeout', 'transaction_timeout') \\g /dev/null",
-        `LOCK TABLE ${tables.join(", ")} IN ACCESS SHARE MODE;`,
+        `LOCK TABLE ${tables.map(quoted).join(", ")} IN ACCESS SHARE MODE;`,
         "SELECT pg_export_snapshot();",
         "",
       ].join("\n"),
@@ -167,7 +168,8 @@ export class BackupRunner {
         `${db.name}.dump`,
         this.dump(db, [
           `--snapshot=${holder.line}`,
-          ...tables.map((table) => `--exclude-table-data=${table}`),
+          // A quoted pattern names exactly this table.
+          ...tables.map((table) => `--exclude-table-data=${quoted(table)}`),
         ]),
         [{ binary: "pg_restore", args: ["--file=/dev/null"] }],
       );
