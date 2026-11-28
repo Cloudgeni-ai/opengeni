@@ -63,6 +63,12 @@ export const PR_INVENTORY_TESTS: readonly { test: string; areas: readonly string
     test: "scripts/check-migration-immutability.test.ts",
     areas: ["packages/db/drizzle/", "scripts/check-migration-immutability"],
   },
+  // Database performance budgets (docs/perf-budgets.md): every migration or
+  // query change, including migration PRs whose other units Batch defers.
+  {
+    test: "packages/db/test/perf-budgets-postgres.test.ts",
+    areas: ["packages/db/drizzle/", "packages/db/src/", "packages/db/test/perf-budgets"],
+  },
   // Judges the real 1283 migration by the real runtime-posture declarations,
   // and the CLI against a temporary git history.
   {
